@@ -69,6 +69,8 @@ The integration owner approves shared-contract changes after parallel work begin
 
 ### UI agent
 
+Screen specs, states, API bindings, and design-system decisions: [`docs/UX-UI-PLAN.md`](docs/UX-UI-PLAN.md).
+
 - Build guided intake with required-field and data-boundary messaging.
 - Show approved-software candidates, match type, score, and source row.
 - Add workflow progress and security/accessibility result views.

@@ -27,6 +27,7 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 
 - [`docs/PRD.md`](docs/PRD.md): product requirements, scope, interfaces, security constraints, and acceptance criteria.
 - [`PLAN.md`](PLAN.md): Tuesday–Thursday workstreams, gates, agent responsibilities, and definition of done.
+- [`docs/UX-UI-PLAN.md`](docs/UX-UI-PLAN.md): UX/UI specification — routes, screens, states, streaming, auth, components, and accessibility requirements.
 - [`docs/decisions/0001-aws-agentic-review-architecture.md`](docs/decisions/0001-aws-agentic-review-architecture.md): accepted architecture and tradeoffs.
 - [`AGENTS.md`](AGENTS.md): mandatory coding-agent and contributor rules.
 - [`infra/README.md`](infra/README.md): AWS configuration, deployment prerequisites, and teardown expectations.
