@@ -14,15 +14,22 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """Bedrock model/inference-profile IDs, discovered and pinned per account.
+    """Bedrock inference-profile IDs, pinned for us-west-2 and env-overridable.
 
-    Defaults are ``None`` so the local slice never assumes a specific account's
-    model access. Wednesday pins real IDs from ``bedrock list-foundation-models``.
+    Defaults are cross-region US **system-defined inference profiles** (the
+    ``us.*`` prefix routes across regions; they carry no account ID, so they are
+    safe to commit and portable across the camp's sandbox accounts). Access to
+    each was verified with a live ``bedrock-runtime.converse`` probe in us-west-2
+    on 2026-07-14. Any value is overridable via the matching ``BEDROCK_*`` env
+    var; embedding/guardrail stay ``None`` until retrieval and Guardrails land.
     """
 
-    reasoning_model_id: str | None = None
-    fallback_model_id: str | None = None
-    extraction_model_id: str | None = None
+    # Claude Sonnet 4.5 — reasoning/specialist analysis and drafting.
+    reasoning_model_id: str | None = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    # Amazon Nova Pro — capable fallback if the reasoning profile throttles.
+    fallback_model_id: str | None = "us.amazon.nova-pro-v1:0"
+    # Amazon Nova Lite — cheap structured extraction from uploaded evidence.
+    extraction_model_id: str | None = "us.amazon.nova-lite-v1:0"
     embedding_model_id: str | None = None
     guardrail_id: str | None = None
 
@@ -35,6 +42,8 @@ class AwsConfig:
     normalized_bucket: str | None = None
     cases_table: str | None = None
     audit_table: str | None = None
+    # Foundation KMS data key (ARN) used for explicit SSE-KMS on S3 puts.
+    kms_key_arn: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +54,7 @@ class AppConfig:
     model: ModelConfig = ModelConfig()
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(cls) -> AppConfig:
         app_env = os.environ.get("APP_ENV", "development")
         # Local fakes are the default until an approved AWS environment is
         # recorded (PRD open questions). Set USE_LOCAL_FAKES=false to opt in.
@@ -60,6 +69,7 @@ class AppConfig:
                 normalized_bucket=os.environ.get("NORMALIZED_BUCKET") or None,
                 cases_table=os.environ.get("CASES_TABLE") or None,
                 audit_table=os.environ.get("AUDIT_TABLE") or None,
+                kms_key_arn=os.environ.get("DATA_KEY_ARN") or None,
             ),
             model=ModelConfig(
                 reasoning_model_id=os.environ.get("BEDROCK_REASONING_MODEL_ID") or None,

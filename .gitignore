@@ -43,6 +43,13 @@ generated/
 *.tfstate.*
 cdk.out/
 *.zip
+# CDK deploy outputs and synth logs carry account IDs / resource ARNs (no
+# account IDs in source — csub-project-guardrails).
+infra/cdk-outputs.json
+infra/synth.err
+
+# Python build/install metadata
+*.egg-info/
 
 # Institutional Box source documents — never commit (AGENTS.md, PRD sec 1)
 CSUBdocs/
