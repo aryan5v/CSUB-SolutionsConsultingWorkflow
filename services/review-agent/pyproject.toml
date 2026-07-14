@@ -18,10 +18,10 @@ dev = [
     "ruff==0.6.9",
     "mypy==1.11.2",
 ]
-# Populated during Wednesday AWS integration; kept explicit and pinned.
+# AWS/LLM runtime, kept out of the dependency-free local slice. Imported lazily
+# by the Bedrock/S3/DynamoDB adapters so CI still runs on the stdlib fakes.
 aws = [
-    # "boto3==<pinned>",
-    # "langgraph==<pinned>",
+    "boto3>=1.35,<2",
 ]
 
 [tool.setuptools.packages.find]
