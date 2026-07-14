@@ -43,3 +43,10 @@ generated/
 *.tfstate.*
 cdk.out/
 *.zip
+
+# CDK deploy outputs (ephemeral resource names)
+infra/cdk-outputs.json
+infra/synth.err
+
+# Institutional Box source documents — never commit (AGENTS.md, PRD sec 1)
+CSUBdocs/
