@@ -15,6 +15,7 @@ MAX_FILE_BYTES = 1_000_000
 PATTERNS = (
     ("AWS access key", re.compile("A" + "KIA" + r"[0-9A-Z]{16}")),
     ("GitHub token", re.compile("g" + r"h[pousr]_[A-Za-z0-9_]{20,}")),
+    ("GitHub fine-grained token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
     (
         "private key",
         re.compile(
