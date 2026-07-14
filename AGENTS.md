@@ -63,3 +63,11 @@ Before handing off a change:
 - Confirm documentation matches the current implementation.
 - Confirm policy results, citations, human approval, and mock write-back satisfy the relevant PRD acceptance criteria.
 - If AWS access is required, state which account/profile/region was used and avoid including sensitive output.
+
+## Pull requests and protected branches
+
+- Work on a feature branch; direct pushes to `main` are not part of the normal workflow.
+- Run `make check` before pushing and include the results in the pull request.
+- Do not rename the `Repository checks` CI job without updating the required branch-protection context.
+- Obtain the required teammate approval and resolve review conversations before merging.
+- Keep pull-request branches current with `main`; force-pushes and branch deletion on `main` are prohibited.
