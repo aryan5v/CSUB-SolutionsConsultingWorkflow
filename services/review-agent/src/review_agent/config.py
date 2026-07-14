@@ -42,6 +42,8 @@ class AwsConfig:
     normalized_bucket: str | None = None
     cases_table: str | None = None
     audit_table: str | None = None
+    # Foundation KMS data key (ARN) used for explicit SSE-KMS on S3 puts.
+    kms_key_arn: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class AppConfig:
                 normalized_bucket=os.environ.get("NORMALIZED_BUCKET") or None,
                 cases_table=os.environ.get("CASES_TABLE") or None,
                 audit_table=os.environ.get("AUDIT_TABLE") or None,
+                kms_key_arn=os.environ.get("DATA_KEY_ARN") or None,
             ),
             model=ModelConfig(
                 reasoning_model_id=os.environ.get("BEDROCK_REASONING_MODEL_ID") or None,
