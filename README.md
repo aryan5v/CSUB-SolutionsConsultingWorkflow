@@ -15,13 +15,21 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 ├── docs/                 Product requirements and project decisions
 ├── infra/                AWS architecture and deployment notes
 ├── scripts/              Local development and validation helpers
-├── src/                  Application code (to be added after discovery)
+├── src/                  React/Vite reviewer workspace and UI surfaces
 ├── tests/                Automated tests
 ├── PLAN.md               Three-day implementation and agent workstreams
 ├── AGENTS.md             Guidance for coding agents and contributors
 ├── CLAUDE.md             Claude Code project instructions
 └── .env.example          Environment variable template
 ```
+
+The first React/Vite reviewer workspace is now under `src/`. It uses the
+Twenty record-workspace and workspace-navigation patterns documented in
+[`docs/decisions/0002-twenty-frontend-adaptation.md`](docs/decisions/0002-twenty-frontend-adaptation.md)
+and currently runs on local mock data. The shell includes review runs, vendor
+records, contact relationships, scoped evidence viewing, audit history, a
+dashboard, nested workflow pages, reviewer tasks and notes, chat, settings, and
+documentation.
 
 ## Start here
 
@@ -58,6 +66,13 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 
    ```bash
    make check
+   ```
+
+7. Start the local reviewer workspace:
+
+   ```bash
+   npm install
+   npm run dev
    ```
 
 ## Development principles

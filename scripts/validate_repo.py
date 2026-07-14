@@ -39,7 +39,7 @@ def validate_required_files(errors: list[str]) -> None:
 
 def validate_markdown_links(errors: list[str]) -> None:
     for document in ROOT.rglob("*.md"):
-        if ".git" in document.parts:
+        if any(part in document.parts for part in (".git", "node_modules", "dist", "build")):
             continue
         content = document.read_text(encoding="utf-8")
         for raw_target in MARKDOWN_LINK.findall(content):
