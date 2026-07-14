@@ -43,3 +43,6 @@ generated/
 *.tfstate.*
 cdk.out/
 *.zip
+
+# Institutional Box source documents — never commit (AGENTS.md, PRD sec 1)
+CSUBdocs/
