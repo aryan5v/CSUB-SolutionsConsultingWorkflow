@@ -6,7 +6,7 @@ This repository contains the three-day CSUB Technology Review Agent prototype fo
 
 ## Before making changes
 
-1. Read `README.md`, `CLAUDE.md`, `docs/PRD.md`, and `PLAN.md`.
+1. Read `README.md`, `CLAUDE.md`, `docs/PRD.md`, `PLAN.md`, `docs/ENGINEERING.md`, and `docs/AGENT_WORKFLOW.md`.
 2. Check the current Git status and preserve unrelated user changes.
 3. Identify whether the change is discovery/documentation, application code, infrastructure, or testing.
 4. Identify the assigned workstream: data/policy, workflow/LLM, UI, AWS/integration, or testing.
@@ -45,6 +45,17 @@ Agents must not:
 - Favor small, reviewable commits with clear messages.
 - Add source citations to machine-executable policy rules and recommendation clauses.
 - Preserve raw spreadsheet values and surface extraction warnings; never silently discard unsupported cells.
+- Follow the code ownership and workspace boundaries in `docs/ENGINEERING.md`; do not add application code to a generic root `src/` directory.
+- Use locked dependencies and deterministic commands. A new workspace must join the root `make verify` gate.
+
+## Coding-agent execution
+
+- Start from an `Agent task` issue containing objective, context, path boundaries, acceptance criteria, and verification commands.
+- Use separate branches/worktrees for independent agents and avoid overlapping shared files.
+- Give full context to coder and tester roles; preserve user constraints, raw failures, tool output, and verifier feedback.
+- A coding agent cannot be its own only tester/reviewer and cannot approve or merge its own change.
+- If the same failure repeats, stop and change strategy rather than retrying blindly.
+- Hand off changed behavior, assumptions, test evidence, security/data impact, and deferred work.
 
 ## Documentation expectations
 
@@ -58,7 +69,7 @@ Agents must not:
 
 Before handing off a change:
 
-- Run the most relevant tests or checks available.
+- Run focused tests while iterating and `make verify` before handoff.
 - Review `git diff` for secrets, unrelated edits, and accidental generated files.
 - Confirm documentation matches the current implementation.
 - Confirm policy results, citations, human approval, and mock write-back satisfy the relevant PRD acceptance criteria.
@@ -67,7 +78,8 @@ Before handing off a change:
 ## Pull requests and protected branches
 
 - Work on a feature branch; direct pushes to `main` are not part of the normal workflow.
-- Run `make check` before pushing and include the results in the pull request.
+- Run `make verify` before pushing and include the results in the pull request.
 - Do not rename the `Repository checks` CI job without updating the required branch-protection context.
+- Keep dependency review inside the required `Repository checks` job so document-only and rollout PRs cannot wait on a missing secondary context.
 - Obtain the required teammate approval and resolve review conversations before merging.
 - Keep pull-request branches current with `main`; force-pushes and branch deletion on `main` are prohibited.

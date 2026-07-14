@@ -1,0 +1,69 @@
+name: Agent task
+description: Define a bounded implementation task for Codex, Claude Code, or another coding agent.
+title: "[Agent task]: "
+labels: [agent-task]
+body:
+  - type: dropdown
+    id: workstream
+    attributes:
+      label: Workstream
+      options:
+        - Data and policy
+        - LangGraph and LLM workflow
+        - Reviewer web application
+        - Case API and ServiceNow adapter
+        - AWS infrastructure
+        - Testing and verification
+        - Documentation and developer experience
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: State one observable outcome, not a list of activities.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Required context
+      description: Link the PRD requirement, ADR, schemas, source files, and prior decisions the agent must preserve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Scope boundaries
+      description: List in-scope paths, out-of-scope paths, prohibited actions, and data restrictions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Provide behavior-level, independently verifiable criteria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification commands
+      description: Include the exact commands and expected evidence the independent verifier should run.
+      value: |
+        make verify
+    validations:
+      required: true
+
+  - type: input
+    id: owner
+    attributes:
+      label: Integration owner
+      description: Person responsible for shared contracts and final merge coordination.
+    validations:
+      required: true

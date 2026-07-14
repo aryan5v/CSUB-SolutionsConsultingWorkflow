@@ -11,14 +11,27 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_FILES = (
+    ".editorconfig",
+    ".gitattributes",
     ".github/workflows/ci.yml",
+    ".pre-commit-config.yaml",
     "AGENTS.md",
     "CLAUDE.md",
+    "CONTRIBUTING.md",
     "PLAN.md",
     "README.md",
+    "SECURITY.md",
+    "apps/reviewer-web/README.md",
+    "docs/AGENT_WORKFLOW.md",
+    "docs/ENGINEERING.md",
     "docs/PRD.md",
     "docs/decisions/0001-aws-agentic-review-architecture.md",
+    "docs/decisions/0002-engineering-foundation.md",
     "infra/README.md",
+    "packages/contracts/README.md",
+    "services/case-api/README.md",
+    "services/review-agent/README.md",
+    "tests/README.md",
 )
 REQUIRED_PRD_TERMS = (
     "medium-risk",
@@ -29,6 +42,7 @@ REQUIRED_PRD_TERMS = (
     "S3 Vectors",
 )
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+IGNORED_DIRECTORIES = {".git", ".venv", "artifacts", "build", "dist", "node_modules"}
 
 
 def validate_required_files(errors: list[str]) -> None:
@@ -39,7 +53,7 @@ def validate_required_files(errors: list[str]) -> None:
 
 def validate_markdown_links(errors: list[str]) -> None:
     for document in ROOT.rglob("*.md"):
-        if ".git" in document.parts:
+        if IGNORED_DIRECTORIES.intersection(document.parts):
             continue
         content = document.read_text(encoding="utf-8")
         for raw_target in MARKDOWN_LINK.findall(content):

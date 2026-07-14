@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Product requirements
+    url: https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/blob/main/docs/PRD.md
+    about: Confirm the relevant requirement and acceptance criteria before opening a task.
+  - name: Security report
+    url: https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/security/advisories/new
+    about: Report vulnerabilities privately rather than opening a public issue.

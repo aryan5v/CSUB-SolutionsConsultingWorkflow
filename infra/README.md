@@ -2,6 +2,8 @@
 
 The accepted architecture is recorded in [`../docs/decisions/0001-aws-agentic-review-architecture.md`](../docs/decisions/0001-aws-agentic-review-architecture.md). Infrastructure must remain configurable and reproducible; do not hard-code personal account details or credentials.
 
+This directory owns the AWS CDK TypeScript application. The first infrastructure implementation change must add a locked package manifest plus deterministic format, lint, type-check, unit-test, `cdk synth`, and `cdk diff` commands and compose its non-mutating checks into the root `make verify` gate.
+
 ## Planned services
 
 - S3 and KMS for raw sources, normalized snapshots, evidence, generated packets, and the static UI.
