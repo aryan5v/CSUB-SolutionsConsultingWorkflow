@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "review-agent"
+version = "0.1.0"
+description = "CSUB Technology Review Agent: ingestion, deterministic policy, bounded LLM orchestration, and mock ServiceNow write-back."
+requires-python = ">=3.11"
+# The Tuesday local vertical slice runs on the standard library only, so CI needs
+# no third-party runtime install. AWS/LLM runtime dependencies (boto3, langgraph)
+# are pinned in the [project.optional-dependencies] "aws" extra when Wednesday's
+# integration lands, keeping the deterministic local slice dependency-free.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.6.9",
+    "mypy==1.11.2",
+]
+# Populated during Wednesday AWS integration; kept explicit and pinned.
+aws = [
+    # "boto3==<pinned>",
+    # "langgraph==<pinned>",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["review_agent"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = false

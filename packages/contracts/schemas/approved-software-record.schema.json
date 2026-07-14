@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/approved-software-record.schema.json",
+  "title": "ApprovedSoftwareRecord",
+  "description": "Normalized row from the approved-software workbook (PRD FR-2). Original row and column values are preserved losslessly in source_row.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record_id", "canonical_name", "vendor", "source_row"],
+  "properties": {
+    "record_id": { "type": "string", "minLength": 1 },
+    "canonical_name": { "type": "string", "minLength": 1 },
+    "aliases": { "type": "array", "items": { "type": "string" } },
+    "short_name": { "type": "string" },
+    "vendor": { "type": "string" },
+    "platform": { "type": "array", "items": { "type": "string" } },
+    "audience": { "type": "string" },
+    "department": { "type": "string" },
+    "assignment": { "type": "string" },
+    "support": { "type": "string" },
+    "location": { "type": "string" },
+    "licensing": { "type": "string" },
+    "source_row": {
+      "type": "object",
+      "description": "Lossless original row: original column header -> original cell value (as string).",
+      "additionalProperties": { "type": ["string", "null"] }
+    },
+    "source_coordinates": {
+      "$ref": "https://csub.example/contracts/source-coordinates.schema.json"
+    },
+    "extraction_warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

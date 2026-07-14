@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/packet.schema.json",
+  "title": "Packet",
+  "description": "Generated review output (PRD FR-6). low_risk is a concise recommendation; medium_risk is a full editable TAAP/security packet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["packet_id", "case_id", "packet_version", "packet_type", "sections", "citations"],
+  "properties": {
+    "packet_id": { "type": "string" },
+    "case_id": { "type": "string" },
+    "packet_version": { "type": "integer", "minimum": 1 },
+    "packet_type": { "type": "string", "enum": ["low_risk", "medium_risk"] },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "title", "body", "editable"],
+        "properties": {
+          "key": { "type": "string" },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "editable": { "type": "boolean" },
+          "citations": { "type": "array", "items": { "$ref": "https://csub.example/contracts/citation.schema.json" } }
+        }
+      }
+    },
+    "recommendation_clause_ids": { "type": "array", "items": { "type": "string" } },
+    "unsupported_claims": { "type": "array", "items": { "type": "string" } },
+    "citations": { "type": "array", "items": { "$ref": "https://csub.example/contracts/citation.schema.json" } },
+    "sha256": { "type": "string", "description": "Hash of the composed packet, used for attach idempotency." }
+  }
+}

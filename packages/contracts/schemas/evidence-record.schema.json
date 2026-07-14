@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/evidence-record.schema.json",
+  "title": "EvidenceRecord",
+  "description": "Metadata for a piece of case or vendor evidence (PRD FR-4). Retrieval must not cross case, vendor, or product boundaries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["evidence_id", "case_id", "evidence_type", "source_sha256"],
+  "properties": {
+    "evidence_id": { "type": "string" },
+    "case_id": { "type": "string" },
+    "evidence_type": {
+      "type": "string",
+      "enum": ["hecvat", "soc2", "pci", "pentest", "vpat_acr", "email", "taap", "completed_review", "other"]
+    },
+    "vendor": { "type": "string" },
+    "product": { "type": "string" },
+    "authority": { "type": "string" },
+    "issued_date": { "type": ["string", "null"], "format": "date" },
+    "expires_date": { "type": ["string", "null"], "format": "date" },
+    "version": { "type": "string" },
+    "source_sha256": { "type": "string" },
+    "source_coordinates": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Expired, mismatched, incomplete, or contradictory evidence flags."
+    }
+  }
+}

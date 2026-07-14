@@ -2,7 +2,9 @@ PYTHON ?= python3
 VENV ?= .venv
 PRE_COMMIT ?= $(VENV)/bin/pre-commit
 
-.PHONY: bootstrap hooks check lint test verify agent-briefs aws-whoami
+REVIEW_AGENT ?= services/review-agent
+
+.PHONY: bootstrap hooks check lint test verify review-agent agent-briefs aws-whoami
 
 bootstrap:
 	@$(PYTHON) -m venv $(VENV)
@@ -19,12 +21,16 @@ check:
 	@$(PYTHON) scripts/scan_secrets.py --all
 
 lint:
-	@$(PYTHON) -m compileall -q scripts tests
+	@$(PYTHON) -m compileall -q scripts tests $(REVIEW_AGENT)/src $(REVIEW_AGENT)/tests
 
 test:
 	@$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-verify: check lint test
+# Deterministic, stdlib-only review-agent slice. No live AWS; joins the gate.
+review-agent:
+	@$(MAKE) -C $(REVIEW_AGENT) test
+
+verify: check lint test review-agent
 	@git diff --check
 
 agent-briefs:

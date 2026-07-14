@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/case-intake.schema.json",
+  "title": "CaseIntake",
+  "description": "Requester-provided intake for a technology review case (PRD FR-1). Uploaded and retrieved content is untrusted and validated separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "product_name",
+    "vendor_name",
+    "requester",
+    "use_case",
+    "expected_users",
+    "platform",
+    "data_classification",
+    "estimated_cost_usd"
+  ],
+  "properties": {
+    "product_name": { "type": "string", "minLength": 1 },
+    "vendor_name": { "type": "string", "minLength": 1 },
+    "requester": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "email"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "email": { "type": "string", "format": "email" },
+        "department": { "type": "string" }
+      }
+    },
+    "use_case": { "type": "string", "minLength": 1 },
+    "expected_users": { "type": "integer", "minimum": 0 },
+    "platform": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["web", "ios", "android", "windows", "macos", "linux", "other"] },
+      "minItems": 1
+    },
+    "data_classification": {
+      "type": "string",
+      "description": "CSUB data classification level for the data the product will touch.",
+      "enum": ["public", "internal", "confidential", "level1", "level2", "unknown"]
+    },
+    "integrations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named systems the product integrates with (e.g. SSO, ServiceNow)."
+    },
+    "uses_sso": { "type": "boolean" },
+    "uses_ai": { "type": "boolean" },
+    "estimated_cost_usd": { "type": "number", "minimum": 0 },
+    "accessibility_context": { "type": "string" },
+    "official_domain": {
+      "type": "string",
+      "description": "Vendor's official domain, used to scope allowlisted vendor research."
+    },
+    "classroom_or_public_use": { "type": "boolean" }
+  }
+}
