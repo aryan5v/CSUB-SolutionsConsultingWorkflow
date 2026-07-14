@@ -5,6 +5,8 @@ check:
 	@test -f AGENTS.md
 	@test -f CLAUDE.md
 	@test -f docs/PRD.md
+	@test -f PLAN.md
+	@test -f docs/decisions/0001-aws-agentic-review-architecture.md
 	@test -f infra/README.md
 	@echo "Project shell checks passed."
 

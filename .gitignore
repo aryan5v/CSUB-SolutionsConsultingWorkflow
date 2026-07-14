@@ -18,9 +18,11 @@ node_modules/
 dist/
 build/
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
 .coverage
 coverage/
 
@@ -28,6 +30,12 @@ coverage/
 *.log
 tmp/
 data/local/
+data/raw/
+data/normalized/
+data/case-evidence/
+artifacts/
+generated/
+*.parquet
 
 # Infrastructure state and generated artifacts
 .terraform/
