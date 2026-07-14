@@ -40,8 +40,17 @@ A request's overall risk = the higher of its two track ratings.
 | Risk | Trigger | Required action |
 |---|---|---|
 | Low | Single user, no PII / Level 1 data | Advisory only ("be careful, you're at risk") |
-| Medium | Department-level use, Level 2 data | Verify liability insurance + basic security requirements. **EU hosting → GDPR flag → hard stop for Procurement** |
+| Medium | Department-level use, Level 2 data | Verify liability insurance + basic security requirements |
 | High | Level 1 data OR most-of-campus OR payment cards | Insurance threshold verification + HECVAT; PCI certification if credit cards involved |
+
+### Procurement disposition
+Procurement disposition is evaluated separately from risk rating. The following triggers result in a `procurement_blocked` outcome regardless of the calculated risk tier:
+
+| Trigger | Disposition | Policy source |
+|---|---|---|
+| EU hosting detected | `procurement_blocked` | CSUB GDPR/data-residency policy (per PRD §4 FR-3 and approved decision tree) |
+
+Blocked requests cannot proceed to approval; the system must surface the block reason with policy citation and escalate to manual review.
 
 **Sponsor's automation appetite:** automate low fully (with human sign-off), medium ideally, leave high-risk to humans.
 
@@ -52,11 +61,13 @@ A request's overall risk = the higher of its two track ratings.
 2. **AI triage** — intake answers → risk classification per track + overall, triggered rules with policy citations, required-documents list, recommendation, rationale. Deterministic rules engine implements the tree; LLM explains, handles ambiguity, and drafts the rationale. The model cannot override the rubric.
 3. **Chair review queue** — recommendations with full document trail and one-click Approve. The AI recommends; the human decides. This gate is the centerpiece of the demo.
 
-**Stretch (only if core is solid by day 2):** agentic vendor-document verification — search public sources for the vendor's VPAT / SOC 2 / HECVAT (many are published; HECVATs via the Community Broker Index), extract claims, attach with citations. Demo against pre-verified vendors with cached results; live mode as bonus.
+**Approval and procurement handoff:** The prototype implements the target workflow and API design for approval decisions. `POST /requests/{id}/approve` transitions request state and persists to DynamoDB: `HumanDecision` (approve/reject/request-more-info), reviewer identity, decision timestamp, decision version, and an audit event. The demo uses manual handoff to simulate downstream procurement notification; ServiceNow write-back integration (auto-posting approval outcomes, attaching packets, updating status fields) is explicitly out of scope for this prototype and reserved for future work. Any second confirmation step or write-back verification belongs to that future ServiceNow integration phase.
+
+**Stretch (only if core is solid by day 2):** agentic vendor-document verification — research is strictly limited to the PRD's supplied official vendor domains (as recorded in case metadata), recognized standards sites (e.g., Community Broker Index for HECVATs, vendor-official accessibility statements), and explicitly allowlisted read-only tools. The demo path defaults to cached/pre-verified results; live retrieval is an optional bonus capability only. Arbitrary URL fetching and untrusted-content ingestion are explicitly excluded.
 
 **Out of scope — roadmap slide:**
 - Vendor-initiated document submission against a ticket
-- ServiceNow write-back (sponsor confirmed deferred)
+- ServiceNow write-back (sponsor confirmed deferred; see approval handoff above)
 - Requester email-drafting assistant for vendor doc requests
 - Medium-risk TAAP auto-drafting
 - Auth/SSO hardening (Cognito), production IAM posture
@@ -68,9 +79,9 @@ Requester answers plain-language intake → system classifies risk against the d
 ## 6. Architecture (AWS, camp account)
 
 - **Frontend:** static (S3 + CloudFront or Amplify) — intake form + chair queue
-- **API:** API Gateway → Lambda (Python): `POST /requests` (triage), `GET /requests` (queue), `POST /requests/{id}/approve` (human gate = status transition TRIAGED → APPROVED)
+- **API:** API Gateway → Lambda (TypeScript): `POST /requests` (triage), `GET /requests` (queue), `POST /requests/{id}/approve` (human gate = status transition TRIAGED → APPROVED)
 - **AI:** Bedrock `converse` (Claude, temp 0, strict JSON schema, pydantic-validated, retry-once); Nova fallback configured
-- **Knowledge:** policy docs + decision tree + approved-software list in S3, injected into context (corpus is small; vector RAG deliberately deferred — Bedrock Knowledge Bases on roadmap when corpus scales to thousands of vendor docs)
+- **Knowledge:** policy documents remain in KMS-encrypted S3. The Lambda execution role must hold least-privilege permissions granting KMS key access for decryption; Bedrock model invocations retrieve policy context via that secured Lambda/Bedrock path. Corpus is small; vector RAG deliberately deferred — Bedrock Knowledge Bases on roadmap when corpus scales to thousands of vendor docs.
 - **State:** DynamoDB single table, GSI on status
 - **Source-of-truth discipline:** decision tree maintained as one structured YAML/JSON artifact with per-node policy citations; both the rules engine and the LLM prompt derive from it — no drift
 - **Demo insurance:** seeded canned requests (one per risk tier) with cached model responses; demo survives Bedrock or network failure
@@ -93,6 +104,6 @@ Requester answers plain-language intake → system classifies risk against the d
 ## 9. Open Items
 
 - [ ] Receive + ingest CSUB policy links and official decision tree; diff against §3; flag drift to Chris
-- [ ] Confirm Bedrock model access (Claude) on camp account — check today
+- [ ] Confirm Bedrock model access (Claude) on camp account — Owner: [Project integration owner], Due: Tuesday, July 14, 2026 EOD
 - [ ] Sample vendor docs (HECVAT/SOC 2/VPAT) and TAAP form from sponsor for stretch goal
 - [ ] Confirm 2–3 real vendors for cached verification demo
