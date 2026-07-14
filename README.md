@@ -1,5 +1,7 @@
 # CSUB Solutions Consulting Workflow
 
+[![CI](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml/badge.svg)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml)
+
 An AWS-first, human-reviewed technology-review prototype for CSU AI Summer Camp 2026. It uses the supplied CSUB Box dataset to check approved software, apply source-linked review rules, draft low- and medium-risk outcomes, and demonstrate simulated ServiceNow write-back.
 
 ## Context
@@ -52,6 +54,11 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
    ```
 
 5. Read [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md), [`docs/PRD.md`](docs/PRD.md), [`PLAN.md`](PLAN.md), and [`infra/README.md`](infra/README.md) before implementation.
+6. Run the same repository checks required by CI:
+
+   ```bash
+   make check
+   ```
 
 ## Development principles
 
