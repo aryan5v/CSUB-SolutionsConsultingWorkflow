@@ -80,6 +80,6 @@ Before handing off a change:
 - Work on a feature branch; direct pushes to `main` are not part of the normal workflow.
 - Run `make verify` before pushing and include the results in the pull request.
 - Do not rename the `Repository checks` CI job without updating the required branch-protection context.
-- Do not rename the `Dependency review` check without updating the repository ruleset after its workflow is merged.
+- Keep dependency review inside the required `Repository checks` job so document-only and rollout PRs cannot wait on a missing secondary context.
 - Obtain the required teammate approval and resolve review conversations before merging.
 - Keep pull-request branches current with `main`; force-pushes and branch deletion on `main` are prohibited.

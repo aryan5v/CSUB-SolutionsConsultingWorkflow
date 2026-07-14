@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_FILES = (
     ".editorconfig",
     ".gitattributes",
-    ".github/workflows/dependency-review.yml",
     ".github/workflows/ci.yml",
     ".pre-commit-config.yaml",
     "AGENTS.md",
