@@ -12,6 +12,11 @@ class SecretScanTests(unittest.TestCase):
         findings = scan_secrets.findings_for_text(Path("fixture.txt"), candidate)
         self.assertEqual(findings, ["fixture.txt:1: possible AWS access key"])
 
+    def test_detects_github_pat_shape(self) -> None:
+        candidate = "github_pat_" + ("A" * 20)
+        findings = scan_secrets.findings_for_text(Path("fixture.txt"), candidate)
+        self.assertEqual(findings, ["fixture.txt:1: possible GitHub fine-grained token"])
+
     def test_ignores_normal_text(self) -> None:
         self.assertEqual(
             scan_secrets.findings_for_text(Path("fixture.txt"), "ordinary text"),
