@@ -1,31 +1,59 @@
-# AWS infrastructure notes
+# AWS infrastructure plan
 
-This directory is intentionally documentation-only until the partner problem and data boundary are known.
+The accepted architecture is recorded in [`../docs/decisions/0001-aws-agentic-review-architecture.md`](../docs/decisions/0001-aws-agentic-review-architecture.md). Infrastructure must remain configurable and reproducible; do not hard-code personal account details or credentials.
 
-## CLI conventions
+## Planned services
 
-Use an explicit profile and region once the team receives its AWS account details:
+- S3 and KMS for raw sources, normalized snapshots, evidence, generated packets, and the static UI.
+- CloudFront for UI delivery.
+- Cognito requester and reviewer groups.
+- API Gateway and TypeScript Lambdas for case and connector APIs.
+- DynamoDB for cases, normalized structured records, workflow versions, decisions, audit events, and mock ServiceNow state.
+- Bedrock models, Guardrails, Knowledge Bases, and S3 Vectors.
+- Bedrock AgentCore Runtime, Memory, and restricted Browser.
+- CloudWatch logs, metrics, alarms, and dashboards; CloudTrail for write-action auditing.
+- Secrets Manager for future connector credentials.
+
+## Required configuration
 
 ```bash
 export AWS_PROFILE=<team-profile>
 export AWS_REGION=<approved-region>
-aws sts get-caller-identity
+export APP_ENV=development
+export PROJECT_OWNER=<team-owner>
+export RESOURCE_EXPIRATION=<yyyy-mm-dd>
 ```
 
-Do not commit credentials, `.aws` files, account IDs, ARNs, or secrets. Prefer short-lived credentials and least-privilege roles. Keep resource names environment-specific and tag resources with at least project, owner, environment, and expiration metadata.
+Discover and pin model/inference-profile IDs after authentication. Keep account, region, bucket, table, knowledge-base, model, and guardrail identifiers in environment-specific configuration.
 
-## Before provisioning
+## Provisioning gate
 
-Document the following in an ADR or the PRD:
+Before creating resources, record:
 
-- Account and approved region
-- Data classification and allowed sample data
-- Services and resources to create
-- Expected cost and budget alarm
-- IAM roles and trust boundaries
-- Logging, encryption, retention, and deletion behavior
-- Teardown command or runbook
+- Approved account/profile and region.
+- Billing owner, prototype budget, and budget alarm threshold.
+- Allowed data classification and sanitized-demo boundary.
+- Resource owner and expiration date.
+- IAM roles and read/write trust boundaries.
+- Encryption, logging, retention, deletion, and backup behavior.
+- Expected cost and teardown command/runbook.
 
-## Candidate architecture
+Authenticate and verify identity without copying sensitive output into documentation:
 
-The PRD lists candidate AWS services, but no service is committed yet. Do not create cloud resources until the partner workflow, data boundary, and ownership are confirmed.
+```bash
+aws sts get-caller-identity
+aws bedrock list-foundation-models --region "$AWS_REGION"
+```
+
+## Security defaults
+
+- Block public access on data buckets; expose only the intended static UI through CloudFront.
+- Use KMS encryption, TLS, least-privilege roles, and separate ingestion/runtime/write permissions.
+- Do not log document bodies, tokens, credentials, or unnecessary sensitive content.
+- Restrict vendor browsing by domain and treat retrieved pages as untrusted.
+- Require a deterministic approved human decision before connector write permissions are used.
+- Keep the ServiceNow mock enabled by default; a future live/Serac connector requires a separate reviewed configuration and role.
+
+## Teardown
+
+The deployment implementation must provide a repeatable destroy path and document any retained buckets or tables. Before teardown, export only approved audit results, empty retained prototype data as authorized, remove secrets, verify stacks are deleted, and confirm that budget alarms and temporary identities no longer remain.
