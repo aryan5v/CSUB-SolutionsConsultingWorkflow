@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate repository
-        run: make check
+        run: make verify
 
       - name: Check pull-request whitespace
         if: github.event_name == 'pull_request'

@@ -6,9 +6,10 @@
 
 <!-- List the exact checks run and their results. -->
 
-- [ ] `make check`
+- [ ] `make verify`
 - [ ] Relevant unit, integration, or infrastructure validation
 - [ ] Documentation updated for changed requirements or behavior
+- [ ] Independent verifier reviewed the diff and reran the stated commands
 
 ## Safety and data review
 
@@ -20,3 +21,7 @@
 ## PRD impact
 
 <!-- Link the affected requirement/acceptance criterion, or explain why the PRD is unaffected. -->
+
+## Agent handoff
+
+<!-- If an agent contributed: task/issue link, owned paths, assumptions, verifier, and preserved evidence. -->
