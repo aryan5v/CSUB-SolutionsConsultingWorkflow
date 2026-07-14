@@ -17,14 +17,19 @@ Conventions in this document follow [`../AGENTS.md`](../AGENTS.md): unresolved i
 
 ## 1. Personas and jobs to be done
 
-### Requester (CSUB staff/faculty)
+**Tenancy framing:** the core customer is a **school**, not a single institution — the product is multi-school with **one school ID per account** and per-school IAM roles (Section 9). CSUB is the first and focus tenant; every screen below is written for CSUB but must render from tenant configuration (school name, policies, decision tree), never hard-coded CSUB copy. No screen may ever show another school's data.
+
+### Requester (school staff/faculty — CSUB first)
 Wants to buy software and get a fast, predictable answer. Does not know review vocabulary (HECVAT, SOC 2, Level 1 data, insurance thresholds) and must never need to. Jobs: describe the purchase in plain language, upload whatever evidence they have, see where their request stands, respond when more information is requested.
 
 ### Reviewer / Committee chair
 Overloaded; most incoming volume is low-risk routine work. Jobs: see a queue of pre-vetted recommendations with citations and a document trail, confirm non-exact software matches, edit medium-risk packets, decide (approve / reject / request info) with minimal clicks, and — after an approved decision — run the clearly labeled simulated ServiceNow write-back. The human decision is the centerpiece: the AI recommends, the human decides.
 
+### Vendor contact (external, unauthenticated)
+Receives a **school-generated, case-scoped link** by email and uses it to submit security-review documentation (HECVAT, SOC 2, VPAT, insurance certificates) for their product. Has no account, sees nothing but the one upload page for the one request, and must understand in one glance who is asking, for which product, what is needed, and by when.
+
 ### Administrator / integration owner
-Configures policy versions, connector mappings, and AWS settings **outside this UI** (configuration files/environment). The UI exposes no admin surface in the prototype; this persona is listed only so screens never imply requesters or models can change configuration.
+Configures policy versions, connector mappings, school/tenant IAM roles, and AWS settings **outside this UI** (configuration files/environment). The UI exposes no admin surface in the prototype; this persona is listed only so screens never imply requesters or models can change configuration.
 
 ## 2. Scope and build order
 
@@ -33,7 +38,9 @@ All screens below are in scope for the sprint. Build in two passes so the demo s
 | Pass | Screens | Why first/second |
 |---|---|---|
 | **P0 — demo spine (build and polish first)** | Landing, Auth, App shell + sidebar, Dashboard, Guided intake, Analysis progress (streaming), Requester case status, Review queue, Case review detail with decision bar | CLIENT-BRIEF locked scope: low-risk fast path plus one-click chair approval |
-| **P1 — full-PRD surfaces (build to "works and is honest")** | Evidence upload, Approved-software match confirmation, Medium-risk packet editor, Simulated ServiceNow write-back (preview + commit), Audit trail tab | Required by PLAN.md Tuesday UI items and PRD FR-2/FR-6/FR-7; the Thursday demo shows them |
+| **P1 — full-PRD surfaces (build to "works and is honest")** | Evidence upload, Approved-software match confirmation, Medium-risk packet editor, Simulated ServiceNow write-back (preview + commit), Audit trail tab, Vendor review link (generate + vendor upload portal) | Required by PLAN.md Tuesday UI items and PRD FR-2/FR-6/FR-7; vendor links promoted from PLAN.md stretch item 1 by product-owner direction; the Thursday demo shows them |
+
+**Scope drift note (per [`../AGENTS.md`](../AGENTS.md)):** CLIENT-BRIEF v2 listed vendor-initiated document submission as out of scope, and PLAN.md held the case-scoped vendor upload link as stretch item 1. The product owner has since pulled **school-generated vendor review links** into scope (Sections 5.15–5.16), and expanded the product framing to **multi-school tenancy** (Section 9). Both changes should be reflected back into the PRD/CLIENT-BRIEF at the next document sync and flagged to the sponsor.
 
 **Reconciling "one-click approve" with the "two-step confirmation":** these are different gates, not a contradiction. One-click approve records the `HumanDecision` (approve/reject/request-info) on a case — the CLIENT-BRIEF centerpiece. The two-step "Approve and write back" confirmation applies only to the separate, simulated ServiceNow write-back flow (PRD FR-7), which is entered **after** a recorded approval. The demo narrative can stop at the one-click decision or continue into the simulated write-back; one UI satisfies both documents.
 
@@ -45,8 +52,8 @@ All screens below are in scope for the sprint. Build in two passes so the demo s
 
 A single React/Vite/TypeScript SPA behind auth, with:
 
-- **Sidebar** (shadcn/ui `sidebar`, collapsible to icons): primary navigation, role-filtered.
-- **Top bar**: page title/breadcrumb, global `Prototype — Simulated ServiceNow` badge, user menu (name, role, sign out).
+- **Sidebar** (shadcn/ui `sidebar`, collapsible to icons): school name/logo at top (from tenant config — CSUB for the demo), primary navigation, role-filtered. **TBD:** visual treatment of the sidebar and dashboard follows the prior-project dashboard the team is supplying as design inspiration; adopt its layout/density conventions once shared, keeping the tokens in Section 7.
+- **Top bar**: page title/breadcrumb, global `Prototype — Simulated ServiceNow` badge, user menu (name, role, school, sign out).
 - **Content area**: routed page.
 - **Toaster** (sonner): global success/failure notifications.
 
@@ -59,6 +66,7 @@ A single React/Vite/TypeScript SPA behind auth, with:
 | My requests | ✓ | — | `/requests` |
 | Review queue | — | ✓ | `/review` |
 | All cases | — | ✓ | `/cases` |
+| Vendor links | — | ✓ | `/vendor-links` |
 
 ### Routes table
 
@@ -76,6 +84,8 @@ A single React/Vite/TypeScript SPA behind auth, with:
 | `/review/:id` | 5.11 Case review detail (tabs: Recommendation, Packet, Documents, Audit) | Reviewer | Yes |
 | `/review/:id/packet` | 5.12 Medium-risk packet editor (tab of 5.11) | Reviewer | Yes |
 | `/review/:id/writeback` | 5.13 Simulated ServiceNow write-back | Reviewer | Yes |
+| `/vendor-links` | 5.15 Vendor link management | Reviewer | Yes |
+| `/vendor/:token` | 5.16 Vendor upload portal | Public (token-scoped) | No |
 | `*` | 404 with link back to dashboard | Both | — |
 
 ## 4. User flows
@@ -121,6 +131,19 @@ flowchart LR
 
 Reviewer selects **Request info** with a required message → case status becomes `more info requested` → requester sees the message on the case status screen with a guided form to answer → resubmission re-enters analysis.
 
+### 4.5 Vendor security-review link
+
+```mermaid
+flowchart LR
+    CD["Case review detail"] -->|"Generate vendor link"| GL["Link dialog: docs requested, expiry, vendor email"]
+    GL --> SND["School sends link to vendor (copy or mailto)"]
+    SND --> VP["Vendor upload portal (public, token-scoped)"]
+    VP -->|"Vendor submits HECVAT / SOC 2 / VPAT"| EV["Documents attached to the case as evidence"]
+    EV --> NT["Reviewer notified; evidence analysis re-runs"]
+```
+
+The link is single-case, single-vendor, expiring, and revocable. Vendor submissions land as untrusted evidence (FR-1/FR-4) and never grant access to anything beyond the upload page.
+
 ## 5. Screen-by-screen specifications
 
 Every screen uses the canonical state treatments in Section 10 (loading skeletons, empty, error/retry) and the accessibility rules in Section 11. API paths are the PRD contract (see Section 12 for the naming reconciliation).
@@ -150,12 +173,17 @@ Every screen uses the canonical state treatments in Section 10 (loading skeleton
 
 ### 5.4 Dashboard
 
-- **Purpose:** role-aware landing after sign-in; answers "what needs my attention?"
+- **Purpose:** role-aware landing after sign-in; answers "what needs my attention?" **TBD:** layout and sidebar visual treatment follow the prior-project dashboard supplied as design inspiration once shared; the content requirements below are fixed regardless of that styling.
 - **Requester layout:** stat tiles (My open requests, Awaiting my info, Decided this week), "My recent requests" list (name, risk badge, status, updated), primary CTA "New request".
-- **Reviewer layout:** stat tiles (Awaiting review, Escalated, Blocked, Approved today), "Oldest waiting" list ordered by age, CTA "Open review queue".
-- **API:** `GET /review-queue` (reviewer); requester list from the case list endpoint — **Open question (contract gap):** the PRD interface has no `GET /cases` list or `GET /cases/{id}` read endpoint; both are needed and must be ratified at the Tuesday contract lock.
-- **States:** loading = tile + list skeletons; empty = friendly first-run card ("No requests yet — start one"); error = inline alert with Retry; partial = tiles render as each query resolves.
-- **Components:** `card`, `table`, `badge`, `skeleton`, `button`, `tabs` (if one dashboard serves both roles).
+- **Reviewer (committee) layout, top to bottom:**
+  1. **Natural-language search** (prominent, full-width `NLSearchBar`): "Ask about previous tickets — e.g., *have we reviewed Grammarly before?* or *show classroom tools approved this year*". Submits to the case-search endpoint; results render as a case list (product, vendor, risk badge, decision, date) with a plain-language answer summary above them, labeled "AI-assisted search — verify against the case record". Falls back to keyword search if the NL backend is unavailable (**Assumption** below).
+  2. **Risk breakdown tiles:** Low / Medium / High counts of open cases (each tile filters the queue on click), plus **Blocked**.
+  3. **Operational tiles:** Reviews in progress (analysis currently running), Awaiting review, **Errors** (failed analyses or failed simulated writes needing attention — clicking lists the affected cases with their retry actions).
+  4. **Key apps:** the most-requested / recently decided products (product, vendor, request count, current status) — the "what does campus keep asking for" view.
+  5. "Oldest waiting" list ordered by age; CTA "Open review queue".
+- **API:** `GET /review-queue` (reviewer tiles/lists); `GET /cases/search?q=` for natural-language search (**Open question** — new endpoint, likely Bedrock-backed over case records; lock contract Tuesday); requester list from the case list endpoint — **Open question (contract gap):** the PRD interface has no `GET /cases` list or `GET /cases/{id}` read endpoint; both are needed and must be ratified at the Tuesday contract lock.
+- **States:** loading = tile + list skeletons; empty = friendly first-run card ("No requests yet — start one"); search states = idle / searching / results / no-results ("No previous tickets match — try different words") / search-error with keyword fallback; error = inline alert with Retry; partial = tiles render as each query resolves.
+- **Components:** `card`, `table`, `badge`, `skeleton`, `button`, `input`, `tabs` (if one dashboard serves both roles), `NLSearchBar`, `StatTile`.
 
 ### 5.5 Guided intake wizard (FR-1)
 
@@ -230,7 +258,7 @@ Every screen uses the canonical state treatments in Section 10 (loading skeleton
 - **Layout:** header (product, vendor, requester, overall + per-track `RiskBadge`s, status) with a **sticky `DecisionBar`**: primary **Approve**, secondary **Request info**, destructive **Reject**. Tabs below:
   - **Recommendation** (default): AI-drafted recommendation and rationale in a card explicitly labeled "AI-drafted — the decision is yours"; **Triggered rules** list (each: rule text, risk contribution, `CitationChip` → source popover with document + coordinates per PRD Section 8); dual-track panel (accessibility and security ratings with their triggers and required actions from the decision tree); **conflicts and unsupported claims** `alert` block when present (FR-6: shown before approval).
   - **Packet** (medium-risk): the editor, 5.12.
-  - **Documents:** trail of intake answers, evidence inventory (type, vendor, product, dates, warnings — expired/mismatched flagged), match-confirmation record.
+  - **Documents:** trail of intake answers, evidence inventory (type, vendor, product, dates, warnings — expired/mismatched flagged), match-confirmation record, and a **"Request documents from vendor"** action opening the vendor-link dialog (5.15) when required documents are missing.
   - **Audit:** 5.14.
 - **Decision behaviors:** Approve → `alert-dialog` confirm → records `HumanDecision` → success view offers "Preview simulated ServiceNow update" (entry to 5.13). Request info → dialog with required message. Reject → dialog with required reason. All three post `POST /cases/{id}/review` with reviewer identity, timestamp, decision version.
   - **Blocked case:** persistent `procurement_blocked` banner (reason + citation); Approve disabled with an explanatory tooltip; only "Escalate to manual review" and Reject are enabled.
@@ -265,6 +293,25 @@ Every screen uses the canonical state treatments in Section 10 (loading skeleton
 - **API:** audit events on `GET /cases/{id}` (**TBD** contract shape).
 - **States:** loading; populated; empty (new case); error/retry.
 
+### 5.15 Vendor link management (P1)
+
+- **Purpose:** let the school request security-review documents directly from a vendor without the requester playing middleman — each school generates its own case-scoped links.
+- **Entry points:** "Request documents from vendor" action on case review detail (5.11, most common) and a `/vendor-links` management page listing all links for the school.
+- **Generate dialog (from a case):** documents requested (checklist pre-filled from the triage's required-documents list — e.g., HECVAT, SOC 2, VPAT, insurance certificate), vendor contact email, expiry (default 14 days — **TBD**), optional note to vendor. Creates a tokenized URL with Copy button and a pre-filled `mailto:` draft (the email itself is sent by the school, not the system, per PLAN.md's "manually sent" boundary).
+- **Management page:** table of links — case, vendor, documents requested, created by, expires, status (`Active` / `Used` / `Expired` / `Revoked`), submissions received; row actions: copy, revoke, regenerate.
+- **API:** `POST /cases/{id}/vendor-link`, `GET /vendor-links`, `POST /vendor-links/{id}/revoke` (**Open question** — new endpoints to lock Tuesday; token must be single-case, school-scoped, expiring, revocable).
+- **States:** dialog default/creating/created (copy state)/failure; table loading/empty ("No vendor links yet")/error; revoked confirmation (`alert-dialog` — destructive, vendor loses access).
+- **A11y:** copy button announces "Link copied"; status conveyed by text badge, not color alone.
+
+### 5.16 Vendor upload portal (public, token-scoped, P1)
+
+- **Purpose:** the page a vendor lands on. One glance answers: who is asking (school name from tenant config), for which product, what documents are needed, and by when.
+- **Layout:** minimal public shell (no sidebar, no app navigation — school name/logo header only). Request summary card ("California State University, Bakersfield is reviewing *Product X* and needs the following documents for its security review"), requested-documents checklist with plain-language explanations of each document type, per-document upload dropzones, optional message field, submit. Confirmation screen after submit ("Documents received — the review team has been notified"), with the option to add more before expiry.
+- **Security boundaries:** the token resolves to exactly one case at one school; the page reveals no requester identity, no case status, no other data. Uploads are labeled untrusted evidence (FR-1/FR-4) and go through the same evidence pipeline as 5.6. Rate-limited; file type/size validated.
+- **API:** `GET /vendor/{token}` (request summary), `POST /vendor/{token}/documents` (**Open question** — new public endpoints; reuse the FR-1 document metadata contract).
+- **States:** loading; valid link (form); **expired link** ("This link has expired — contact the person who sent it"); **revoked/invalid link** (same neutral message, no information leak); per-file uploading/failure; submitted confirmation; already-submitted revisit.
+- **A11y:** fully keyboard operable (vendors get no training); every dropzone has a file-input fallback; document explanations linked via `aria-describedby`; works without JavaScript-dependent drag-and-drop.
+
 ## 6. Component inventory
 
 ### From shadcn/ui (install via CLI)
@@ -285,6 +332,9 @@ Every screen uses the canonical state treatments in Section 10 (loading skeleton
 | `StatTile` | Dashboard metric card with skeleton variant | Value + label read as one unit |
 | `AuditTimeline` | Case event history | List semantics; expandable details are buttons |
 | `EmptyState` / `ErrorState` | Canonical Section 10 treatments | Retry is a real button; error text specific |
+| `NLSearchBar` | Natural-language ticket search with AI-assisted answer + case results (5.4) | Combobox/listbox semantics for results; answer region announced politely; "AI-assisted" label in text |
+| `VendorLinkDialog` | Generate case-scoped vendor upload link (5.15) | Copy action announces success; expiry stated in text |
+| `VendorLinkStatusBadge` | Active / Used / Expired / Revoked | Text label, not color-only |
 
 ## 7. Design system: shadcn/ui + Tailwind tokens
 
@@ -307,9 +357,18 @@ The PRD exposes `GET /cases/{id}/stream`. Every screen that shows live progress 
 - **Fallback ladder:** on `EventSource` error → auto-reconnect (browser default + jittered retry, max 3) → drop to polling `GET /cases/{id}` every 3–5 s → `StreamStatusIndicator` shows Polling. Terminal state always re-fetched from the case record (the stream is presentation, the record is truth).
 - **UX rules:** never block on the stream (page renders current state from a fetch first, stream augments); one polite live region per page announces stage transitions and terminal states; respect `prefers-reduced-motion`.
 
-## 9. Auth and session standard
+## 9. Auth, session, and multi-school tenancy
 
-- **Roles:** `requester`, `reviewer` from Cognito group claims. A single `useSession()` hook exposes `{ user, role, signIn, signOut }`; all guards depend on it (enables the 5.2 fallback swap).
+### Tenancy model
+
+- **One school ID per account.** Every user account belongs to exactly one school (`school_id` claim alongside the role claim); CSUB is the first tenant and the demo tenant. Every API call and record is school-scoped — the UI never passes or displays another school's data, and there is no school switcher.
+- **Per-school IAM roles:** each school tenant maps to its own IAM role(s) at the AWS layer so data isolation is enforced server-side (DynamoDB/S3 access scoped by tenant), not by UI filtering. The UI treats `school_id` as read-only context — it renders tenant configuration (school name/logo, policy citations, decision-tree version) but can never select or change it. **Open question:** exact IAM/partition design (role-per-school vs. policy conditions on `school_id`) belongs to the AWS workstream and the Tuesday contract lock.
+- **Tenant configuration drives copy:** school name, logo, and policy sources come from tenant config; no CSUB-specific hard-coding in components. Vendor portal (5.16) shows the requesting school's identity from the same config.
+- **Vendor tokens** (5.15/5.16) are the one intentional exception to "every call is authenticated": they are unauthenticated but single-case, single-school, expiring, and revocable — they carry the `school_id` server-side and grant access to nothing beyond the upload page.
+
+### Auth and session
+
+- **Roles:** `requester`, `reviewer` from Cognito group claims, plus the `school_id` tenant claim. A single `useSession()` hook exposes `{ user, role, school, signIn, signOut }`; all guards depend on it (enables the 5.2 fallback swap).
 - **Route guards:** unauthenticated → landing (preserving `returnTo`); wrong role → 403 screen. Sidebar items are role-filtered so dead ends are rare, but guards are authoritative — never rely on hidden nav for authorization.
 - **API sessions:** bearer token on every call; 401 → one silent refresh attempt → session-expired flow. The UI never stores tokens in `localStorage` beyond what the OIDC library requires (**TBD:** exact auth library at contract lock).
 - **Honesty rule:** if the role-switcher fallback ships, every page shows a persistent "Prototype sign-in — not authentication" notice next to the simulated badge.
@@ -365,10 +424,15 @@ Adopt the **PRD `/cases/*` contract** (PRD is the product source of truth; PLAN.
 | `POST /cases/{id}/servicenow/preview` | 5.13 Write-back step 1 |
 | `POST /cases/{id}/servicenow/commit` | 5.13 Write-back step 2 |
 | `GET /cases/{id}` *(contract gap)* | 5.4, 5.8 (polling), 5.9, 5.11, 5.14 |
+| `GET /cases/search?q=` *(new — NL ticket search)* | 5.4 Dashboard search |
+| `POST /cases/{id}/vendor-link`, `GET /vendor-links`, `POST /vendor-links/{id}/revoke` *(new)* | 5.11 action, 5.15 Vendor link management |
+| `GET /vendor/{token}`, `POST /vendor/{token}/documents` *(new — public, token-scoped)* | 5.16 Vendor upload portal |
+
+All endpoints except the vendor-token pair are authenticated and school-scoped (`school_id` from the session claim, enforced server-side per Section 9).
 
 ## 13. Out of scope and roadmap
 
-Not designed or built in the sprint (per [`../CLIENT-BRIEF.md`](../CLIENT-BRIEF.md) and PRD non-goals): real ServiceNow write-back and its verification UI; vendor-initiated document submission; requester email-drafting assistant; reviewer metrics dashboard (stretch item 4 — the 5.4 dashboard's stat tiles are its natural home if the stretch gate opens); admin configuration UI; dark mode; mobile-optimized layouts (the app must remain usable at narrow widths, but tablet/desktop is the design target); production SSO hardening.
+Not designed or built in the sprint (per [`../CLIENT-BRIEF.md`](../CLIENT-BRIEF.md) and PRD non-goals): real ServiceNow write-back and its verification UI; automated vendor email sending (links are generated in-app but sent manually by the school, per PLAN.md); requester email-drafting assistant; reviewer metrics dashboard (stretch item 4 — the 5.4 dashboard's stat tiles are its natural home if the stretch gate opens); school self-serve onboarding and admin configuration UI (tenants are provisioned by the integration owner); a school switcher (one school per account by design); dark mode; mobile-optimized layouts (the app must remain usable at narrow widths, but tablet/desktop is the design target); production SSO hardening.
 
 ## 14. Risks, assumptions, and open questions
 
@@ -379,6 +443,11 @@ Not designed or built in the sprint (per [`../CLIENT-BRIEF.md`](../CLIENT-BRIEF.
 - **Assumption:** Cognito Hosted UI is available by the Wednesday deploy; otherwise the labeled role-switcher fallback ships (Section 5.2) behind the same `useSession()` interface.
 - **Assumption:** `GET /cases/{id}/stream` is SSE-compatible through the chosen API front door; polling fallback makes this non-blocking.
 - **Assumption:** one-click approve still records a complete `HumanDecision` (reviewer identity, timestamp, decision version, audit event) — "one click" describes effort, not a shortcut around the audit trail.
+- **Open question:** vendor-link contract — token format, default expiry (designed default 14 days), revocation semantics, and the public `GET /vendor/{token}` / `POST /vendor/{token}/documents` endpoints (lock Tuesday with the AWS workstream; rate limiting and file validation are server-side requirements).
+- **Open question:** natural-language ticket search backend — `GET /cases/search?q=` implementation (Bedrock over case records vs. simple keyword first); UI ships with a keyword fallback either way.
+- **Open question:** per-school IAM design (role-per-school vs. `school_id` policy conditions) — AWS workstream; the UI only consumes the `school_id` session claim.
+- **Assumption:** single-tenant demo — only the CSUB tenant is provisioned for Thursday; multi-school is expressed through tenant configuration and school-scoped contracts, not by demoing two schools.
+- **TBD:** prior-project dashboard design inspiration — the team is supplying a dashboard/sidebar design from a previous project; adopt its layout, density, and navigation conventions for 5.3/5.4 once shared, keeping this document's tokens, states, and a11y rules authoritative.
 - **TBD:** official CSUB brand palette/logo (neutral placeholder ships); exact threshold wording in intake helper text (pending official policy documents — the UI shows citations and never invents thresholds).
 - **Risk:** the medium-risk packet editor (5.12) is the largest surface; pre-agreed fallback is read-only packet + functional decision bar so the Tuesday gate ("one low and one medium case run locally") still passes.
 - **Risk:** shadcn components are copied code — an unstyled-by-us component can silently regress contrast or labels; the Section 11 axe gate is the backstop.
