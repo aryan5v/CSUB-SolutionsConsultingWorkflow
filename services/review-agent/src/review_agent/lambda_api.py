@@ -28,7 +28,9 @@ from urllib.parse import parse_qs
 
 from .adapters.model import DeterministicModelClient
 from .adapters.servicenow import MockServiceNowConnector, _Record
-from .api import LocalApiError, LocalReviewApi, _CaseRecord
+from .adapters.storage import StorageClient
+from .api import LocalApiError, LocalReviewApi, _CaseRecord, _default_evidence_storage
+from .config import AppConfig
 from .audit.log import AuditLog, InMemoryAuditSink
 from .contracts.audit import ActorType, AuditEvent
 from .contracts.case import CaseIntake, DataClassification, Requester
@@ -613,13 +615,17 @@ def snapshot_api(api: LocalReviewApi, *, workspace_id: str) -> dict[str, Any]:
 
 
 def restore_api(
-    snapshot: dict[str, Any], catalog_values: list[dict[str, Any]], *, workspace_id: str
+    snapshot: dict[str, Any],
+    catalog_values: list[dict[str, Any]],
+    *,
+    workspace_id: str,
+    evidence_storage: StorageClient | None = None,
 ) -> LocalReviewApi:
     if snapshot.get("schema_version") != _SCHEMA_VERSION:
         raise RuntimeError("unsupported workspace snapshot version")
     if snapshot.get("workspace_id") != workspace_id:
         raise RuntimeError("workspace snapshot isolation check failed")
-    api = LocalReviewApi(seed_demo=False)
+    api = LocalReviewApi(seed_demo=False, evidence_storage=evidence_storage)
     repository = InMemoryVendorRepository()
     repository_data = snapshot.get("repository")
     if not isinstance(repository_data, dict):
@@ -645,7 +651,14 @@ def restore_api(
         repository.set_current_run(key, value, workspace_id=workspace_id)
     api._vendor_repository = repository
     api._profiles = ReviewProfileService(repository)
-    api._vendor = VendorBackend(repository, api._profiles)
+    # The restored backend keeps the evidence storage/extractor seams so
+    # deployed content validation (issue #36) can read stored evidence bytes.
+    api._vendor = VendorBackend(
+        repository,
+        api._profiles,
+        evidence_storage=api._evidence_storage,
+        extractor=api._evidence_extractor,
+    )
     api._software_index = ApprovedSoftwareIndex([_approved_record(entry) for entry in catalog])
     api._connector = _restore_connector(snapshot.get("connector"))
     api._cases = {}
@@ -688,8 +701,12 @@ def create_handler(
     *,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     allowed_origins: Iterable[str] = (),
+    evidence_storage: StorageClient | None = None,
 ) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
     origins = frozenset(origin for origin in allowed_origins if origin)
+    # Built once per handler so evidence bytes survive across requests within
+    # a warm container; on AWS the S3-backed store is durable across restores.
+    evidence_store = evidence_storage or _default_evidence_storage(AppConfig.from_env())
 
     def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         correlation_id = _correlation_id(event, context)
@@ -716,7 +733,12 @@ def create_handler(
             snapshot = store.load_snapshot(workspace_id)
             if snapshot is None:
                 raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
-            api = restore_api(snapshot, store.load_catalog(workspace_id), workspace_id=workspace_id)
+            api = restore_api(
+                snapshot,
+                store.load_catalog(workspace_id),
+                workspace_id=workspace_id,
+                evidence_storage=evidence_store,
+            )
             result, status, mutated = _dispatch(
                 api,
                 method,
@@ -1438,6 +1460,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "profile": "profile_version_id",
         "run": "run_id",
         "event": "event_id",
+        "finding": "finding_id",
     }
     key = keys.get(kind)
     if key is None:

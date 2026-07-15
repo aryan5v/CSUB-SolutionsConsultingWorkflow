@@ -183,11 +183,14 @@ class EvidenceArtifact:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceValidationFinding:
-    """One failed content check on a vendor evidence artifact (issue #36).
+    """One failed or manual-review content check on a vendor evidence artifact (issue #36).
 
     Only failures are persisted; a validated document simply covers its
     requirement. Findings keep the affected requirement unresolved so the
     reminder flow and the vendor checklist treat the document as not received.
+    ``disposition`` distinguishes a violated confirmed rule (``failed``) from a
+    document a human must decide on (``manual_review``: unreadable dates,
+    vendor/product mismatch, or a TBD rule such as PCI currency — issue #52).
     """
 
     finding_id: str
@@ -198,6 +201,7 @@ class EvidenceValidationFinding:
     check: str
     reason: str
     source_citation: dict[str, Any]
+    disposition: str = "failed"
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_dict(self) -> dict[str, Any]:

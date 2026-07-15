@@ -74,6 +74,26 @@ def _default_packet_storage(config: AppConfig) -> StorageClient:
     )
 
 
+def _default_evidence_storage(config: AppConfig) -> StorageClient:
+    """Vendor evidence byte store: S3 (raw originals bucket) on AWS, in-memory locally.
+
+    Evidence bytes live at ``evidence/{sha256}`` behind this seam so content
+    validation (issue #36) can parse them on any runtime. On AWS the raw
+    bucket is durable across Lambda invocations; locally an in-memory store
+    keeps the deterministic slice AWS-free.
+    """
+    bucket = config.aws.raw_bucket
+    if not config.use_local_fakes and bucket:
+        from .adapters.storage import S3Storage
+
+        return S3Storage(
+            bucket=bucket,
+            region=config.aws.region,
+            kms_key_id=os.environ.get("RAW_BUCKET_KMS_KEY_ID") or None,
+        )
+    return InMemoryStorage()
+
+
 class LocalApiError(RuntimeError):
     """Expected application error with an HTTP-compatible status and code."""
 
@@ -156,14 +176,21 @@ class LocalReviewApi:
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
         # Evidence bytes live behind the storage seam; locally an in-memory
-        # store lets deterministic tests exercise content validation.
-        self._evidence_storage: StorageClient = evidence_storage or InMemoryStorage()
+        # store lets deterministic tests exercise content validation. Both are
+        # kept on the instance so the Lambda restore path can rewire them into
+        # a restored VendorBackend.
+        self._evidence_storage: StorageClient = evidence_storage or _default_evidence_storage(
+            self._config
+        )
+        self._evidence_extractor: EvidenceExtractor = evidence_extractor or build_evidence_extractor(
+            self._config
+        )
         self._vendor = VendorBackend(
             self._vendor_repository,
             self._profiles,
             clock=local_clock,
             evidence_storage=self._evidence_storage,
-            extractor=evidence_extractor or build_evidence_extractor(self._config),
+            extractor=self._evidence_extractor,
         )
         catalog_entries = []
         for record in records:

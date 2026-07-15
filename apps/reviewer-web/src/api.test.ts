@@ -247,6 +247,21 @@ describe("vendor invitation security", () => {
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
   });
 
+  it("inlines small evidence bytes so the API can store and validate them", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      workspace_id: "csub-demo", artifact_id: "artifact-1", submission_id: "submission-1",
+      filename: "evidence.txt", content_type: "text/plain", size_bytes: 8, sha256: "hash", untrusted: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.uploadEvidence("vendor-invite-token", new File(["evidence"], "evidence.txt", { type: "text/plain" }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.content_base64).toBe(btoa("evidence"));
+    expect(result.transfer).toBe("uploaded");
+    expect(result.notice).toBeUndefined();
+  });
+
   it("never attaches the reviewer JWT to a presigned evidence upload", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({

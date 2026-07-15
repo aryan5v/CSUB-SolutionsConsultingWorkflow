@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime
 import hashlib
 import ipaddress
@@ -34,7 +36,12 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
-from ..evidence.validation import RULE_SOURCE, classify_evidence_type, validate_evidence
+from ..evidence.validation import (
+    RULE_SOURCE,
+    classify_evidence_type,
+    validate_evidence,
+    validate_identity,
+)
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
 
@@ -74,8 +81,10 @@ class VendorBackend:
         self._clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
-        # Evidence bytes are optional: uploads that stayed in the browser have
-        # no stored object and skip content validation (documented limitation).
+        # Evidence bytes are optional: small files arrive inline with the
+        # metadata (content_base64) and are stored for content validation;
+        # files above the inline cap still register metadata only and skip
+        # content validation (documented limitation until presigned uploads).
         self._evidence_storage = evidence_storage
         self._extractor = extractor or DeterministicEvidenceExtractor()
 
@@ -314,9 +323,10 @@ class VendorBackend:
     # Vendor-only draft operations; token determines case and scope -----------
 
     def add_evidence(self, token: str, payload: dict[str, Any]) -> EvidenceArtifact:
-        self._reject_extra(
-            payload, {"filename", "content_type", "size_bytes", "sha256"}, required=True
-        )
+        required = {"filename", "content_type", "size_bytes", "sha256"}
+        self._reject_extra(payload, required | {"content_base64"})
+        if not required <= set(payload):
+            raise VendorBackendError("validation_error", "payload fields do not match the contract")
         invite = self._valid_invite(token)
         submission = self._draft_submission(invite)
         filename = self._text(payload.get("filename"), "filename")
@@ -329,6 +339,12 @@ class VendorBackend:
         digest = self._text(payload.get("sha256"), "sha256").lower()
         if not _SHA256.fullmatch(digest):
             raise VendorBackendError("invalid_hash", "sha256 must be 64 hexadecimal characters")
+        if "content_base64" in payload:
+            # Small files travel inline (both runtimes cap JSON bodies at
+            # ~1 MB) and land behind the storage seam so content validation
+            # (issue #36) can parse them. The declared hash and size are
+            # verified before storing; a mismatch fails closed.
+            self._store_evidence_bytes(payload.get("content_base64"), digest, size)
         artifact = EvidenceArtifact(
             artifact_id=self._id("evidence", "evidence"),
             submission_id=submission.submission_id,
@@ -571,32 +587,48 @@ class VendorBackend:
         rules. Artifacts whose bytes never reached the evidence store are
         skipped: with nothing to read there is nothing to validate.
         """
+        # Re-analysis replaces this submission's findings instead of appending
+        # duplicates: prior findings are removed and finding IDs are derived
+        # from (artifact, check), so running the analysis twice is idempotent.
+        for existing in self._list("finding", EvidenceValidationFinding):
+            if existing.submission_id == submission.submission_id:
+                self.repository.delete(
+                    "finding", existing.finding_id, workspace_id=self.workspace_id
+                )
+        product = self._require("product", submission.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
         today = self._now_datetime().date()
         findings: list[EvidenceValidationFinding] = []
         for artifact in evidence:
             evidence_type = classify_evidence_type(artifact.filename, artifact.content_type)
-            if evidence_type is None:
-                continue
             text = self._evidence_text(artifact)
             if text is None:
                 continue
             fields = self._extractor.extract_fields(
                 filename=artifact.filename,
                 content_type=artifact.content_type,
-                evidence_type=evidence_type,
+                evidence_type=evidence_type or "unknown",
                 text=text,
             )
-            for failure in validate_evidence(
-                evidence_type=evidence_type, fields=fields, today=today
-            ):
+            # A document naming another vendor/product is rejected from
+            # automatic coverage regardless of its type (issue #36).
+            failures = validate_identity(
+                fields=fields, vendor_name=vendor.name, product_name=product.name
+            )
+            if evidence_type is not None:
+                failures.extend(
+                    validate_evidence(evidence_type=evidence_type, fields=fields, today=today)
+                )
+            for failure in failures:
                 finding = EvidenceValidationFinding(
-                    finding_id=self._id("finding", "finding"),
+                    finding_id=f"finding-{artifact.artifact_id}-{failure['check']}",
                     submission_id=submission.submission_id,
                     artifact_id=artifact.artifact_id,
                     filename=artifact.filename,
-                    evidence_type=evidence_type,
+                    evidence_type=evidence_type or "unknown",
                     check=failure["check"],
                     reason=failure["reason"],
+                    disposition=failure["disposition"],
                     source_citation={
                         **RULE_SOURCE,
                         "filename": artifact.filename,
@@ -607,6 +639,25 @@ class VendorBackend:
                 self._put("finding", finding.finding_id, finding)
                 findings.append(finding)
         return findings
+
+    def _store_evidence_bytes(self, content: object, digest: str, size: int) -> None:
+        if self._evidence_storage is None:
+            raise VendorBackendError(
+                "storage_unavailable", "evidence storage is not configured", status=503
+            )
+        if not isinstance(content, str) or not content:
+            raise VendorBackendError("invalid_content", "content_base64 must be a base64 string")
+        try:
+            body = base64.b64decode(content, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise VendorBackendError(
+                "invalid_content", "content_base64 must be a base64 string"
+            ) from error
+        if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
+            raise VendorBackendError(
+                "content_mismatch", "content does not match the declared sha256 and size"
+            )
+        self._evidence_storage.put_object(key=f"evidence/{digest}", body=body)
 
     def _evidence_text(self, artifact: EvidenceArtifact) -> str | None:
         if self._evidence_storage is None:
