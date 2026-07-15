@@ -101,6 +101,19 @@ describe("review API client", () => {
     expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer reviewer-jwt");
   });
 
+  it("fetches reviewer research by case without an invitation token", async () => {
+    const payload = { case_id: "TR-260714-014", research_performed: false, research: null };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await expect(client.getCaseResearch("TR-260714-014")).resolves.toEqual(payload);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/cases/TR-260714-014/research");
+    expect(url).not.toContain("token");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer reviewer-jwt");
+  });
+
   it("sends human confirmation, decision, preview, and explicit commit requests", async () => {
     const response = {
       state: state(),
@@ -332,6 +345,11 @@ describe("live and adaptive behavior", () => {
     const client = createReviewApiClient({ mode: "fixture", fetchImpl: fetchMock, authProvider: reviewer });
 
     await expect(client.listVendors()).resolves.toHaveLength(1);
+    await expect(client.getCaseResearch("fixture-case")).resolves.toEqual({
+      case_id: "fixture-case",
+      research_performed: false,
+      research: null,
+    });
     await expect(client.analyzeCase("fixture-case")).rejects.toMatchObject({ code: "fixture_network_blocked" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
