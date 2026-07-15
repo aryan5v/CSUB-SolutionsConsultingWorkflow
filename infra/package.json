@@ -11,11 +11,15 @@
     "diff": "cdk diff",
     "deploy": "cdk deploy",
     "destroy": "cdk destroy",
+    "test": "jest",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.12",
     "@types/node": "^22.7.0",
     "aws-cdk": "^2.170.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   },

@@ -96,3 +96,60 @@ there).
 - KMS encryption at rest; TLS (`aws:SecureTransport`) enforced via bucket policy.
 - Least-privilege: no IAM principals granted here beyond CDK's deploy role.
 - No secrets, account-specific credentials, or institutional data in source.
+
+## Platform stack (`PlatformStack`) — gate and runbook
+
+`PlatformStack` deploys the demo platform (Cognito, CloudFront/OAC + private S3,
+HTTP API + Lambda proxy, DynamoDB records, ECR, AgentCore Memory/Browser and
+gated Runtime/Endpoint, Guardrail + version, S3 Vector scopes + gated Knowledge
+Bases, encrypted logging/alarms/dashboard, CloudTrail, and a monthly Budget).
+It reuses the foundation KMS key and `cases` table by reference.
+
+### Additional gate to record before deploying
+
+| Field | Value |
+|---|---|
+| Budget | Monthly `budgetLimitUsd` (default 50 USD); optional `budgetNotificationEmail`. |
+| Data classification | Sanitized/synthetic only. PII/PHI classification + guardrail-mode approval **required** before any Knowledge Base ingestion. |
+| Model IDs | Discover and pin `embeddingModelArn` / foundation-model IDs after auth; never commit them. |
+| AgentCore image | Publish the ARM64 HTTP image, then pass its immutable digest as `agentCoreImageUri`. |
+| Network mode | `PUBLIC` for sandbox; production delta is `VPC` (`agentCoreNetworkMode=VPC`). |
+
+### Commands (non-mutating first)
+
+```bash
+export CDK_DEFAULT_ACCOUNT=<SANDBOX_ACCOUNT_ID>
+export CDK_DEFAULT_REGION=us-west-2
+
+npm --prefix infra ci
+npm --prefix infra test                              # CDK unit assertions
+npm --prefix infra run synth -- --strict             # offline, no credentials
+npm --prefix infra run diff                          # review additive foundation export + new resources
+
+# Deploy foundation first (adds a managed export), then the platform.
+npm --prefix infra run deploy -- ReviewFoundationStack
+npm --prefix infra run deploy -- PlatformStack \
+  -c budgetLimitUsd=50 -c budgetNotificationEmail=<owner-email>
+
+# Later, once the runtime image and model access exist:
+npm --prefix infra run deploy -- PlatformStack \
+  -c agentCoreImageUri=<account>.dkr.ecr.us-west-2.amazonaws.com/<repo>@sha256:<digest> \
+  -c embeddingModelArn=arn:aws:bedrock:us-west-2::foundation-model/<embed-model>
+```
+
+### Deployed artifact for the Lambda proxy
+
+CDK packages `infra/lambda/case-proxy/index.mjs` (a committed, dependency-light
+runtime handler) so synth stays offline. Its logic mirrors the typed,
+unit-tested source in `services/case-api/src`; `npm --prefix services/case-api
+run build` produces the fully bundled equivalent (`dist/index.mjs`) when a
+self-contained artifact is preferred.
+
+### Estimated cost and teardown
+
+Idle cost is dominated by KMS keys (~$1/key/month) plus minimal S3/DynamoDB/logs
+request charges; CloudFront, Cognito, API Gateway, and SQS are ~$0 idle. The
+sandbox lease is the hard ceiling and the Budget provides an explicit alert.
+Teardown: `npm --prefix infra run destroy` (with `destroyOnRemoval=true`,
+buckets and the ECR repo self-empty). Delete the runtime/endpoint and any
+ingested Knowledge Base data first if those were enabled.

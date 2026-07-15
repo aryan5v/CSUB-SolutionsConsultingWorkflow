@@ -7,6 +7,8 @@ import { Construct } from 'constructs';
 export interface ReviewFoundationStackProps extends cdk.StackProps {
   /** Deployment environment label (development, etc.). */
   readonly appEnv: string;
+  /** Data retention period in days (default 90). */
+  readonly retentionDays?: number;
 }
 
 /**
@@ -21,15 +23,20 @@ export class ReviewFoundationStack extends cdk.Stack {
   public readonly rawBucket: s3.Bucket;
   public readonly normalizedBucket: s3.Bucket;
   public readonly casesTable: dynamodb.Table;
+  public readonly dataKey: kms.IKey;
 
   constructor(scope: Construct, id: string, props: ReviewFoundationStackProps) {
     super(scope, id, props);
+
+    const retentionDays = props.retentionDays ?? 90;
 
     const dataKey = new kms.Key(this, 'DataKey', {
       description: 'CSUB review agent S3 encryption key (prototype).',
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+
+    this.dataKey = dataKey;
 
     const bucketDefaults: s3.BucketProps = {
       encryption: s3.BucketEncryption.KMS,
@@ -45,11 +52,25 @@ export class ReviewFoundationStack extends cdk.Stack {
     this.rawBucket = new s3.Bucket(this, 'RawSourcesBucket', {
       ...bucketDefaults,
       versioned: true,
+      lifecycleRules: [
+        {
+          id: 'DeleteOldRawVersions',
+          expiration: cdk.Duration.days(retentionDays),
+          noncurrentVersionExpiration: cdk.Duration.days(retentionDays),
+        },
+      ],
     });
 
     // Lossless JSON/Parquet snapshots and normalized records.
     this.normalizedBucket = new s3.Bucket(this, 'NormalizedBucket', {
       ...bucketDefaults,
+      lifecycleRules: [
+        {
+          id: 'DeleteOldNormalizedVersions',
+          expiration: cdk.Duration.days(retentionDays),
+          noncurrentVersionExpiration: cdk.Duration.days(retentionDays),
+        },
+      ],
     });
 
     this.casesTable = new dynamodb.Table(this, 'CasesTable', {
@@ -65,5 +86,6 @@ export class ReviewFoundationStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CasesTableName', { value: this.casesTable.tableName });
     new cdk.CfnOutput(this, 'DataKeyArn', { value: dataKey.keyArn });
     new cdk.CfnOutput(this, 'AppEnv', { value: props.appEnv });
+    new cdk.CfnOutput(this, 'RetentionDays', { value: retentionDays.toString() });
   }
 }
