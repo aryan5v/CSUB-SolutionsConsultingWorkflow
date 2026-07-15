@@ -146,8 +146,16 @@ export class PlatformStack extends cdk.Stack {
       autoDeleteObjects: autoDelete,
     });
 
+    // CloudTrail management logs use SSE-S3 intentionally. The sandbox can
+    // validate/write this service-owned log bucket without requiring CloudTrail
+    // access to the cross-stack customer-managed KMS key. All data/evidence
+    // stores remain on their existing KMS encryption.
     const auditBucket = new s3.Bucket(this, 'AuditBucket', {
-      ...bucketDefaults,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy,
+      autoDeleteObjects: autoDelete,
       versioned: true,
       lifecycleRules: [{ id: 'ExpireAudit', expiration: cdk.Duration.days(retentionDays) }],
     });
@@ -318,7 +326,6 @@ export class PlatformStack extends cdk.Stack {
       includeGlobalServiceEvents: true,
       isMultiRegionTrail: false,
       managementEvents: cloudtrail.ReadWriteType.WRITE_ONLY,
-      encryptionKey: dataKey,
     });
 
     // ====================================================================

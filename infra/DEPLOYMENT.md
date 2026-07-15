@@ -124,6 +124,23 @@ No account or personal identity is required to document or apply these gates.
 A future account may enable a service only after its effective SCPs are verified
 to permit the relevant create APIs.
 
+### CloudTrail audit-bucket compatibility
+
+After the denied services were gated off, `AWS::CloudTrail::Trail`
+`ManagementAudit` failed with `InvalidRequest`: CloudTrail had insufficient
+permissions to validate/access its audit S3 bucket or the cross-stack
+customer-managed KMS key. Because this bucket stores only CloudTrail management
+logs, `AuditBucket` now uses S3-managed `AES256` encryption and the Trail does
+not set `KMSKeyId`. This is intentionally limited to the audit bucket; evidence,
+generated packets, raw/normalized sources, CloudWatch logs, queues, DynamoDB,
+and other data stores retain their existing encryption.
+
+The audit bucket still blocks all public access, enforces SSL, remains
+versioned, expires objects after the configured finite retention period, and
+auto-deletes for sandbox teardown. CDK still creates the CloudTrail service
+bucket policy (`s3:GetBucketAcl` and scoped `s3:PutObject`). This avoids changing
+the shared cross-stack KMS policy. No account or personal identifier is needed.
+
 ### Additional gate to record before deploying
 
 | Field | Value |

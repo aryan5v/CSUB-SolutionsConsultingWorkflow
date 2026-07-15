@@ -95,6 +95,64 @@ describe('CloudFront uses OAC, never OAI, and keeps the frontend private', () =>
   });
 });
 
+describe('CloudTrail audit bucket sandbox compatibility', () => {
+  test('uses SSE-S3 for audit logs while evidence/generated remain KMS encrypted', () => {
+    const { platform } = build(baseConfig);
+
+    platform.hasResourceProperties('AWS::S3::Bucket', {
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: [
+          { ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } },
+        ],
+      },
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([Match.objectLike({ Id: 'ExpireAudit', Status: 'Enabled' })]),
+      },
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      VersioningConfiguration: { Status: 'Enabled' },
+    });
+
+    for (const lifecycleId of ['ExpireEvidence', 'ExpireGeneratedVersions']) {
+      platform.hasResourceProperties('AWS::S3::Bucket', {
+        BucketEncryption: {
+          ServerSideEncryptionConfiguration: [
+            {
+              ServerSideEncryptionByDefault: Match.objectLike({
+                SSEAlgorithm: 'aws:kms',
+                KMSMasterKeyID: Match.anyValue(),
+              }),
+            },
+          ],
+        },
+        LifecycleConfiguration: {
+          Rules: Match.arrayWith([Match.objectLike({ Id: lifecycleId, Status: 'Enabled' })]),
+        },
+      });
+    }
+
+    platform.resourceCountIs('AWS::CloudTrail::Trail', 1);
+    const trails = Object.values(platform.findResources('AWS::CloudTrail::Trail'));
+    expect(trails[0].Properties.S3BucketName).toBeDefined();
+    expect(trails[0].Properties.KMSKeyId).toBeUndefined();
+    platform.hasResourceProperties('AWS::S3::BucketPolicy', {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 's3:PutObject',
+            Effect: 'Allow',
+            Principal: { Service: 'cloudtrail.amazonaws.com' },
+          }),
+        ]),
+      }),
+    });
+  });
+});
+
 describe('Data model security invariants', () => {
   test('invite table is keyed by token_hash, never plaintext token', () => {
     const { platform } = build(baseConfig);

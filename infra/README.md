@@ -72,8 +72,10 @@ customer-managed KMS key and `cases` table are passed by object reference
 - **Storage:** KMS-encrypted, versioned evidence and generated-packet buckets
   (case-scoped presigned uploads/downloads), an SSE-S3 private frontend bucket
   served only through CloudFront **Origin Access Control (OAC, never OAI)**, and
-  a KMS-encrypted CloudTrail audit bucket. All buckets block public access and
-  enforce TLS.
+  a versioned SSE-S3 CloudTrail audit bucket. The audit bucket alone uses
+  S3-managed encryption so CloudTrail can validate/write without access to the
+  cross-stack KMS key; data/evidence stores remain KMS encrypted. All buckets
+  block public access and enforce TLS.
 - **DynamoDB (PITR on all):** vendor, product (catalog), contact, invite
   (keyed by `token_hash`, never plaintext), submission, review, profile
   (immutable `(user_id, version)`), integration-event, audit, and idempotency.
@@ -146,6 +148,19 @@ no AgentCore resources or AgentCore-specific IAM, and no S3 Vectors, Knowledge
 Bases, KB IAM, or KB alarm. Use the `true` settings only after a different
 account's effective SCPs have been verified to allow the corresponding create
 APIs. No account or personal identity is required in configuration or source.
+
+### CloudTrail sandbox compatibility
+
+A core-stack creation reached `AWS::CloudTrail::Trail` but CloudTrail returned
+`InvalidRequest` because it could not validate/access both the audit S3 bucket
+and the cross-stack customer-managed KMS key. The audit bucket is dedicated to
+CloudTrail management logs, so it intentionally uses S3-managed encryption
+(`AES256`/SSE-S3), and the Trail does not set a KMS key. This avoids cross-stack
+KMS policy changes while preserving CloudTrail's service bucket policy,
+blocked public access, TLS-only access, versioning, finite lifecycle retention,
+and teardown auto-delete. Evidence, generated packets, raw/normalized sources,
+CloudWatch logs, queues, DynamoDB records, and other data stores retain their
+existing encryption. No account or personal identifier is recorded here.
 
 ### Deployment gates (do not skip)
 
