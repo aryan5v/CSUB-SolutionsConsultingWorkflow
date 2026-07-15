@@ -79,6 +79,13 @@ export interface PlatformConfig {
   /** Mock ServiceNow target table name (no credential; demo simulation only). Default sc_req_item. */
   readonly serviceNowTableName: string;
 
+  // ---- Review model ----------------------------------------------------
+  /**
+   * Cross-Region Bedrock inference-profile ID used by the deterministic case
+   * Lambda. The deployed sandbox default was verified in us-west-2.
+   */
+  readonly reviewModelId: string;
+
   // ---- Budget ----------------------------------------------------------
   /** Monthly AWS Budget limit in USD (parameterized cost guardrail). */
   readonly budgetLimitUsd: number;
@@ -180,6 +187,8 @@ export function resolvePlatformConfig(app: cdk.App): PlatformConfig {
     slackSecretArn: ctx(app, 'slackSecretArn') ?? process.env.SLACK_SECRET_ARN,
     serviceNowTableName:
       ctx(app, 'serviceNowTableName') ?? process.env.SERVICE_NOW_TABLE_NAME ?? 'sc_req_item',
+    reviewModelId:
+      ctx(app, 'reviewModelId') ?? process.env.REVIEW_MODEL_ID ?? 'us.anthropic.claude-sonnet-5',
     budgetLimitUsd,
     budgetNotificationEmail:
       ctx(app, 'budgetNotificationEmail') ?? process.env.BUDGET_NOTIFICATION_EMAIL,

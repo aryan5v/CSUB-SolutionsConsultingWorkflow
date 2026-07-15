@@ -1,0 +1,28 @@
+{
+  "name": "@csub/auth-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Better Auth stateless session Lambda for the CSUB reviewer application.",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "npm run clean && esbuild src/handler.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "3.1087.0",
+    "better-auth": "1.6.23"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "8.10.162",
+    "@types/node": "22.20.1",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

@@ -161,9 +161,13 @@ the shared cross-stack KMS policy. No account or personal identifier is needed.
 export CDK_DEFAULT_ACCOUNT=<SANDBOX_ACCOUNT_ID>
 export CDK_DEFAULT_REGION=us-west-2
 
+npm --prefix services/auth-api ci
+npm --prefix services/auth-api run typecheck
+npm --prefix services/auth-api test
+npm --prefix services/auth-api run build              # creates Lambda dist/index.mjs
 npm --prefix infra ci
-npm --prefix infra test                              # CDK unit assertions
-npm --prefix infra run synth -- --strict             # offline, no credentials
+npm --prefix infra test                               # CDK unit assertions
+npm --prefix infra run synth -- --strict              # offline, no credentials
 npm --prefix infra run diff                          # review additive foundation export + new resources
 
 # Deploy foundation first (adds a managed export), then the supported core.
@@ -184,13 +188,19 @@ npm --prefix infra run deploy -- PlatformStack \
   -c enableGuardrail=true
 ```
 
+Use `AuthBaseUrl`, `AuthCognitoClientId`, and `AuthCognitoCallbackUrl` for the
+VETTED Better Auth same-origin flow. Their secret values remain in Secrets
+Manager. Demo Cognito self-signup verifies email and creates a reviewer account
+for the seeded `csub-demo` workspace; it must not be treated as production
+membership provisioning.
+
 Use the resulting `CognitoDomainUrl`, `UserPoolClientId`, and
-`CloudFrontDomain` outputs to set `VITE_COGNITO_DOMAIN`,
+`CloudFrontDomain` outputs for the transitional public Cognito client and to set `VITE_COGNITO_DOMAIN`,
 `VITE_COGNITO_CLIENT_ID`, and the exact
 `https://<CloudFrontDomain>/app` redirect/logout variables for the reviewer
-build. The client is secretless and also allowlists only the documented
-`http://127.0.0.1:5173/app` local-development origin. User/password creation is
-not part of this deployment.
+build. The transitional client is secretless and also allowlists only the documented
+`http://127.0.0.1:5173/app` local-development origin. A separate confidential
+client is generated for Better Auth; its secret is never output.
 
 ### Deployed artifact for the Lambda proxy
 

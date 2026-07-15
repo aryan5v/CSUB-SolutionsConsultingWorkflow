@@ -14,7 +14,7 @@ This directory owns the AWS CDK TypeScript application. The first infrastructure
 - Bedrock models, Guardrails, Knowledge Bases, and S3 Vectors.
 - Bedrock AgentCore Runtime, Memory, and restricted Browser.
 - CloudWatch logs, metrics, alarms, and dashboards; CloudTrail for write-action auditing.
-- Secrets Manager for future connector credentials.
+- Secrets Manager for VETTED Better Auth/session and future connector credentials.
 
 ## Required configuration
 
@@ -79,12 +79,20 @@ customer-managed KMS key and `cases` table are passed by object reference
 - **DynamoDB (PITR on all):** vendor, product (catalog), contact, invite
   (keyed by `token_hash`, never plaintext), submission, review, profile
   (immutable `(user_id, version)`), integration-event, audit, and idempotency.
-- **Cognito:** reviewer user pool (no self-service signup), configurable
-  account/environment-unique prefix domain, and secretless public app client.
-  The client permits only the OAuth authorization-code grant with scopes
-  `openid email profile`; its exact callback/logout allowlist is the CloudFront
-  `/app` URL plus intentional local development at
-  `http://127.0.0.1:5173/app`.
+- **Cognito + VETTED Better Auth:** reviewer user pool with verified-email
+  self-signup enabled for the sanitized demo, the existing secretless public
+  client retained for reviewer-API migration, and a separate confidential
+  authorization-code/PKCE client used only by Better Auth. Better Auth runs as
+  a database-free Node.js 22 Lambda with eight-hour JWE cookie sessions. Its
+  client secret and session key are KMS-encrypted in Secrets Manager and loaded
+  at cold start; no secret value is stored in Lambda environment variables or
+  outputs. Signup creates a reviewer demo account in the one seeded
+  `csub-demo` workspace, not a new tenant.
+- **Same-origin auth route:** CloudFront `/api/auth/*` targets an IAM-only Lambda
+  Function URL through signed OAC. The behavior disables caching, forwards all
+  auth cookies and OIDC query strings, and allowlists the origin/CSRF headers.
+  Direct anonymous Function URL invocation is denied. Existing reviewer API
+  routes remain Cognito-JWT protected and are not exposed by this behavior.
 - **API (HTTP API + Lambda proxy):** reviewer/admin routes require the Cognito
   JWT authorizer; `/intake` and `/slack/events` are public at the
   gateway and enforced downstream (opaque token / signature). The invite token
@@ -130,6 +138,7 @@ customer-managed KMS key and `cases` table are passed by object reference
 | `enableGuardrail` | `ENABLE_GUARDRAIL` | `false` | Independent gate for Guardrail + pinned version. |
 | `slackSecretArn` | `SLACK_SECRET_ARN` | *(unset)* | **Import only** — no placeholder is ever generated. |
 | `serviceNowTableName` | `SERVICE_NOW_TABLE_NAME` | `sc_req_item` | Mock ServiceNow target (no credential). |
+| `reviewModelId` | `REVIEW_MODEL_ID` | `us.anthropic.claude-sonnet-5` | Case Lambda reasoning inference profile; IAM is limited to this profile and its exact routed foundation-model ID. |
 | `budgetLimitUsd` | `BUDGET_LIMIT_USD` | `50` | Monthly budget limit. |
 | `budgetNotificationEmail` | `BUDGET_NOTIFICATION_EMAIL` | *(unset)* | Adds budget alert subscriber. |
 | `destroyOnRemoval` | `DESTROY_ON_REMOVAL` | `true` | Sandbox teardown-safe (`DESTROY`); set `false` to retain. |
@@ -175,6 +184,30 @@ guardrail-mode approval. Do **not** ingest institutional data until that
 approval is recorded. Discover and pin the embedding/foundation model IDs after
 authenticating (`aws bedrock list-foundation-models`), then pass them via
 context — never hard-code model IDs, account IDs, URLs, or credentials.
+
+### VETTED authentication build and signup
+
+Build `services/auth-api` before synth/deploy so `dist/index.mjs` is present:
+
+```bash
+npm --prefix services/auth-api ci
+npm --prefix services/auth-api run typecheck
+npm --prefix services/auth-api test
+npm --prefix services/auth-api run build
+```
+
+`AuthBaseUrl`, `AuthCognitoClientId`, and `AuthCognitoCallbackUrl` are public
+configuration outputs. The Cognito client secret and Better Auth session secret
+remain only in Secrets Manager. The VETTED `/signup` experience starts the
+Better Auth generic OIDC endpoint with `providerId: "cognito"` and
+`requestSignUp: true`; Cognito verifies the email and the application treats the
+account as a reviewer in the seeded `csub-demo` workspace. This demo setting
+must be disabled or replaced by an institutional enrollment policy before
+production.
+
+The case Lambda receives `BEDROCK_REASONING_MODEL_ID` (default
+`us.anthropic.claude-sonnet-5`) and `BEDROCK_MAX_TOKENS=1024`. The verified
+Sonnet 5 profile rejects a `temperature` parameter, so callers must omit it.
 
 ### Reviewer frontend deployment outputs
 

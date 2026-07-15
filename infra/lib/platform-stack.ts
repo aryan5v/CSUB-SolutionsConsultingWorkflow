@@ -72,6 +72,7 @@ export class PlatformStack extends cdk.Stack {
   public readonly ecrRepository: ecr.Repository;
   public readonly logEncryptionKey: kms.Key;
   public readonly proxyFunction: lambda.Function;
+  public readonly authFunction: lambda.Function;
   public readonly api: apigwv2.HttpApi;
   public readonly analysisQueue: sqs.Queue;
   public readonly analysisDlq: sqs.Queue;
@@ -211,7 +212,8 @@ export class PlatformStack extends cdk.Stack {
     // ====================================================================
     this.userPool = new cognito.UserPool(this, 'ReviewerPool', {
       userPoolName: `csub-reviewer-${appEnv}`,
-      selfSignUpEnabled: false,
+      selfSignUpEnabled: true,
+      autoVerify: { email: true },
       signInAliases: { email: true },
       standardAttributes: {
         email: { required: true, mutable: false },
@@ -264,7 +266,10 @@ export class PlatformStack extends cdk.Stack {
       ],
     });
 
-    const cloudFrontAppUrl = `https://${this.distribution.distributionDomainName}/app`;
+    const cloudFrontOrigin = `https://${this.distribution.distributionDomainName}`;
+    const cloudFrontAppUrl = `${cloudFrontOrigin}/app`;
+    const betterAuthBaseUrl = `${cloudFrontOrigin}/api/auth`;
+    const betterAuthCallbackUrl = `${betterAuthBaseUrl}/oauth2/callback/cognito`;
     const localDevelopmentAppUrl = 'http://127.0.0.1:5173/app';
     this.userPoolClient = new cognito.UserPoolClient(this, 'ReviewerPoolClient', {
       userPool: this.userPool,
@@ -285,6 +290,69 @@ export class PlatformStack extends cdk.Stack {
         callbackUrls: [cloudFrontAppUrl, localDevelopmentAppUrl],
         logoutUrls: [cloudFrontAppUrl, localDevelopmentAppUrl],
       },
+    });
+
+    // Better Auth exchanges Cognito authorization codes server-side, so it uses
+    // a separate confidential client. The existing public SPA client and API
+    // authorizer stay intact as a narrow migration path for reviewer APIs.
+    const betterAuthCognitoClient = new cognito.CfnUserPoolClient(
+      this,
+      'BetterAuthCognitoClient',
+      {
+        userPoolId: this.userPool.userPoolId,
+        clientName: `vetted-better-auth-${appEnv}`,
+        generateSecret: true,
+        allowedOAuthFlowsUserPoolClient: true,
+        allowedOAuthFlows: ['code'],
+        allowedOAuthScopes: ['openid', 'email', 'profile'],
+        callbackUrLs: [betterAuthCallbackUrl],
+        logoutUrLs: [cloudFrontAppUrl],
+        supportedIdentityProviders: ['COGNITO'],
+        preventUserExistenceErrors: 'ENABLED',
+        enableTokenRevocation: true,
+        accessTokenValidity: 60,
+        idTokenValidity: 60,
+        refreshTokenValidity: 1440,
+        tokenValidityUnits: {
+          accessToken: 'minutes',
+          idToken: 'minutes',
+          refreshToken: 'minutes',
+        },
+      },
+    );
+
+    // Keep auth-secret grants within PlatformStack so the deployed foundation
+    // key and its cross-stack dependencies remain untouched.
+    const authSecretsKey = new kms.Key(this, 'BetterAuthSecretsKey', {
+      description: 'VETTED Better Auth Secrets Manager encryption key.',
+      enableKeyRotation: true,
+      removalPolicy,
+    });
+
+    const betterAuthSecretName = `vetted/${appEnv}/better-auth/session`;
+    const cognitoClientSecretName = `vetted/${appEnv}/better-auth/cognito-client`;
+
+    // The Lambda environment contains only deterministic secret IDs. Better
+    // Auth's random session key and Cognito credentials are read at cold start.
+    new secretsmanager.Secret(this, 'BetterAuthSessionSecret', {
+      secretName: betterAuthSecretName,
+      description: 'VETTED Better Auth JWE signing/encryption secret.',
+      encryptionKey: authSecretsKey,
+      generateSecretString: {
+        passwordLength: 64,
+        excludePunctuation: true,
+      },
+      removalPolicy,
+    });
+    new secretsmanager.Secret(this, 'BetterAuthCognitoSecret', {
+      secretName: cognitoClientSecretName,
+      description: 'Generated Cognito confidential-client secret for Better Auth OIDC.',
+      encryptionKey: authSecretsKey,
+      secretObjectValue: {
+        clientId: cdk.SecretValue.unsafePlainText(betterAuthCognitoClient.ref),
+        clientSecret: cdk.SecretValue.resourceAttribute(betterAuthCognitoClient.attrClientSecret),
+      },
+      removalPolicy,
     });
 
     // ====================================================================
@@ -338,6 +406,12 @@ export class PlatformStack extends cdk.Stack {
     });
     const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogGroup', {
       logGroupName: `/csub/${appEnv}/api-access`,
+      retention: logRetention,
+      encryptionKey: this.logEncryptionKey,
+      removalPolicy,
+    });
+    const authLogGroup = new logs.LogGroup(this, 'AuthLogGroup', {
+      logGroupName: `/vetted/${appEnv}/auth-api`,
       retention: logRetention,
       encryptionKey: this.logEncryptionKey,
       removalPolicy,
@@ -645,6 +719,99 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // ====================================================================
+    // VETTED Better Auth: stateless JWE sessions + Cognito OIDC
+    // ====================================================================
+    this.authFunction = new lambda.Function(this, 'BetterAuthFunction', {
+      functionName: `vetted-auth-${appEnv}`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'dist/index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'services', 'auth-api'), {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        exclude: [
+          'node_modules/**',
+          'src/**',
+          'test/**',
+          'package.json',
+          'package-lock.json',
+          'tsconfig.json',
+          '.npmrc',
+        ],
+      }),
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(15),
+      logGroup: authLogGroup,
+      environment: {
+        NODE_ENV: 'production',
+        BETTER_AUTH_TRUSTED_ORIGINS:
+          'http://127.0.0.1:5173,http://localhost:5173',
+        BETTER_AUTH_SECRET_ID: betterAuthSecretName,
+        COGNITO_CLIENT_SECRET_ID: cognitoClientSecretName,
+        COGNITO_ISSUER: `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}`,
+      },
+    });
+    this.authFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+        resources: [
+          `arn:${this.partition}:secretsmanager:${this.region}:${this.account}:secret:vetted/${appEnv}/better-auth/*`,
+        ],
+      }),
+    );
+    authSecretsKey.grantDecrypt(this.authFunction);
+
+    const authFunctionUrl = this.authFunction.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+      invokeMode: lambda.InvokeMode.BUFFERED,
+    });
+    const authHostForwarder = new cloudfront.Function(this, 'BetterAuthHostForwarder', {
+      comment: 'Copy the exact CloudFront viewer host for Better Auth base URL validation.',
+      code: cloudfront.FunctionCode.fromInline(
+        "function handler(event){var r=event.request;r.headers['x-vetted-host']={value:r.headers.host.value};return r;}",
+      ),
+    });
+    const authOriginRequestPolicy = new cloudfront.OriginRequestPolicy(
+      this,
+      'BetterAuthOriginRequestPolicy',
+      {
+        comment: 'Forward VETTED auth cookies, OIDC query strings, and CSRF headers only.',
+        cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
+        queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
+        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
+          'Accept',
+          'Accept-Language',
+          'Content-Type',
+          'Origin',
+          'Referer',
+          'User-Agent',
+          'Sec-Fetch-Site',
+          'Sec-Fetch-Mode',
+          'Sec-Fetch-Dest',
+          'X-Vetted-Host',
+        ),
+      },
+    );
+    this.distribution.addBehavior(
+      '/api/auth/*',
+      origins.FunctionUrlOrigin.withOriginAccessControl(authFunctionUrl),
+      {
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: authOriginRequestPolicy,
+        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+        functionAssociations: [
+          {
+            function: authHostForwarder,
+            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+          },
+        ],
+        compress: false,
+      },
+    );
+
+    // ====================================================================
     // Connected deterministic review API (Python 3.13, ARM64) + HTTP API
     // ====================================================================
     const contractSchemas = new lambda.LayerVersion(this, 'ContractSchemaLayer', {
@@ -701,6 +868,8 @@ export class PlatformStack extends cdk.Stack {
         AUDIT_TABLE: this.tables.AuditTable.tableName,
         IDEMPOTENCY_TABLE: this.tables.IdempotencyTable.tableName,
         SERVICE_NOW_TABLE: config.serviceNowTableName,
+        BEDROCK_REASONING_MODEL_ID: config.reviewModelId,
+        BEDROCK_MAX_TOKENS: '1024',
         ...(agentEndpoint
           ? { AGENT_RUNTIME_ENDPOINT_ARN: agentEndpoint.attrAgentRuntimeEndpointArn }
           : {}),
@@ -722,7 +891,6 @@ export class PlatformStack extends cdk.Stack {
     }
     foundationStack.casesTable.grantReadWriteData(this.proxyFunction);
     this.evidenceBucket.grantReadWrite(this.proxyFunction);
-    this.generatedBucket.grantRead(this.proxyFunction);
     this.analysisQueue.grantSendMessages(this.proxyFunction);
     dataKey.grantEncryptDecrypt(this.proxyFunction);
     if (slackSecret) {
@@ -742,13 +910,21 @@ export class PlatformStack extends cdk.Stack {
 
     // Keep optional provider permissions in a separate inline policy so the
     // larger deterministic DynamoDB policy cannot crowd out prior capabilities.
+    const reviewFoundationModelId = config.reviewModelId.replace(/^(?:us|eu|apac)\./, '');
     const providerStatements = [
+      new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          `arn:${this.partition}:bedrock:${this.region}:${this.account}:inference-profile/${config.reviewModelId}`,
+          `arn:${this.partition}:bedrock:*::foundation-model/${reviewFoundationModelId}`,
+        ],
+      }),
       new iam.PolicyStatement({
         actions: ['s3:GetObject', 's3:PutObject'],
         resources: [this.evidenceBucket.arnForObjects('*')],
       }),
       new iam.PolicyStatement({
-        actions: ['s3:GetObject'],
+        actions: ['s3:GetObject', 's3:PutObject'],
         resources: [this.generatedBucket.arnForObjects('*')],
       }),
       new iam.PolicyStatement({
@@ -1010,6 +1186,16 @@ export class PlatformStack extends cdk.Stack {
     // Outputs
     // ====================================================================
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
+    new cdk.CfnOutput(this, 'AuthBaseUrl', {
+      value: betterAuthBaseUrl,
+      description: 'Same-origin VETTED Better Auth endpoint; no secret values.',
+    });
+    new cdk.CfnOutput(this, 'AuthCognitoClientId', {
+      value: betterAuthCognitoClient.ref,
+      description: 'Public Cognito OIDC client identifier used by the Better Auth server.',
+    });
+    new cdk.CfnOutput(this, 'AuthCognitoCallbackUrl', { value: betterAuthCallbackUrl });
+    new cdk.CfnOutput(this, 'ReviewModelId', { value: config.reviewModelId });
     new cdk.CfnOutput(this, 'CloudFrontDomain', { value: this.distribution.distributionDomainName });
     new cdk.CfnOutput(this, 'UserPoolId', { value: this.userPool.userPoolId });
     new cdk.CfnOutput(this, 'UserPoolClientId', { value: this.userPoolClient.userPoolClientId });

@@ -15,6 +15,7 @@ const baseConfig: PlatformConfig = {
   policyDocumentsPrefix: 'policy/',
   enableGuardrail: false,
   serviceNowTableName: 'sc_req_item',
+  reviewModelId: 'us.anthropic.claude-sonnet-5',
   budgetLimitUsd: 50,
   destroyOnRemoval: true,
 };
@@ -54,7 +55,7 @@ describe('PlatformStack — offline synthesis and core surface', () => {
     platform.resourceCountIs('AWS::Cognito::UserPool', 1);
     platform.resourceCountIs('AWS::CloudFront::Distribution', 1);
     platform.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
-    platform.resourceCountIs('AWS::Lambda::Function', 2);
+    platform.resourceCountIs('AWS::Lambda::Function', 3);
     platform.resourceCountIs('AWS::DynamoDB::Table', 10);
     platform.resourceCountIs('AWS::S3::Bucket', 4);
     platform.resourceCountIs('AWS::SQS::Queue', 2);
@@ -102,8 +103,10 @@ describe('Cognito hosted UI supports the reviewer PKCE client', () => {
     });
 
     const clients = Object.values(platform.findResources('AWS::Cognito::UserPoolClient'));
-    expect(clients).toHaveLength(1);
-    const properties = (clients[0] as any).Properties;
+    expect(clients).toHaveLength(2);
+    const publicClients = clients.filter((client: any) => client.Properties.GenerateSecret === false);
+    expect(publicClients).toHaveLength(1);
+    const properties = (publicClients[0] as any).Properties;
     expect(properties.GenerateSecret).toBe(false);
     expect(properties.AllowedOAuthFlowsUserPoolClient).toBe(true);
     expect(properties.AllowedOAuthFlows).toEqual(['code']);
@@ -136,10 +139,158 @@ describe('Cognito hosted UI supports the reviewer PKCE client', () => {
   });
 });
 
+describe('VETTED Better Auth same-origin session layer', () => {
+  test('enables verified Cognito self signup for the seeded reviewer demo workspace', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::Cognito::UserPool', {
+      AdminCreateUserConfig: { AllowAdminCreateUserOnly: false },
+      AutoVerifiedAttributes: ['email'],
+    });
+  });
+
+  test('adds a secret-bearing authorization-code Cognito client only for Better Auth', () => {
+    const { platform } = build(baseConfig);
+    const clients = Object.values(platform.findResources('AWS::Cognito::UserPoolClient')) as any[];
+    const confidential = clients.filter((client) => client.Properties.GenerateSecret === true);
+    expect(confidential).toHaveLength(1);
+    expect(confidential[0].Properties).toMatchObject({
+      ClientName: 'vetted-better-auth-test',
+      AllowedOAuthFlowsUserPoolClient: true,
+      AllowedOAuthFlows: ['code'],
+      AllowedOAuthScopes: ['openid', 'email', 'profile'],
+      SupportedIdentityProviders: ['COGNITO'],
+      EnableTokenRevocation: true,
+    });
+    expect(JSON.stringify(confidential[0].Properties.CallbackURLs)).toContain(
+      '/api/auth/oauth2/callback/cognito',
+    );
+  });
+
+  test('stores both auth secrets under a rotating KMS key and passes only secret IDs to Lambda', () => {
+    const { platform } = build(baseConfig);
+    platform.resourceCountIs('AWS::SecretsManager::Secret', 2);
+    platform.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'vetted/test/better-auth/session',
+      KmsKeyId: Match.anyValue(),
+      GenerateSecretString: Match.objectLike({ PasswordLength: 64 }),
+    });
+    platform.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'vetted/test/better-auth/cognito-client',
+      KmsKeyId: Match.anyValue(),
+      SecretString: Match.anyValue(),
+    });
+    const secretResources = platform.findResources('AWS::SecretsManager::Secret');
+    const cognitoSecret = Object.values(secretResources).find(
+      (secret: any) => secret.Properties.Name === 'vetted/test/better-auth/cognito-client',
+    ) as any;
+    const secretDocument = JSON.stringify(cognitoSecret.Properties.SecretString);
+    expect(secretDocument).toContain('BetterAuthCognitoClient');
+    expect(secretDocument).toContain('ClientSecret');
+    expect(secretDocument).toContain('clientId');
+
+    platform.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'nodejs22.x',
+      Architectures: ['arm64'],
+      Handler: 'dist/index.handler',
+      Environment: {
+        Variables: Match.objectLike({
+          NODE_ENV: 'production',
+          BETTER_AUTH_SECRET_ID: 'vetted/test/better-auth/session',
+          COGNITO_CLIENT_SECRET_ID: 'vetted/test/better-auth/cognito-client',
+          BETTER_AUTH_TRUSTED_ORIGINS:
+            'http://127.0.0.1:5173,http://localhost:5173',
+          COGNITO_ISSUER: Match.anyValue(),
+        }),
+      },
+    });
+    const authLambda = Object.values(platform.findResources('AWS::Lambda::Function')).find(
+      (resource: any) => resource.Properties.Runtime === 'nodejs22.x',
+    ) as any;
+    const env = authLambda.Properties.Environment.Variables;
+    expect(env.BETTER_AUTH_URL).toBeUndefined();
+    expect(env.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(env.COGNITO_CLIENT_SECRET).toBeUndefined();
+    expect(JSON.stringify(env)).not.toContain('ClientSecret');
+
+    const policies = JSON.stringify(platform.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('secretsmanager:GetSecretValue');
+    expect(policies).toContain('secret:vetted/test/better-auth/*');
+    expect(policies).not.toContain('secretsmanager:ListSecrets');
+  });
+
+  test('routes auth through an IAM-only Function URL with signed OAC and explicit no-cache forwarding', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::Lambda::Url', {
+      AuthType: 'AWS_IAM',
+      InvokeMode: 'BUFFERED',
+    });
+    platform.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
+      OriginAccessControlConfig: Match.objectLike({
+        OriginAccessControlOriginType: 'lambda',
+        SigningBehavior: 'always',
+        SigningProtocol: 'sigv4',
+      }),
+    });
+    platform.hasResourceProperties('AWS::CloudFront::OriginRequestPolicy', {
+      OriginRequestPolicyConfig: Match.objectLike({
+        CookiesConfig: { CookieBehavior: 'all' },
+        QueryStringsConfig: { QueryStringBehavior: 'all' },
+        HeadersConfig: Match.objectLike({
+          HeaderBehavior: 'whitelist',
+          Headers: Match.arrayWith(['Origin', 'Referer', 'X-Vetted-Host']),
+        }),
+      }),
+    });
+    platform.hasResourceProperties('AWS::CloudFront::Function', {
+      AutoPublish: true,
+      FunctionCode: Match.stringLikeRegexp('x-vetted-host'),
+    });
+
+    const distribution = Object.values(
+      platform.findResources('AWS::CloudFront::Distribution'),
+    )[0] as any;
+    const authBehavior = distribution.Properties.DistributionConfig.CacheBehaviors.find(
+      (behavior: any) => behavior.PathPattern === '/api/auth/*',
+    );
+    expect(authBehavior).toMatchObject({
+      AllowedMethods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE'],
+      CachedMethods: ['GET', 'HEAD', 'OPTIONS'],
+      CachePolicyId: '4135ea2d-6df8-44a3-9df3-4b5a84be39ad',
+      ViewerProtocolPolicy: 'https-only',
+      Compress: false,
+    });
+    expect(authBehavior.FunctionAssociations).toHaveLength(1);
+
+    const permissions = Object.values(
+      platform.findResources('AWS::Lambda::Permission'),
+    ) as any[];
+    const cloudFrontPermissions = permissions.filter(
+      (permission) => permission.Properties.Principal === 'cloudfront.amazonaws.com',
+    );
+    expect(cloudFrontPermissions).toHaveLength(1);
+    expect(cloudFrontPermissions[0].Properties.Action).toBe('lambda:InvokeFunctionUrl');
+    expect(JSON.stringify(cloudFrontPermissions[0].Properties.SourceArn)).toContain(
+      'FrontendDistribution',
+    );
+  });
+
+  test('does not add public Better Auth routes to the protected reviewer API', () => {
+    const { platform } = build(baseConfig);
+    const routes = Object.values(platform.findResources('AWS::ApiGatewayV2::Route')).map(
+      (route: any) => String(route.Properties.RouteKey),
+    );
+    expect(routes.some((route) => route.includes('/api/auth'))).toBe(false);
+    const protectedRoute = Object.values(
+      platform.findResources('AWS::ApiGatewayV2::Route'),
+    ).find((route: any) => route.Properties.RouteKey === 'POST /cases') as any;
+    expect(protectedRoute.Properties.AuthorizationType).toBe('JWT');
+  });
+});
+
 describe('CloudFront uses OAC, never OAI, and keeps the frontend private', () => {
   test('an Origin Access Control exists and no OAI is created', () => {
     const { platform } = build(baseConfig);
-    platform.resourceCountIs('AWS::CloudFront::OriginAccessControl', 1);
+    platform.resourceCountIs('AWS::CloudFront::OriginAccessControl', 2);
     platform.resourceCountIs('AWS::CloudFront::CloudFrontOriginAccessIdentity', 0);
   });
 
@@ -300,13 +451,17 @@ describe('API authorization boundaries', () => {
     const permissions = Object.values(
       platform.findResources('AWS::Lambda::Permission'),
     ) as any[];
+    const apiPermissions = permissions.filter(
+      (permission) => permission.Properties.Principal === 'apigateway.amazonaws.com',
+    );
     const apiLogicalIds = Object.keys(platform.findResources('AWS::ApiGatewayV2::Api'));
 
-    expect(permissions).toHaveLength(1);
+    expect(apiPermissions).toHaveLength(1);
+    const [permission] = apiPermissions;
     expect(apiLogicalIds).toHaveLength(1);
-    expect(permissions[0].Properties.Action).toBe('lambda:InvokeFunction');
-    expect(permissions[0].Properties.Principal).toBe('apigateway.amazonaws.com');
-    const sourceArn = JSON.stringify(permissions[0].Properties.SourceArn);
+    expect(permission.Properties.Action).toBe('lambda:InvokeFunction');
+    expect(permission.Properties.Principal).toBe('apigateway.amazonaws.com');
+    const sourceArn = JSON.stringify(permission.Properties.SourceArn);
     expect(sourceArn).toContain(JSON.stringify({ Ref: apiLogicalIds[0] }));
     expect(sourceArn).toContain('/*/*/*');
   });
@@ -374,6 +529,42 @@ describe('Connected Lambda configuration', () => {
   });
 });
 
+describe('Case review Bedrock model configuration', () => {
+  test('uses the verified Sonnet 5 profile and only Converse-required InvokeModel resources', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'python3.13',
+      Environment: {
+        Variables: Match.objectLike({
+          BEDROCK_REASONING_MODEL_ID: 'us.anthropic.claude-sonnet-5',
+          BEDROCK_MAX_TOKENS: '1024',
+        }),
+      },
+    });
+    const caseLambda = Object.values(platform.findResources('AWS::Lambda::Function')).find(
+      (resource: any) => resource.Properties.Runtime === 'python3.13',
+    ) as any;
+    expect(caseLambda.Properties.Environment.Variables.REVIEW_MODEL_ID).toBeUndefined();
+
+    const policies = Object.values(platform.findResources('AWS::IAM::Policy')) as any[];
+    const modelStatements = policies.flatMap((policy) =>
+      policy.Properties.PolicyDocument.Statement.filter((statement: any) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('bedrock:InvokeModel');
+      }),
+    );
+    expect(modelStatements).toHaveLength(1);
+    expect(modelStatements[0].Action).toBe('bedrock:InvokeModel');
+    const resources = JSON.stringify(modelStatements[0].Resource);
+    expect(resources).toContain(
+      'bedrock:us-west-2:111111111111:inference-profile/us.anthropic.claude-sonnet-5',
+    );
+    expect(resources).toContain(
+      'bedrock:*::foundation-model/anthropic.claude-sonnet-5',
+    );
+  });
+});
+
 describe('IAM least privilege', () => {
   test('no policy grants Action:* or a broad service:* wildcard', () => {
     const { platform } = build(baseConfig);
@@ -398,7 +589,7 @@ describe('IAM least privilege', () => {
     }
   });
 
-  test('generated packet objects remain read-only to the case proxy', () => {
+  test('case proxy can read and write generated packet/PDF objects only', () => {
     const { platform } = build(baseConfig);
     const policies = Object.values(platform.findResources('AWS::IAM::Policy'));
     const putObjectStatements = policies.flatMap((policy: any) =>
@@ -408,8 +599,19 @@ describe('IAM least privilege', () => {
       }),
     );
     expect(putObjectStatements.length).toBeGreaterThan(0);
-    expect(JSON.stringify(putObjectStatements)).toContain('EvidenceBucket');
-    expect(JSON.stringify(putObjectStatements)).not.toContain('GeneratedBucket');
+    const putObjectJson = JSON.stringify(putObjectStatements);
+    expect(putObjectJson).toContain('EvidenceBucket');
+    expect(putObjectJson).toContain('GeneratedBucket');
+    const generatedStatements = policies.flatMap((policy: any) =>
+      policy.Properties.PolicyDocument.Statement.filter((statement: any) =>
+        JSON.stringify(statement.Resource).includes('GeneratedBucket'),
+      ),
+    );
+    expect(generatedStatements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ Action: ['s3:GetObject', 's3:PutObject'], Effect: 'Allow' }),
+      ]),
+    );
   });
 
   test('agent runtime trust policy pins SourceAccount (confused-deputy guard)', () => {
@@ -600,7 +802,7 @@ describe('Deployment gates', () => {
 
   test('Slack secret remains absent by default and gated env/IAM are restored when imported', () => {
     const { platform } = build(baseConfig);
-    platform.resourceCountIs('AWS::SecretsManager::Secret', 0);
+    platform.resourceCountIs('AWS::SecretsManager::Secret', 2);
     const lambdas = platform.findResources('AWS::Lambda::Function');
     const proxyEnvs = Object.values(lambdas)
       .map((l: any) => l.Properties.Environment?.Variables ?? {})
@@ -612,7 +814,7 @@ describe('Deployment gates', () => {
     const secretArn =
       'arn:aws:secretsmanager:us-west-2:111111111111:secret:csub/slack-test-AbCdEf';
     const withSlack = build({ ...baseConfig, slackSecretArn: secretArn }).platform;
-    withSlack.resourceCountIs('AWS::SecretsManager::Secret', 0);
+    withSlack.resourceCountIs('AWS::SecretsManager::Secret', 2);
     withSlack.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'python3.13',
       Environment: {
@@ -641,6 +843,7 @@ describe('platform-config resolver', () => {
       'ENABLE_VECTOR_STORES',
       'ENABLE_GUARDRAIL',
       'COGNITO_DOMAIN_PREFIX',
+      'REVIEW_MODEL_ID',
     ] as const;
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     try {
@@ -650,6 +853,7 @@ describe('platform-config resolver', () => {
       expect(defaults.enableVectorStores).toBe(false);
       expect(defaults.enableGuardrail).toBe(false);
       expect(defaults.cognitoDomainPrefix).toBeUndefined();
+      expect(defaults.reviewModelId).toBe('us.anthropic.claude-sonnet-5');
 
       const enabled = resolvePlatformConfig(
         new cdk.App({
@@ -658,6 +862,7 @@ describe('platform-config resolver', () => {
             enableVectorStores: true,
             enableGuardrail: true,
             cognitoDomainPrefix: 'configured-reviewer-domain',
+            reviewModelId: 'us.anthropic.claude-sonnet-custom',
           },
         }),
       );
@@ -665,6 +870,7 @@ describe('platform-config resolver', () => {
       expect(enabled.enableVectorStores).toBe(true);
       expect(enabled.enableGuardrail).toBe(true);
       expect(enabled.cognitoDomainPrefix).toBe('configured-reviewer-domain');
+      expect(enabled.reviewModelId).toBe('us.anthropic.claude-sonnet-custom');
     } finally {
       for (const key of keys) {
         const value = previous[key];
