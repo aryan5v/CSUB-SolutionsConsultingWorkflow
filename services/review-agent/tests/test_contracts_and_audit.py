@@ -60,6 +60,20 @@ class ContractValidationTests(unittest.TestCase):
         payload = packet_state.policy_result.to_dict()
         self.assertIs(validate(payload, "policy-result"), payload)
 
+    def test_email_validation_rejects_whitespace_controls_and_extra_at_signs(self) -> None:
+        for email in (
+            "requester @example.edu",
+            "requester@example.edu\nBcc:attacker@example.com",
+            "requester@@example.edu",
+            ".requester@example.edu",
+            "requester@-example.edu",
+        ):
+            with self.subTest(email=email):
+                payload = low_risk_case().to_dict()
+                payload["requester"]["email"] = email
+                with self.assertRaises(ContractValidationError):
+                    validate(payload, "case-intake")
+
 
 class AuditTests(unittest.TestCase):
     def test_forbidden_detail_key_rejected(self) -> None:

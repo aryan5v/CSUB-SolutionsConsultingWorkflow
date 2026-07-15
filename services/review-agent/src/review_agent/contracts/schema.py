@@ -15,7 +15,6 @@ import functools
 import json
 import math
 import os
-import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -131,16 +130,28 @@ def _check(value: object, schema: dict, path: str, root_schema: dict) -> None:
             raise ContractValidationError(f"{path}: string is shorter than {schema['minLength']}")
         value_format = schema.get("format")
         if value_format == "email":
-            # Reject empty, whitespace-only, control characters, and invalid format
-            if not value or not isinstance(value, str):
+            if len(value) > 254 or value.count("@") != 1:
                 raise ContractValidationError(f"{path}: invalid email format")
-            # Reject strings with whitespace or control characters
-            if any(c.isspace() or ord(c) < 32 for c in value):
+            if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
                 raise ContractValidationError(f"{path}: invalid email format")
-            if "@" not in value or len(value) > 254:
-                raise ContractValidationError(f"{path}: invalid email format")
-            local, _, domain = value.rpartition("@")
-            if not local or not domain or "." not in domain:
+            local, domain = value.split("@")
+            labels = domain.split(".")
+            if (
+                not local
+                or len(local) > 64
+                or local.startswith(".")
+                or local.endswith(".")
+                or ".." in local
+                or len(labels) < 2
+                or any(
+                    not label
+                    or len(label) > 63
+                    or label.startswith("-")
+                    or label.endswith("-")
+                    or not all(char.isalnum() or char == "-" for char in label)
+                    for label in labels
+                )
+            ):
                 raise ContractValidationError(f"{path}: invalid email format")
         if value_format == "date-time":
             try:

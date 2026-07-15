@@ -70,6 +70,18 @@ class WorkflowSliceTests(unittest.TestCase):
         self.assertTrue(state.policy_result.escalated)
         self.assertTrue(checkpointer.has("CASE-ESC"))
 
+    def test_specialists_require_policy_result_at_runtime(self) -> None:
+        wf = _workflow(InMemoryAuditSink(), InMemoryCheckpointer())
+        state = ReviewGraphState(case_id="CASE-ORDER", case_input=low_risk_case())
+        with self.assertRaisesRegex(ValueError, "policy_result must be evaluated"):
+            wf.run_specialists(state)
+
+    def test_packet_composition_requires_policy_result_at_runtime(self) -> None:
+        wf = _workflow(InMemoryAuditSink(), InMemoryCheckpointer())
+        state = ReviewGraphState(case_id="CASE-ORDER", case_input=low_risk_case())
+        with self.assertRaisesRegex(ValueError, "policy_result must be evaluated"):
+            wf.compose(state)
+
     def test_pause_and_resume_from_checkpoint(self) -> None:
         # Run to the review interrupt, then confirm the snapshot round-trips.
         state, _sink, checkpointer = self._run(medium_risk_case(), "CASE-RESUME")

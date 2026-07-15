@@ -96,6 +96,18 @@ class JsonParsingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.complete_json(system="s", prompt="p", context={})
 
+    def test_rejects_malformed_json_with_descriptive_value_error(self) -> None:
+        fake = _FakeConverse('{"a": broken}')
+        client = BedrockModelClient(model_id="m", region="r", client=fake)
+        with self.assertRaisesRegex(ValueError, "model returned non-JSON body"):
+            client.complete_json(system="s", prompt="p", context={})
+
+    def test_rejects_empty_reply_with_descriptive_value_error(self) -> None:
+        fake = _FakeConverse("  ")
+        client = BedrockModelClient(model_id="m", region="r", client=fake)
+        with self.assertRaisesRegex(ValueError, "model returned empty response"):
+            client.complete_json(system="s", prompt="p", context={})
+
 
 class FactoryTests(unittest.TestCase):
     def test_local_fakes_returns_deterministic_client(self) -> None:

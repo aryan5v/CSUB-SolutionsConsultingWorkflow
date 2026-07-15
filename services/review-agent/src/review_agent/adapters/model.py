@@ -147,20 +147,18 @@ class BedrockModelClient:
                 raise ValueError("model returned empty JSON content in fence")
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError as error:
+        except json.JSONDecodeError:
             # Fall back to the first balanced {...} span.
             start = stripped.find("{")
             end = stripped.rfind("}")
             if start == -1 or end <= start:
-                raise ValueError(
-                    f"model did not return a JSON object: {stripped[:200]!r}"
-                ) from None
+                raise ValueError("model did not return a JSON object") from None
             try:
                 parsed = json.loads(stripped[start : end + 1])
             except json.JSONDecodeError as inner_error:
                 raise ValueError(
-                    f"model returned non-JSON body: {stripped[start:end+1]!r} "
-                    f"(JSON error: {inner_error})"
+                    "model returned non-JSON body "
+                    f"(JSON error at character {inner_error.pos}: {inner_error.msg})"
                 ) from inner_error
         if not isinstance(parsed, dict):
             raise ValueError(f"model returned non-object JSON: {type(parsed).__name__}")

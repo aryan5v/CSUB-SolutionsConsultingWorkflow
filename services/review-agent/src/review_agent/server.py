@@ -151,9 +151,15 @@ def create_server(
 
         def _cors_headers(self) -> None:
             origin = self.headers.get("Origin")
-            # Reject origin values containing newline/carriage return to prevent header injection
-            if origin and "\n" not in origin and "\r" not in origin and origin in {"http://127.0.0.1:5173", "http://localhost:5173"}:
-                self.send_header("Access-Control-Allow-Origin", origin)
+            # Return a constant value for each allowlisted origin so request data
+            # never flows into a response header (and cannot split the response).
+            allowed_origin: str | None = None
+            if origin == "http://127.0.0.1:5173":
+                allowed_origin = "http://127.0.0.1:5173"
+            elif origin == "http://localhost:5173":
+                allowed_origin = "http://localhost:5173"
+            if allowed_origin is not None:
+                self.send_header("Access-Control-Allow-Origin", allowed_origin)
                 self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

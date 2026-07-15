@@ -292,13 +292,23 @@ class LocalHttpServerTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
-    def request(self, path: str, *, method: str = "GET", payload: dict | None = None):
+    def request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request_headers = dict(headers or {})
+        if body:
+            request_headers["Content-Type"] = "application/json"
         request = Request(
             f"{self.base}{path}",
             data=body,
             method=method,
-            headers={"Content-Type": "application/json"} if body else {},
+            headers=request_headers,
         )
         with urlopen(request, timeout=2) as response:
             return response.status, response.headers, response.read().decode("utf-8")
@@ -341,6 +351,20 @@ class LocalHttpServerTests(unittest.TestCase):
         payload = json.loads(error.read().decode("utf-8"))
         error.close()
         self.assertEqual(payload["error"]["code"], "case_not_found")
+
+    def test_cors_only_echoes_allowlisted_origins_as_constants(self) -> None:
+        _, allowed_headers, _ = self.request(
+            "/review-queue", headers={"Origin": "http://localhost:5173"}
+        )
+        self.assertEqual(
+            allowed_headers.get("Access-Control-Allow-Origin"),
+            "http://localhost:5173",
+        )
+
+        _, rejected_headers, _ = self.request(
+            "/review-queue", headers={"Origin": "https://attacker.example"}
+        )
+        self.assertIsNone(rejected_headers.get("Access-Control-Allow-Origin"))
 
 
 if __name__ == "__main__":
