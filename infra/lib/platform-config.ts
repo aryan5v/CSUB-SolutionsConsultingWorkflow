@@ -16,6 +16,14 @@ export interface PlatformConfig {
   /** Finite retention period (days) applied to data, logs, and audit. */
   readonly retentionDays: number;
 
+  // ---- Cognito hosted UI ----------------------------------------------
+  /**
+   * Optional globally unique Cognito prefix-domain label. When omitted, the
+   * stack derives an account- and environment-specific prefix. Configure this
+   * when the derived prefix is unavailable in the deployment Region.
+   */
+  readonly cognitoDomainPrefix?: string;
+
   // ---- Master service gates (SCP-safe deployment defaults) -------------
   /**
    * Create AgentCore services (Runtime/Endpoint/Memory/Browser + their roles,
@@ -139,9 +147,22 @@ export function resolvePlatformConfig(app: cdk.App): PlatformConfig {
     throw new Error(`budgetLimitUsd must be a positive integer, got: ${budgetLimitUsd}`);
   }
 
+  const configuredCognitoDomainPrefix =
+    ctx(app, 'cognitoDomainPrefix') ?? process.env.COGNITO_DOMAIN_PREFIX;
+  const cognitoDomainPrefix = configuredCognitoDomainPrefix?.trim();
+  if (
+    cognitoDomainPrefix !== undefined &&
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(cognitoDomainPrefix)
+  ) {
+    throw new Error(
+      'cognitoDomainPrefix must be 1-63 lowercase letters, numbers, or hyphens and cannot start or end with a hyphen',
+    );
+  }
+
   return {
     appEnv,
     retentionDays,
+    cognitoDomainPrefix,
     enableAgentCoreServices: boolCtx(
       app,
       'enableAgentCoreServices',

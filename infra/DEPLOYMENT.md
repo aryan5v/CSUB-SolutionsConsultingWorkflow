@@ -147,6 +147,7 @@ the shared cross-stack KMS policy. No account or personal identifier is needed.
 |---|---|
 | Budget | Monthly `budgetLimitUsd` (default 50 USD); optional `budgetNotificationEmail`. |
 | Data classification | Sanitized/synthetic only. PII/PHI classification + guardrail-mode approval **required** before any Knowledge Base ingestion. |
+| Cognito domain | Defaults to account/environment-unique `csub-reviewer-<environment>-<account>`; set `cognitoDomainPrefix`/`COGNITO_DOMAIN_PREFIX` to another globally unique prefix if unavailable. |
 | Model IDs | Discover and pin `embeddingModelArn` / foundation-model IDs after auth; never commit them. |
 | AgentCore services | Default `enableAgentCoreServices=false`; enable only where SCPs permit AgentCore create APIs. An image URI never bypasses this gate. |
 | Vector stores | Default `enableVectorStores=false`; enable only where SCPs permit `s3vectors:CreateVectorBucket`. |
@@ -168,6 +169,7 @@ npm --prefix infra run diff                          # review additive foundatio
 # Deploy foundation first (adds a managed export), then the supported core.
 npm --prefix infra run deploy -- ReviewFoundationStack
 npm --prefix infra run deploy -- PlatformStack \
+  -c cognitoDomainPrefix=<globally-unique-prefix> \
   -c enableAgentCoreServices=false \
   -c enableVectorStores=false \
   -c enableGuardrail=false \
@@ -181,6 +183,14 @@ npm --prefix infra run deploy -- PlatformStack \
   -c embeddingModelArn=arn:aws:bedrock:us-west-2::foundation-model/<embed-model> \
   -c enableGuardrail=true
 ```
+
+Use the resulting `CognitoDomainUrl`, `UserPoolClientId`, and
+`CloudFrontDomain` outputs to set `VITE_COGNITO_DOMAIN`,
+`VITE_COGNITO_CLIENT_ID`, and the exact
+`https://<CloudFrontDomain>/app` redirect/logout variables for the reviewer
+build. The client is secretless and also allowlists only the documented
+`http://127.0.0.1:5173/app` local-development origin. User/password creation is
+not part of this deployment.
 
 ### Deployed artifact for the Lambda proxy
 

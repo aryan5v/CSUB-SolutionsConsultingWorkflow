@@ -74,6 +74,68 @@ describe('PlatformStack — offline synthesis and core surface', () => {
   });
 });
 
+describe('Cognito hosted UI supports the reviewer PKCE client', () => {
+  const configuredDomainPrefix = 'csub-reviewer-test-unique';
+  const localDevelopmentAppUrl = 'http://127.0.0.1:5173/app';
+
+  test('uses a secretless authorization-code-only client with exact scopes and URLs', () => {
+    const { platform } = build({ ...baseConfig, cognitoDomainPrefix: configuredDomainPrefix });
+    const distributions = platform.findResources('AWS::CloudFront::Distribution');
+    const distributionLogicalId = Object.keys(distributions)[0];
+    const cloudFrontAppUrl = {
+      'Fn::Join': [
+        '',
+        [
+          'https://',
+          { 'Fn::GetAtt': [distributionLogicalId, 'DomainName'] },
+          '/app',
+        ],
+      ],
+    };
+
+    const domains = platform.findResources('AWS::Cognito::UserPoolDomain');
+    const domainLogicalId = Object.keys(domains)[0];
+    platform.resourceCountIs('AWS::Cognito::UserPoolDomain', 1);
+    platform.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
+      Domain: configuredDomainPrefix,
+      UserPoolId: Match.anyValue(),
+    });
+
+    const clients = Object.values(platform.findResources('AWS::Cognito::UserPoolClient'));
+    expect(clients).toHaveLength(1);
+    const properties = (clients[0] as any).Properties;
+    expect(properties.GenerateSecret).toBe(false);
+    expect(properties.AllowedOAuthFlowsUserPoolClient).toBe(true);
+    expect(properties.AllowedOAuthFlows).toEqual(['code']);
+    expect(properties.AllowedOAuthFlows).not.toContain('implicit');
+    expect(properties.AllowedOAuthFlows).not.toContain('client_credentials');
+    expect(properties.AllowedOAuthScopes).toEqual(['openid', 'email', 'profile']);
+    expect(properties.SupportedIdentityProviders).toEqual(['COGNITO']);
+    expect(properties.CallbackURLs).toEqual([cloudFrontAppUrl, localDevelopmentAppUrl]);
+    expect(properties.LogoutURLs).toEqual([cloudFrontAppUrl, localDevelopmentAppUrl]);
+
+    platform.hasOutput('CognitoDomainUrl', {
+      Value: {
+        'Fn::Join': [
+          '',
+          [
+            'https://',
+            { Ref: domainLogicalId },
+            '.auth.us-west-2.amazoncognito.com',
+          ],
+        ],
+      },
+    });
+  });
+
+  test('derives a unique account-and-environment prefix when no override is supplied', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
+      Domain: 'csub-reviewer-test-111111111111',
+    });
+  });
+});
+
 describe('CloudFront uses OAC, never OAI, and keeps the frontend private', () => {
   test('an Origin Access Control exists and no OAI is created', () => {
     const { platform } = build(baseConfig);
@@ -557,11 +619,12 @@ describe('Foundation coordination', () => {
 });
 
 describe('platform-config resolver', () => {
-  test('master service and guardrail gates default false and accept explicit context opt-in', () => {
+  test('service gates default false and Cognito/domain settings accept explicit context', () => {
     const keys = [
       'ENABLE_AGENTCORE_SERVICES',
       'ENABLE_VECTOR_STORES',
       'ENABLE_GUARDRAIL',
+      'COGNITO_DOMAIN_PREFIX',
     ] as const;
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     try {
@@ -570,6 +633,7 @@ describe('platform-config resolver', () => {
       expect(defaults.enableAgentCoreServices).toBe(false);
       expect(defaults.enableVectorStores).toBe(false);
       expect(defaults.enableGuardrail).toBe(false);
+      expect(defaults.cognitoDomainPrefix).toBeUndefined();
 
       const enabled = resolvePlatformConfig(
         new cdk.App({
@@ -577,12 +641,14 @@ describe('platform-config resolver', () => {
             enableAgentCoreServices: true,
             enableVectorStores: true,
             enableGuardrail: true,
+            cognitoDomainPrefix: 'configured-reviewer-domain',
           },
         }),
       );
       expect(enabled.enableAgentCoreServices).toBe(true);
       expect(enabled.enableVectorStores).toBe(true);
       expect(enabled.enableGuardrail).toBe(true);
+      expect(enabled.cognitoDomainPrefix).toBe('configured-reviewer-domain');
     } finally {
       for (const key of keys) {
         const value = previous[key];
@@ -599,6 +665,8 @@ describe('platform-config resolver', () => {
     expect(() => resolvePlatformConfig(app2)).toThrow(/agentCoreNetworkMode/);
     const app3 = new cdk.App({ context: { enableVectorStores: 'sometimes' } });
     expect(() => resolvePlatformConfig(app3)).toThrow(/enableVectorStores must be a boolean/);
+    const app4 = new cdk.App({ context: { cognitoDomainPrefix: 'Invalid_Prefix' } });
+    expect(() => resolvePlatformConfig(app4)).toThrow(/cognitoDomainPrefix/);
   });
 
   test('maps day counts to supported CloudWatch retention', () => {

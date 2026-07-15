@@ -62,6 +62,7 @@ export interface PlatformStackProps extends cdk.StackProps {
  */
 export class PlatformStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
+  public readonly userPoolDomain: cognito.UserPoolDomain;
   public readonly userPoolClient: cognito.UserPoolClient;
   public readonly frontendBucket: s3.Bucket;
   public readonly evidenceBucket: s3.Bucket;
@@ -229,14 +230,15 @@ export class PlatformStack extends cdk.Stack {
       removalPolicy,
     });
 
-    this.userPoolClient = new cognito.UserPoolClient(this, 'ReviewerPoolClient', {
-      userPool: this.userPool,
-      authFlows: { userSrp: true },
-      generateSecret: false,
-      preventUserExistenceErrors: true,
-      accessTokenValidity: cdk.Duration.hours(1),
-      idTokenValidity: cdk.Duration.hours(1),
-      refreshTokenValidity: cdk.Duration.days(1),
+    const normalizedDomainEnvironment = appEnv
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .slice(0, 30);
+    const cognitoDomainPrefix =
+      config.cognitoDomainPrefix ??
+      `csub-reviewer-${normalizedDomainEnvironment || 'env'}-${this.account}`;
+    this.userPoolDomain = this.userPool.addDomain('ReviewerPoolDomain', {
+      cognitoDomain: { domainPrefix: cognitoDomainPrefix },
     });
 
     // ====================================================================
@@ -260,6 +262,29 @@ export class PlatformStack extends cdk.Stack {
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
       ],
+    });
+
+    const cloudFrontAppUrl = `https://${this.distribution.distributionDomainName}/app`;
+    const localDevelopmentAppUrl = 'http://127.0.0.1:5173/app';
+    this.userPoolClient = new cognito.UserPoolClient(this, 'ReviewerPoolClient', {
+      userPool: this.userPool,
+      authFlows: { userSrp: true },
+      generateSecret: false,
+      preventUserExistenceErrors: true,
+      accessTokenValidity: cdk.Duration.hours(1),
+      idTokenValidity: cdk.Duration.hours(1),
+      refreshTokenValidity: cdk.Duration.days(1),
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      oAuth: {
+        flows: {
+          authorizationCodeGrant: true,
+          implicitCodeGrant: false,
+          clientCredentials: false,
+        },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls: [cloudFrontAppUrl, localDevelopmentAppUrl],
+        logoutUrls: [cloudFrontAppUrl, localDevelopmentAppUrl],
+      },
     });
 
     // ====================================================================
@@ -986,6 +1011,10 @@ export class PlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CloudFrontDomain', { value: this.distribution.distributionDomainName });
     new cdk.CfnOutput(this, 'UserPoolId', { value: this.userPool.userPoolId });
     new cdk.CfnOutput(this, 'UserPoolClientId', { value: this.userPoolClient.userPoolClientId });
+    new cdk.CfnOutput(this, 'CognitoDomainUrl', {
+      value: this.userPoolDomain.baseUrl(),
+      description: 'Cognito hosted UI origin for VITE_COGNITO_DOMAIN.',
+    });
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
     new cdk.CfnOutput(this, 'EvidenceBucketName', { value: this.evidenceBucket.bucketName });
     new cdk.CfnOutput(this, 'EcrRepositoryUri', { value: this.ecrRepository.repositoryUri });

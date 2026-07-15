@@ -79,7 +79,12 @@ customer-managed KMS key and `cases` table are passed by object reference
 - **DynamoDB (PITR on all):** vendor, product (catalog), contact, invite
   (keyed by `token_hash`, never plaintext), submission, review, profile
   (immutable `(user_id, version)`), integration-event, audit, and idempotency.
-- **Cognito:** reviewer user pool (no self-service signup) + app client.
+- **Cognito:** reviewer user pool (no self-service signup), configurable
+  account/environment-unique prefix domain, and secretless public app client.
+  The client permits only the OAuth authorization-code grant with scopes
+  `openid email profile`; its exact callback/logout allowlist is the CloudFront
+  `/app` URL plus intentional local development at
+  `http://127.0.0.1:5173/app`.
 - **API (HTTP API + Lambda proxy):** reviewer/admin routes require the Cognito
   JWT authorizer; `/intake` and `/slack/events` are public at the
   gateway and enforced downstream (opaque token / signature). The invite token
@@ -115,6 +120,7 @@ customer-managed KMS key and `cases` table are passed by object reference
 | `appEnv` | `APP_ENV` | `development` | Environment label and resource suffix. |
 | `retentionDays` | `RETENTION_DAYS` | `90` | Finite retention for data, logs, audit. |
 | `owner` | `PROJECT_OWNER` | `unspecified` | Owner tag. |
+| `cognitoDomainPrefix` | `COGNITO_DOMAIN_PREFIX` | `csub-reviewer-<environment>-<account>` | Globally unique Cognito prefix domain; override if the derived prefix is unavailable in the Region. |
 | `enableAgentCoreServices` | `ENABLE_AGENTCORE_SERVICES` | `false` | **Master gate:** AgentCore resources and AgentCore-specific IAM; image URI cannot bypass it. |
 | `agentCoreImageUri` | `AGENTCORE_IMAGE_URI` | *(unset)* | With AgentCore enabled, creates Runtime + Endpoint. |
 | `agentCoreNetworkMode` | `AGENTCORE_NETWORK_MODE` | `PUBLIC` | Sandbox `PUBLIC`; production `VPC`. |
@@ -169,6 +175,22 @@ guardrail-mode approval. Do **not** ingest institutional data until that
 approval is recorded. Discover and pin the embedding/foundation model IDs after
 authenticating (`aws bedrock list-foundation-models`), then pass them via
 context — never hard-code model IDs, account IDs, URLs, or credentials.
+
+### Reviewer frontend deployment outputs
+
+After `PlatformStack` deploys, configure the reviewer frontend from stack
+outputs (all values are public identifiers, not credentials):
+
+| Frontend variable | Platform output/value |
+|---|---|
+| `VITE_COGNITO_DOMAIN` | `CognitoDomainUrl` |
+| `VITE_COGNITO_CLIENT_ID` | `UserPoolClientId` |
+| `VITE_COGNITO_REDIRECT_URI` | `https://<CloudFrontDomain>/app` |
+| `VITE_COGNITO_LOGOUT_URI` | `https://<CloudFrontDomain>/app` |
+
+The app client also allowlists `http://127.0.0.1:5173/app` for intentional
+local development. Do not create users, passwords, or client secrets in source
+or deployment scripts; demo-user provisioning remains an operator action.
 
 ### Coordinated (additive) foundation changes
 
