@@ -88,7 +88,7 @@ export function CatalogPage({ notify }: { notify: Notify }) {
 
       {error && <div className="record-api-error" role="alert"><strong>Catalog request failed.</strong><span>{error}</span><small>{reviewApi.mode === "live" ? "Live failures are not replaced with fixture data." : "This failure occurred in the explicit fixture adapter."}</small></div>}
 
-      <div className="catalog-columns"><span>Product</span><span>Vendor</span><span>Platform / audience</span><span>Support</span><span>License</span><span>Source</span></div>
+      <div className="catalog-columns" aria-hidden="true"><span>Product</span><span>Vendor</span><span>Platform / audience</span><span>Support</span><span>License</span><span>Source</span></div>
 
       <div className="catalog-list" aria-label="Software catalog results">
         {loading && <div className="catalog-empty" role="status">Loading catalog records…</div>}

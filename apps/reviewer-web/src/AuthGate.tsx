@@ -42,22 +42,19 @@ export default function AuthGate({
     </>;
   }
 
-  return <>
-    <a className="skip-link" href="#main-content">Skip to content</a>
-    <main className="auth-gate" id="main-content">
-      <section className="auth-card" aria-labelledby="reviewer-sign-in-title">
-        <img className="auth-logo" src="/vetted-logo.png" alt="" width={40} height={40} aria-hidden="true" />
-        <p className="eyebrow">VETTED · CSUB REVIEWER WORKSPACE</p>
-        <h1 id="reviewer-sign-in-title">Reviewer sign-in required</h1>
-        {auth.status === "checking"
-          ? <p role="status">Checking your session…</p>
-          : <p>{auth.message ?? "Sign in with campus single sign-on to open the seeded CSUB reviewer workspace."}</p>}
-        {auth.status !== "checking" && <button className="button primary" type="button" onClick={() => void provider.signIn()}>
-          <LockKeyhole size={15} aria-hidden="true" />Go to sign-in
-        </button>}
-        {auth.status === "error" && <div className="auth-error" role="alert">{auth.message}</div>}
-        <small>Campus single sign-on is the only way in. Live mode never falls back to fixture records.</small>
-      </section>
-    </main>
-  </>;
+  return <main className="auth-gate" id="main-content">
+    <section className="auth-card" aria-labelledby="reviewer-sign-in-title">
+      <img className="auth-logo" src="/vetted-logo.png" alt="" width={40} height={40} aria-hidden="true" />
+      <p className="eyebrow">VETTED · CSUB REVIEWER WORKSPACE</p>
+      <h1 id="reviewer-sign-in-title">Reviewer sign-in required</h1>
+      {auth.status === "checking"
+        ? <p role="status">Checking your session…</p>
+        : <p>{auth.message ?? "Sign in with campus single sign-on to open the seeded CSUB reviewer workspace."}</p>}
+      {auth.status !== "checking" && <button className="button primary" type="button" onClick={() => void provider.signIn()}>
+        <LockKeyhole size={15} aria-hidden="true" />Go to sign-in
+      </button>}
+      {auth.status === "error" && <div className="auth-error" role="alert">{auth.message}</div>}
+      <small>Campus single sign-on is the only way in. Live mode never falls back to fixture records.</small>
+    </section>
+  </main>;
 }

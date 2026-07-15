@@ -779,7 +779,7 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
     </ol>
 
     <div className="review-tabs" role="tablist" aria-label="Review sections">
-      {(["overview", "packet", "writeback"] as const).map((item) => <button key={item} id={`review-tab-${item}`} role="tab" aria-selected={tab === item} aria-controls={`review-panel-${item}`} tabIndex={tab === item ? 0 : -1} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} aria-hidden="true" />}</button>)}
+      {(["overview", "packet", "writeback"] as const).map((item) => <button key={item} id={`review-tab-${item}`} type="button" role="tab" aria-selected={tab === item} aria-controls={`review-panel-${item}`} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} aria-hidden="true" />}</button>)}
     </div>
 
     <div className="review-workspace">
@@ -999,7 +999,13 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => { if (nextQueueMode) setQueueMode(nextQueueMode); setPage(nextPage); setMobileNavOpen(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => {
+    if (nextQueueMode) setQueueMode(nextQueueMode);
+    setPage(nextPage);
+    setMobileNavOpen(false);
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  };
   const apiErrorMessage = (error: unknown) => error instanceof ReviewApiError ? error.message : "The local backend request failed.";
   const openCase = (review: ReviewCase) => {
     setReviewComment("");
