@@ -42,6 +42,7 @@ src/review_agent/
   policy/          Deterministic engine, versioned rules, conflict registry (FR-3)
   lookup/          Approved-software lookup with disclosed match method (FR-2)
   specialists/     Parallel security/accessibility nodes + citation checker (FR-5)
+  research/        Official-domain vendor research: SSRF/DNS/redirect + provenance (FR-4/5)
   packet/          Low- and medium-risk packet composition (FR-6)
   orchestration/   Workflow runner, node functions, checkpointer (sec 5)
   vendor/          Workspace-scoped repository interfaces, invite/intake service, immutable runs
@@ -91,6 +92,43 @@ PYTHONPATH=src python3 -m review_agent.institutional "/path/to/Solutions Consult
 ```
 
 See [ADR 0007](../../docs/decisions/0007-institutional-source-normalization.md).
+
+## Official-domain vendor research (SSRF and provenance)
+
+`review_agent.research` fetches public evidence only from the vendor's confirmed
+official domain (and configured standards authorities) and captures resolvable
+provenance for every accepted source (issue #44, FR-4/FR-5). The deterministic
+control flow lives outside any model prompt:
+
+- `DomainAllowlist.derive` computes the registrable domain (eTLD+1) of the
+  confirmed trust-center URL; only that domain, its subdomains, and explicitly
+  configured standards authorities (empty by default) are fetchable.
+- Every URL and redirect hop is validated (`ssrf.py`): HTTPS only, no
+  credentialed URLs, allow-listed ports, DNS-name hosts (no dotted/decimal/hex/
+  octal/IPv6 IP literals), and on-allowlist. Every resolved DNS answer must be
+  globally routable; loopback, link-local (including `169.254.169.254`),
+  private, CGNAT, reserved, multicast, unspecified, and IPv4-mapped IPv6
+  addresses are refused. All answers are validated and one is pinned, and the
+  transport must connect to that pinned IP, closing DNS-rebinding / drift.
+- `ResearchPolicy` (`policy.py`) holds env-overridable redirect / size /
+  download-count / timeout / deadline / content-type limits. These are tool
+  safety limits, not campus policy.
+- `ProvenanceRecord` stores final URL, redirect chain, retrieval time, content
+  hash, MIME type, vendor/product scope, resolved IP, and source locator.
+  `provenance_to_citation` feeds findings through the existing citation checker
+  so cross-vendor/product research is rejected like any other claim.
+- Provider calls sit behind `Resolver` / `HttpTransport` interfaces with local
+  fakes; an AgentCore Browser provider would implement the same interface and is
+  used only when `allow_agentcore_browser` is enabled for an approved account.
+- Off-domain targets and redirect escapes are quarantined for human
+  confirmation and never promoted; all other blocks/errors become gaps for
+  manual review, so research never silently produces a compliant finding.
+  Retrieved text is scanned for prompt-injection markers and flagged, never
+  obeyed.
+
+The capability is not yet bound into the LangGraph packet flow; that wiring is
+owned by the workflow agent. See
+[ADR 0008](../../docs/decisions/0008-official-domain-vendor-research.md).
 
 ## Trust boundaries
 
