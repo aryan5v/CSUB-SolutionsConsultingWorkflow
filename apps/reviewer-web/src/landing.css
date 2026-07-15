@@ -620,11 +620,16 @@
   text-decoration: none;
   font-size: 14px;
   font-weight: 600;
+  /* Keyboard-only: appears when Tab focuses the control, not for mouse users. */
+  pointer-events: none;
 }
 
-.vp-skip:focus {
+.vp-skip:focus-visible {
   left: var(--page-pad);
   top: 12px;
+  pointer-events: auto;
+  outline: 2px solid #3178c6;
+  outline-offset: 3px;
 }
 
 .vp-trusted-row {

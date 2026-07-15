@@ -121,13 +121,35 @@ button, input, textarea, select { color: inherit; font: inherit; }
 button { border: 0; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.48; }
 a { color: inherit; }
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+a:focus:not(:focus-visible) { outline: none; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 ::selection { background: var(--accent); color: var(--accent-foreground); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; margin: -1px; padding: 0; border: 0; clip: rect(0 0 0 0); white-space: nowrap; }
-.skip-link { position: fixed; z-index: 100; top: 8px; left: 8px; padding: 9px 12px; transform: translateY(-150%); border-radius: 6px; background: var(--accent); color: var(--accent-foreground); font-weight: 700; }
-.skip-link:focus { transform: translateY(0); }
-.skip-link:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
+.skip-link {
+  position: fixed;
+  z-index: 100;
+  top: 8px;
+  left: 8px;
+  padding: 9px 12px;
+  transform: translateY(-150%);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-weight: 700;
+  /* Keyboard-only: hidden for pointer users; appears on Tab / focus-visible. */
+  pointer-events: none;
+}
+.skip-link:focus-visible {
+  transform: translateY(0);
+  pointer-events: auto;
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
 
 /* Shared focus + reduced motion for the whole frontend shell */
 @media (prefers-reduced-motion: reduce) {
