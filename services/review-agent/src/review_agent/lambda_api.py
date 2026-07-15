@@ -486,7 +486,13 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "vendor": lambda value: Vendor(**value),
     "product": lambda value: VendorProduct(**value),
     "contact": lambda value: VendorContact(**value),
-    "case": lambda value: VendorCase(**{**value, "lifecycle": CaseLifecycle(value["lifecycle"])}),
+    "case": lambda value: VendorCase(
+        **{
+            **value,
+            "lifecycle": CaseLifecycle(value["lifecycle"]),
+            "vendor_next_actions": tuple(value.get("vendor_next_actions", [])),
+        }
+    ),
     "invite": lambda value: VendorInvite(**{**value, "status": InviteStatus(value["status"])}),
     "evidence": lambda value: EvidenceArtifact(**value),
     "coverage": lambda value: CoverageItem(
@@ -644,8 +650,14 @@ def restore_api(
     for key, value in _string_map(repository_data.get("current_runs", {})).items():
         repository.set_current_run(key, value, workspace_id=workspace_id)
     api._vendor_repository = repository
-    api._profiles = ReviewProfileService(repository)
-    api._vendor = VendorBackend(repository, api._profiles, **vendor_link_settings())
+    api._profiles = ReviewProfileService(repository, workspace_id=workspace_id)
+    api._vendor = VendorBackend(
+        repository,
+        api._profiles,
+        workspace_id=workspace_id,
+        research_provider=api.research_provider,
+        **vendor_link_settings(),
+    )
     api._software_index = ApprovedSoftwareIndex([_approved_record(entry) for entry in catalog])
     api._connector = _restore_connector(snapshot.get("connector"))
     api._cases = {}
@@ -832,7 +844,10 @@ def _dispatch(
         return _dispatch_intake(api, method, path, body, token)
     case = re.fullmatch(r"/cases/([^/]+)(?:/(.*))?", path)
     if case:
-        return _dispatch_case(api, method, _safe_id(case.group(1)), case.group(2) or "", body, reviewer_id)
+        suffix = case.group(2) or ""
+        if method == "GET" and suffix == "research":
+            _reject_token_query(event)
+        return _dispatch_case(api, method, _safe_id(case.group(1)), suffix, body, reviewer_id)
     raise LocalApiError(404, "route_not_found", "route not found")
 
 
@@ -887,6 +902,8 @@ def _dispatch_case(
 ) -> tuple[dict[str, Any], int, bool]:
     if method == "GET" and suffix == "":
         return api.get_state(case_id), 200, False
+    if method == "GET" and suffix == "research":
+        return api.get_case_research(case_id), 200, False
     if method == "POST" and suffix == "documents":
         return api.add_document(case_id, body), 201, True
     if method == "POST" and suffix == "analyze":

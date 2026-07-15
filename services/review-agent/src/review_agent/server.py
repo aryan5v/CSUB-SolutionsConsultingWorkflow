@@ -170,6 +170,12 @@ def create_server(
                     return
                 case_id, suffix = match.groups()
                 suffix = suffix or ""
+                if method == "GET" and suffix == "research" and "token" in query:
+                    raise LocalApiError(
+                        400,
+                        "token_in_url_forbidden",
+                        "invitation tokens must not appear in URLs",
+                    )
                 self._dispatch_case(application, method, case_id, suffix)
             except LocalApiError as error:
                 self._json(error.status, {"error": {"code": error.code, "message": str(error)}})
@@ -269,7 +275,9 @@ def create_server(
         def _dispatch_case(
             self, application: LocalReviewApi, method: str, case_id: str, suffix: str
         ) -> None:
-            if method == "POST" and suffix == "documents":
+            if method == "GET" and suffix == "research":
+                self._json(HTTPStatus.OK, application.get_case_research(case_id))
+            elif method == "POST" and suffix == "documents":
                 self._json(HTTPStatus.CREATED, application.add_document(case_id, self._body()))
             elif method == "POST" and suffix == "analyze":
                 body = self._body()

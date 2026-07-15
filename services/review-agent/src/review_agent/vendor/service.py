@@ -10,7 +10,7 @@ import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import quote, urlsplit
 
 from ..contracts.vendor import (
@@ -36,10 +36,14 @@ from ..contracts.vendor import (
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..research import VendorResearchProvider
+
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
 _NORMALIZE_TOKENS = re.compile(r"[^a-z0-9]+")
+_UNSET = object()
 
 
 class VendorBackendError(ValueError):
@@ -64,6 +68,7 @@ class VendorBackend:
         reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
         intake_base_url: str = "https://vetted.invalid/intake",
         link_secret: bytes | None = None,
+        research_provider: VendorResearchProvider | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
@@ -77,12 +82,17 @@ class VendorBackend:
         self.invite_ttl = invite_ttl
         self.reminder_interval = reminder_interval
         self.intake_base_url = intake_base_url.rstrip("/#")
-        # Keyed secret for sealing invite tokens so reminder emails can repeat
-        # the vendor's intake link without ever persisting a raw token. When
-        # not configured, a per-process secret is generated: links stay
-        # available for the process lifetime and reminders degrade gracefully
-        # (no link, generic copy) after a restart.
+        # Keyed secret seals invite tokens so reminders can repeat the scoped
+        # link without persisting plaintext. Production supplies a stable key.
         self._link_secret = link_secret or secrets.token_bytes(32)
+        # Guarded official-domain research annotates provenance and gaps only.
+        self._research = research_provider
+
+    @property
+    def research_provider(self) -> VendorResearchProvider | None:
+        """The configured official-domain research provider, if any."""
+
+        return self._research
 
     # Reviewer-owned vendor/product/contact records ---------------------------
 
@@ -499,6 +509,12 @@ class VendorBackend:
             "intake_analysis_complete": submission.intake_analysis_complete,
             "review_stage": self._VENDOR_REVIEW_STAGES[case.lifecycle],
             "outcome": self._VENDOR_OUTCOMES.get(case.lifecycle),
+            "vendor_visible_comment": case.vendor_visible_comment,
+            "next_actions": (
+                list(case.vendor_next_actions)
+                if case.lifecycle is CaseLifecycle.CHANGES_REQUESTED
+                else []
+            ),
             "checklist": self._checklist(submission),
         }
 
@@ -640,11 +656,17 @@ class VendorBackend:
                     coverage_ids=(*submission.coverage_ids, coverage.coverage_id),
                 )
                 auto_covered.append(criterion.requirement_id)
-        host = urlsplit(submission.trust_center_url).hostname or "unknown"
+        host = urlsplit(str(submission.trust_center_url)).hostname or "unknown"
+        # Official-domain research (issue #44): fetch the confirmed trust-center
+        # URL through the guarded provider when one is configured, capturing
+        # resolvable provenance for same-domain evidence and surfacing failures
+        # as gaps. This annotates only; coverage/questions above are unchanged
+        # and research never approves, sets policy, or invents requirements.
+        research_dict, research_note = self._run_official_domain_research(submission)
         research_summary = (
             f"Reviewed trust-center host {host}; inventoried {len(evidence)} evidence "
             f"artifact(s); auto-covered {len(auto_covered)} requirement(s) by deterministic "
-            f"extraction."
+            f"extraction. {research_note}"
         )
         finished = replace(
             submission,
@@ -662,10 +684,91 @@ class VendorBackend:
                 "auto_covered_requirement_ids": auto_covered,
                 "evidence_count": len(evidence),
                 "trust_center_host": host,
-                "simulated": True,
+                "research_performed": research_dict is not None,
+                "research": research_dict,
+                # Honest provenance: the deterministic coverage/extraction step is
+                # a stand-in, but when a live provider performed a real guarded
+                # HTTPS fetch the research portion is genuine, not simulated. Only
+                # label the analysis simulated when no live research ran.
+                "simulated": research_dict is None,
             },
         )
         return finished
+
+    def _run_official_domain_research(
+        self, submission: Submission
+    ) -> tuple[dict | None, str]:
+        """Run guarded official-domain research for the trust-center URL.
+
+        Returns ``(research_result_dict_or_None, human_summary_note)``. When no
+        provider is configured, research is not performed and this is stated
+        truthfully; nothing is fabricated. Research output is provenance/gaps
+        only and does not alter coverage, questions, policy, or approval.
+        """
+
+        if self._research is None or submission.trust_center_url is None:
+            return None, "Live official-domain research was not performed in this environment."
+        product = self._require("product", submission.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        result = self._research.research(
+            official_url=submission.trust_center_url,
+            targets=[submission.trust_center_url],
+            vendor=vendor.name,
+            product=product.name,
+        )
+        research_dict = result.to_dict()
+        note = (
+            f"Official-domain research captured {len(result.findings)} provenance-backed "
+            f"source(s), {len(result.gaps)} gap(s) for manual review, and quarantined "
+            f"{len(result.quarantined)} off-domain link(s)."
+        )
+        return research_dict, note
+
+    def intake_research(self, token: str) -> dict | None:
+        """Return the provenance/gaps payload from the latest intake analysis.
+
+        Provides reviewers/analysis a resolvable record of official-domain
+        research (final URL, redirect chain, hash, MIME, scope, gaps, quarantined
+        links). Returns ``None`` if analysis has not run or no provider was
+        configured.
+        """
+
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        events = [
+            event
+            for event in self._list("event", IntegrationEvent)
+            if event.resource_id == submission.submission_id
+            and event.event_type == "intake.analyzed"
+        ]
+        if not events:
+            return None
+        latest = max(events, key=lambda event: event.occurred_at)
+        return latest.detail.get("research")
+
+    def case_intake_research(self, case_id: str) -> dict | None:
+        """Reviewer-facing, case-scoped official-domain research provenance.
+
+        Returns the provenance/gaps/quarantined payload from the latest intake
+        analysis for ``case_id`` (workspace-isolated via :meth:`_require`), or
+        ``None`` if analysis has not run or no provider was configured. Unlike
+        :meth:`intake_research`, this is keyed by the reviewer-supplied case id --
+        no invite token is required, accepted, or logged -- so a reviewer (not
+        only a bearer-token vendor caller) can inspect full provenance, gaps, and
+        quarantined links. Read-only; it never alters approval, policy, criteria,
+        or requirements.
+        """
+
+        self._require("case", case_id, VendorCase)
+        events = [
+            event
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == "intake.analyzed" and event.case_id == case_id
+        ]
+        if not events:
+            return None
+        latest = max(events, key=lambda event: event.occurred_at)
+        return latest.detail.get("research")
 
     @staticmethod
     def _extract_matches(criterion, evidence: list[EvidenceArtifact]) -> list[str]:
@@ -740,28 +843,48 @@ class VendorBackend:
         ),
     }
 
-    def transition_case(self, case_id: str, target: CaseLifecycle) -> VendorCase:
+    def transition_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> VendorCase:
         """Persist a reviewer/analysis lifecycle transition (issue #27).
 
-        Idempotent (target == current is a no-op) and validated against the
-        documented forward transition map. Emits an integration event so the
-        state change is auditable and observable in the demo.
+        Public messaging is stored on the vendor-case projection, separately
+        from internal reviewer comments. Analysis transitions omit these
+        arguments and preserve the last public message. Human outcomes pass
+        them explicitly, clearing stale actions on approve/decline. When a
+        changes-requested decision has no authored actions, stable outstanding
+        requirement IDs provide safe next steps without exposing findings,
+        policy, risk, or reviewer notes.
         """
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
         if not isinstance(case, VendorCase):
             # A case that was never registered as a vendor case has no lifecycle
             # to persist; callers treat this as a benign no-op.
             return None  # type: ignore[return-value]
-        if case.lifecycle is target:
+        if case.lifecycle is not target:
+            allowed = self._ALLOWED_TRANSITIONS.get(target)
+            if allowed is None or case.lifecycle not in allowed:
+                raise VendorBackendError(
+                    "invalid_transition",
+                    f"cannot move case from {case.lifecycle.value} to {target.value}",
+                    status=409,
+                )
+        updates: dict[str, Any] = {"lifecycle": target}
+        if vendor_visible_comment is not _UNSET:
+            updates["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            actions = tuple(vendor_next_actions)  # type: ignore[arg-type]
+            if target is CaseLifecycle.CHANGES_REQUESTED and not actions:
+                actions = self._derive_vendor_next_actions(case_id)
+            updates["vendor_next_actions"] = actions
+        updated = replace(case, **updates)
+        if updated == case:
             return case
-        allowed = self._ALLOWED_TRANSITIONS.get(target)
-        if allowed is None or case.lifecycle not in allowed:
-            raise VendorBackendError(
-                "invalid_transition",
-                f"cannot move case from {case.lifecycle.value} to {target.value}",
-                status=409,
-            )
-        updated = replace(case, lifecycle=target)
         self._put("case", case_id, updated)
         self._event(
             "case.transitioned",
@@ -771,6 +894,37 @@ class VendorBackend:
             detail={"from": case.lifecycle.value, "to": target.value},
         )
         return updated
+
+    def _derive_vendor_next_actions(self, case_id: str) -> tuple[str, ...]:
+        requirement_ids: tuple[str, ...] = ()
+        run_id = self.repository.get_current_run_id(case_id, workspace_id=self.workspace_id)
+        if run_id is not None:
+            run = self.repository.get("run", run_id, workspace_id=self.workspace_id)
+            if isinstance(run, ReviewRun):
+                requirement_ids = run.unresolved_requirement_ids
+        if not requirement_ids:
+            submissions = [
+                item
+                for item in self._list("submission", Submission)
+                if item.case_id == case_id and item.intake_analysis_complete
+            ]
+            if submissions:
+                submission = max(
+                    submissions,
+                    key=lambda item: item.finalized_at or item.updated_at or "",
+                )
+                requirement_ids = tuple(
+                    item["requirement_id"]
+                    for item in self._checklist(submission)
+                    if item["status"] == "outstanding"
+                )
+        unique_ids = tuple(dict.fromkeys(sorted(requirement_ids)))[:10]
+        if unique_ids:
+            return tuple(
+                f"Provide information or evidence for requirement {requirement_id}."
+                for requirement_id in unique_ids
+            )
+        return ("Contact your campus reviewer to confirm the requested updates.",)
 
     def get_case_lifecycle(self, case_id: str) -> str | None:
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)

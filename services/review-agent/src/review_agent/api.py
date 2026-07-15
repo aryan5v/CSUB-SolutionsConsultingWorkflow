@@ -44,11 +44,20 @@ from .packet import render_packet_pdf
 from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
+from .research import VendorResearchProvider, build_research_provider
 from .samples import escalation_case, low_risk_case, sample_records
 from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
 _FIXED_CLOCK = "2026-07-14T20:00:00+00:00"
+_UNSET = object()
+
+
+class _UnsetResearchProvider:
+    """Typed sentinel distinguishing omitted provider wiring from explicit ``None``."""
+
+
+_RESEARCH_PROVIDER_UNSET = _UnsetResearchProvider()
 
 
 def _default_packet_storage(config: AppConfig) -> StorageClient:
@@ -142,12 +151,23 @@ class LocalReviewApi:
         email_sender: EmailSender | None = None,
         config: AppConfig | None = None,
         clock: Callable[[], datetime.datetime] | None = None,
+        research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
+            _RESEARCH_PROVIDER_UNSET
+        ),
     ) -> None:
+        self._config = config or AppConfig.from_env()
+        # Official-domain research is fail-closed in live mode. Omission builds
+        # the guarded provider centrally; an explicit None is accepted only for
+        # fixture mode, where it truthfully means "research not performed".
+        if isinstance(research_provider, _UnsetResearchProvider):
+            research_provider = build_research_provider(self._config)
+        elif research_provider is None and not self._config.use_local_fakes:
+            raise ValueError("live mode requires an official-domain research provider")
+        self._research_provider: VendorResearchProvider | None = research_provider
         # Live-AI wiring: the model client is constructed from configuration so
         # that USE_LOCAL_FAKES=false injects a live Bedrock client into the
         # research/security/accessibility path. It defaults to the deterministic
         # fixture only when local fakes are enabled (issue #27).
-        self._config = config or AppConfig.from_env()
         self._model_client = model_client or build_model_client(self._config)
         self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
         self._notifier: Notifier = notifier or build_notifier(self._config)
@@ -178,6 +198,7 @@ class LocalReviewApi:
             self._profiles,
             clock=local_clock,
             **vendor_link_settings(),
+            research_provider=self._research_provider,
         )
         catalog_entries = []
         for record in records:
@@ -216,6 +237,12 @@ class LocalReviewApi:
         self._case_sequence = 0
         if seed_demo:
             self._seed_demo_cases()
+
+    @property
+    def research_provider(self) -> VendorResearchProvider | None:
+        """Configured guarded research provider; ``None`` only in fixture mode."""
+
+        return self._research_provider
 
     def _seed_review_profiles(self) -> None:
         fixtures = {
@@ -375,6 +402,31 @@ class LocalReviewApi:
         except (KeyError, ValueError) as error:
             raise LocalApiError(400, "invalid_action", "action must be approve, reject, or request_info") from error
 
+        raw_vendor_comment = payload.get("vendor_visible_comment")
+        vendor_visible_comment = (
+            raw_vendor_comment.strip() if isinstance(raw_vendor_comment, str) else None
+        )
+        if raw_vendor_comment is not None and not vendor_visible_comment:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_visible_comment",
+                "vendor_visible_comment must contain visible text",
+            )
+        raw_vendor_actions = payload.get("vendor_next_actions", [])
+        vendor_next_actions = tuple(item.strip() for item in raw_vendor_actions)
+        if any(not item for item in vendor_next_actions):
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions must contain visible text",
+            )
+        if action is not ReviewAction.REQUEST_INFO and vendor_next_actions:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions are only allowed when requesting information",
+            )
+
         if state.status is WorkflowStatus.ESCALATED and action is ReviewAction.APPROVE:
             raise LocalApiError(403, "escalation_locked", "an escalated case cannot be approved")
         if action is ReviewAction.APPROVE and state.draft_packet is None:
@@ -450,7 +502,12 @@ class LocalReviewApi:
             ReviewAction.REQUEST_INFO: CaseLifecycle.CHANGES_REQUESTED,
         }.get(action)
         if lifecycle_target is not None:
-            self._transition_vendor_case(case_id, lifecycle_target)
+            self._transition_vendor_case(
+                case_id,
+                lifecycle_target,
+                vendor_visible_comment=vendor_visible_comment,
+                vendor_next_actions=vendor_next_actions,
+            )
             self._notify(
                 case_id,
                 f"review.{lifecycle_target.value}",
@@ -568,6 +625,16 @@ class LocalReviewApi:
         record = self._require_case(case_id)
         return [event.to_dict() for event in record.audit_sink.events]
 
+    def get_case_research(self, case_id: str) -> dict[str, Any]:
+        """Return case-scoped official-domain provenance for an authenticated reviewer."""
+
+        self._require_case(case_id)
+        research = self._vendor_call(lambda: self._vendor.case_intake_research(case_id))
+        return {
+            "case_id": case_id,
+            "research_performed": research is not None,
+            "research": research,
+        }
 
     # Vendor and administrator API surface -----------------------------------
 
@@ -715,7 +782,9 @@ class LocalReviewApi:
         )
 
     def vendor_review_status(self, token: str) -> dict[str, Any]:
-        return self._vendor_call(lambda: self._vendor.review_status(token))
+        status = self._vendor_call(lambda: self._vendor.review_status(token))
+        validate_definition(status, "vendor-intake", "ReviewStatus")
+        return status
 
     def run_reminder_sweep(self) -> dict[str, Any]:
         """Email weekly reminders for missing or incomplete evidence (issue #37).
@@ -1222,10 +1291,22 @@ class LocalReviewApi:
             if profile.profile_key in {"security", "accessibility"}
         }
 
-    def _transition_vendor_case(self, case_id: str, target: CaseLifecycle) -> None:
+    def _transition_vendor_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> None:
         """Persist the vendor-case lifecycle transition, tolerating benign no-ops."""
+        kwargs: dict[str, Any] = {}
+        if vendor_visible_comment is not _UNSET:
+            kwargs["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            kwargs["vendor_next_actions"] = vendor_next_actions
         try:
-            self._vendor.transition_case(case_id, target)
+            self._vendor.transition_case(case_id, target, **kwargs)
         except VendorBackendError:
             # A lifecycle that cannot legally advance (e.g. an already-closed
             # case) must not mask the primary reviewer action; the workflow
@@ -1303,7 +1384,12 @@ class LocalReviewApi:
         try:
             delivery = self._email_sender.send(to=contact.email, subject=subject, body=body)
         except Exception:  # noqa: BLE001 - never let notification block the decision
-            delivery = {"delivery": "failed", "simulated": False, "channel": "email"}
+            delivery = {
+                "delivery": "failed",
+                "simulated": False,
+                "channel": "email",
+                "to": contact.email,
+            }
         self._vendor.record_notification(
             case_id=case_id,
             summary=subject,

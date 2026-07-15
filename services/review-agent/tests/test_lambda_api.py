@@ -8,12 +8,17 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
+from review_agent.api import LocalReviewApi
+from review_agent.config import AppConfig
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
     InMemoryWorkspaceStore,
     create_handler,
+    restore_api,
     seed_workspace,
+    snapshot_api,
 )
+from review_agent.research import build_research_provider
 
 
 class FakeTable:
@@ -154,6 +159,55 @@ class LambdaApiTests(unittest.TestCase):
         allowed, payload = self.call("GET", "/review-queue")
         self.assertEqual(allowed["statusCode"], 200)
         self.assertEqual(len(payload["items"]), 3)
+
+    def test_reviewer_research_route_requires_auth_and_isolates_case_and_workspace(self) -> None:
+        unauthenticated, payload = self.call(
+            "GET", "/cases/TR-260714-014/research", authenticated=False
+        )
+        self.assertEqual(unauthenticated["statusCode"], 401)
+        self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
+
+        forbidden, payload = self.call(
+            "GET", "/cases/TR-260714-014/research", workspace="other-workspace"
+        )
+        self.assertEqual(forbidden["statusCode"], 403)
+        self.assertEqual(payload["error"]["code"], "workspace_forbidden")
+
+        allowed, payload = self.call("GET", "/cases/TR-260714-014/research")
+        self.assertEqual(allowed["statusCode"], 200)
+        self.assertEqual(
+            payload,
+            {"case_id": "TR-260714-014", "research_performed": False, "research": None},
+        )
+        missing, payload = self.call("GET", "/cases/UNKNOWN/research")
+        self.assertEqual(missing["statusCode"], 404)
+        self.assertEqual(payload["error"]["code"], "case_not_found")
+
+        invitation_secret = "must-never-appear-in-research-url-logs"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rejected, payload = self.call(
+                "GET",
+                "/cases/TR-260714-014/research",
+                query=f"token={invitation_secret}",
+            )
+        self.assertEqual(rejected["statusCode"], 400)
+        self.assertEqual(payload["error"]["code"], "token_in_url_forbidden")
+        self.assertNotIn(invitation_secret, output.getvalue())
+
+    def test_restore_preserves_research_provider_when_backend_is_rebuilt(self) -> None:
+        provider = build_research_provider(AppConfig(use_local_fakes=False))
+        assert provider is not None
+        api = LocalReviewApi(research_provider=provider)
+        snapshot = snapshot_api(api, workspace_id="csub-demo")
+        catalog = self.store.load_catalog("csub-demo")
+        from unittest.mock import patch
+
+        with patch("review_agent.lambda_api.LocalReviewApi", return_value=api):
+            restored = restore_api(snapshot, catalog, workspace_id="csub-demo")
+
+        self.assertIs(restored.research_provider, provider)
+        self.assertIs(restored._vendor.research_provider, provider)
 
     def test_blank_catalog_vendor_does_not_break_workspace_restore(self) -> None:
         catalog = self.store.load_catalog("csub-demo")
@@ -361,6 +415,74 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(historical, run_one)
         self.assertFalse(run_two["decision_valid"])
         self.assertFalse(run_two["write_preview_valid"])
+
+    def test_vendor_public_status_survives_lambda_cold_start(self) -> None:
+        issued = self._issue_invite()
+        token = issued["token"]
+        _, queue = self.call("GET", "/review-queue")
+        case = next(
+            item for item in queue["items"] if item["case_id"] == "TR-260714-014"
+        )
+        candidate = case["state"]["software_candidates"][0]
+        analyzed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/analyze",
+            body={"confirmed_match_id": candidate["record_id"]},
+        )
+        self.assertEqual(analyzed["statusCode"], 202)
+        reviewed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/review",
+            body={
+                "case_id": "TR-260714-014",
+                "decision_version": 1,
+                "action": "request_info",
+                "decided_at": "2026-07-15T08:00:00+00:00",
+                "comments": "Internal finding that must stay private.",
+                "vendor_visible_comment": "Please provide the requested updates.",
+                "vendor_next_actions": ["Upload the current product-specific ACR."],
+            },
+        )
+        self.assertEqual(reviewed["statusCode"], 200)
+
+        snapshot = self.store.load_snapshot("csub-demo")
+        vendor_case = next(
+            item
+            for item in snapshot["repository"]["records"]["case"]
+            if item["case_id"] == "TR-260714-014"
+        )
+        self.assertEqual(
+            vendor_case["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            vendor_case["vendor_next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/status",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        status = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(
+            status["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            status["next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+        self.assertNotIn("comments", status)
+        self.assertNotIn("Internal finding", json.dumps(status))
 
     def test_review_fuzzy_confirmation_and_two_step_idempotent_writeback_survive_cold_start(self) -> None:
         _, queue = self.call("GET", "/review-queue")

@@ -128,11 +128,14 @@ class VendorCase:
     # Reviewer control (issue #37): pauses automated evidence reminders for
     # this case without touching the invitation or submission state.
     reminders_paused: bool = False
+    vendor_visible_comment: str | None = None
+    vendor_next_actions: tuple[str, ...] = ()
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["lifecycle"] = self.lifecycle.value
+        data["vendor_next_actions"] = list(self.vendor_next_actions)
         return data
 
 

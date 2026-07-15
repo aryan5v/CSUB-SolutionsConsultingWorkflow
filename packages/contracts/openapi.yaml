@@ -64,6 +64,22 @@ paths:
       responses:
         "202": { $ref: "#/components/responses/CaseAction" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /cases/{id}/research:
+    get:
+      tags: [cases]
+      summary: Fetch case-scoped official-domain research provenance for an authenticated reviewer.
+      description: Uses the reviewer case identifier only; invitation bearer tokens are neither accepted nor exposed.
+      operationId: getCaseResearch
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200":
+          description: Latest provenance, gaps, and quarantined links, or an explicit not-performed result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaseResearch" }
+        "401": { description: Reviewer authentication required. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /cases/{id}/stream:
     get:
       tags: [cases]
@@ -75,7 +91,7 @@ paths:
   /cases/{id}/review:
     post:
       tags: [review]
-      summary: Record a reviewer decision (approve, reject, request_info) and edits.
+      summary: Record a reviewer decision and edits, with internal comments separated from explicitly vendor-visible messaging.
       operationId: reviewCase
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       requestBody:
@@ -324,7 +340,7 @@ paths:
       summary: Vendor-safe review status; stays readable after the submission is finalized, until the invitation expires.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses:
-        "200": {description: Per-requirement evidence status checklist, collapsed review stage, and outcome once decided., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
+        "200": {description: Per-requirement evidence status, collapsed review stage, human outcome, explicit vendor-visible comment, and safe next actions., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
         "410": {description: Expired or revoked.}
   /review-profiles:
     get:
@@ -417,6 +433,52 @@ components:
     QueueItem: { $ref: "./schemas/review-queue-item.schema.json" }
     CaseActionEnvelope: { $ref: "./schemas/case-action-response.schema.json" }
     ReviewQueue: { $ref: "./schemas/review-queue.schema.json" }
+    CaseResearch:
+      type: object
+      additionalProperties: false
+      required: [case_id, research_performed, research]
+      properties:
+        case_id: { type: string }
+        research_performed: { type: boolean }
+        research:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ResearchResult"
+    ResearchResult:
+      type: object
+      additionalProperties: false
+      required: [vendor, product, confirmed_host, findings, gaps, quarantined, downloads_used, deadline_exceeded]
+      properties:
+        vendor: { type: [string, "null"] }
+        product: { type: [string, "null"] }
+        confirmed_host: { type: string }
+        findings:
+          type: array
+          items:
+            type: object
+            required: [provenance, untrusted_findings]
+            properties:
+              provenance: { type: object, additionalProperties: true }
+              untrusted_findings: { type: array, items: { type: object } }
+        gaps:
+          type: array
+          items:
+            type: object
+            required: [requested_url, code, detail]
+            properties:
+              requested_url: { type: string, format: uri }
+              code: { type: string }
+              detail: { type: string }
+        quarantined:
+          type: array
+          items:
+            type: object
+            required: [url, reason]
+            properties:
+              url: { type: string, format: uri }
+              reason: { type: string }
+        downloads_used: { type: integer, minimum: 0 }
+        deadline_exceeded: { type: boolean }
   parameters:
     CaseId:
       name: id

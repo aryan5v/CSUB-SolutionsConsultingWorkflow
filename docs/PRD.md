@@ -102,6 +102,11 @@ Configures policy versions, approved ServiceNow tables and fields, AWS environme
 - Read-only seeded mock ServiceNow request import.
 - ServiceNow-compatible preview, mock update, work note, and packet attachment.
 - Secure AWS-hosted single-workspace demo using Cognito, CloudFront, API Gateway, Lambda, AgentCore, Bedrock, encrypted storage, and observability.
+- Guarded continuous delivery from reviewed `main` commits using short-lived
+  GitHub OIDC credentials, immutable release artifacts, all-stack change-set
+  inspection, live canaries, append-only release history, and automatic
+  last-known-good rollback. Security-sensitive infrastructure changes require
+  a separate human SSO deployment.
 - Audit trail covering workflow versions, reviewer decisions, and write actions.
 - Three polished demo scenarios: low/approved, medium, and safe escalation.
 
