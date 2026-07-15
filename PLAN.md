@@ -11,6 +11,11 @@ This is the execution plan for the requirements in [`docs/PRD.md`](docs/PRD.md).
 - Models may draft and analyze but cannot establish policy or approve/write externally.
 - The vendor-to-approval golden path, human review, AWS deployment, Slack notification/Q&A, and mock ServiceNow boundaries are core demo work.
 - Merge checkpoints occur Tuesday midday/EOD, Wednesday midday/EOD, and Thursday at 10:00 AM.
+- After the guarded-delivery change lands, merges to `main` are released to the
+  AWS demo automatically from a credential-free verified bundle. All stack
+  change sets pass a fail-closed preflight; canary failure restores the exact
+  last-known-good release. Security-sensitive infrastructure changes remain on
+  the documented human SSO path.
 
 ## Target workflow
 
