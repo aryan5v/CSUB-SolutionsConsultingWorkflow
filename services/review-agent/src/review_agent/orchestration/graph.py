@@ -112,7 +112,8 @@ class ReviewWorkflow:
     def run_specialists(self, state: ReviewGraphState) -> ReviewGraphState:
         # Security and accessibility run in parallel conceptually; deterministic
         # fakes make ordering irrelevant in the local slice.
-        assert state.policy_result is not None
+        if state.policy_result is None:
+            raise ValueError("policy_result must be evaluated before running specialists")
         security = run_security(state.case_input, state.policy_result, self._model)
         accessibility = run_accessibility(state.case_input, state.policy_result, self._model)
         state.specialist_results = {"security": security, "accessibility": accessibility}
@@ -139,7 +140,8 @@ class ReviewWorkflow:
         return state
 
     def compose(self, state: ReviewGraphState) -> ReviewGraphState:
-        assert state.policy_result is not None
+        if state.policy_result is None:
+            raise ValueError("policy_result must be evaluated before composing the packet")
         packet = compose_packet(
             case_id=state.case_id,
             case=state.case_input,

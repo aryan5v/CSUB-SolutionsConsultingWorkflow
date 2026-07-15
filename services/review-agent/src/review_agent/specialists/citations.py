@@ -46,7 +46,7 @@ def check_citations(
             continue
         for citation in citations:
             source = citation.get("source", {})
-            if not source.get("source_id"):
+            if source is None or not isinstance(source, dict) or not source.get("source_id"):
                 rejected.append(item)
                 reasons.append("citation missing source_id")
                 break

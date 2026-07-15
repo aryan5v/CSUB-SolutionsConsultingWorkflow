@@ -130,8 +130,18 @@ def _check(value: object, schema: dict, path: str, root_schema: dict) -> None:
         if "minLength" in schema and len(value) < schema["minLength"]:
             raise ContractValidationError(f"{path}: string is shorter than {schema['minLength']}")
         value_format = schema.get("format")
-        if value_format == "email" and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value) is None:
-            raise ContractValidationError(f"{path}: invalid email format")
+        if value_format == "email":
+            # Reject empty, whitespace-only, control characters, and invalid format
+            if not value or not isinstance(value, str):
+                raise ContractValidationError(f"{path}: invalid email format")
+            # Reject strings with whitespace or control characters
+            if any(c.isspace() or ord(c) < 32 for c in value):
+                raise ContractValidationError(f"{path}: invalid email format")
+            if "@" not in value or len(value) > 254:
+                raise ContractValidationError(f"{path}: invalid email format")
+            local, _, domain = value.rpartition("@")
+            if not local or not domain or "." not in domain:
+                raise ContractValidationError(f"{path}: invalid email format")
         if value_format == "date-time":
             try:
                 parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))

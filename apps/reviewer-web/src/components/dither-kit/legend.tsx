@@ -44,9 +44,17 @@ export function Legend({
             // Hovering an entry spotlights its series so overlapping layers
             // (e.g. two meshed radar polygons) can be told apart at a glance.
             onPointerEnter={() => chart.setFocusDataKey(name)}
-            onPointerLeave={() => chart.setFocusDataKey(null)}
+            onPointerLeave={() => {
+              if (chart.focusDataKey === name) {
+                chart.setFocusDataKey(null);
+              }
+            }}
             onFocus={() => chart.setFocusDataKey(name)}
-            onBlur={() => chart.setFocusDataKey(null)}
+            onBlur={() => {
+              if (chart.focusDataKey === name) {
+                chart.setFocusDataKey(null);
+              }
+            }}
             aria-pressed={isClickable ? chart.selectedDataKey === name : undefined}
             className={cn(
               "flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground",

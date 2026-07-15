@@ -137,13 +137,17 @@ class BedrockModelClient:
     def _parse_single_json_object(text: str) -> dict:
         """Parse one JSON object, tolerating markdown fences or trailing prose."""
         stripped = text.strip()
+        if not stripped:
+            raise ValueError("model returned empty response")
         # Strip a ```json ... ``` fence if the model added one.
         fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", stripped, re.DOTALL)
         if fence:
             stripped = fence.group(1).strip()
+            if not stripped:
+                raise ValueError("model returned empty JSON content in fence")
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
             # Fall back to the first balanced {...} span.
             start = stripped.find("{")
             end = stripped.rfind("}")
@@ -151,7 +155,13 @@ class BedrockModelClient:
                 raise ValueError(
                     f"model did not return a JSON object: {stripped[:200]!r}"
                 ) from None
-            parsed = json.loads(stripped[start : end + 1])
+            try:
+                parsed = json.loads(stripped[start : end + 1])
+            except json.JSONDecodeError as inner_error:
+                raise ValueError(
+                    f"model returned non-JSON body: {stripped[start:end+1]!r} "
+                    f"(JSON error: {inner_error})"
+                ) from inner_error
         if not isinstance(parsed, dict):
             raise ValueError(f"model returned non-object JSON: {type(parsed).__name__}")
         return parsed

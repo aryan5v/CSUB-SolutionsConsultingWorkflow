@@ -115,14 +115,12 @@ def create_server(
             content_type = self.headers.get_content_type()
             if content_type != "application/json":
                 raise LocalApiError(415, "unsupported_media_type", "request body must be application/json")
+            def reject_constant(value: str) -> None:
+                raise ValueError(f"non-finite JSON number: {value}")
+
             try:
                 text = self.rfile.read(length).decode("utf-8")
-                payload = json.loads(
-                    text,
-                    parse_constant=lambda value: (_ for _ in ()).throw(
-                        ValueError(f"non-finite JSON number: {value}")
-                    ),
-                )
+                payload = json.loads(text, parse_constant=reject_constant)
             except UnicodeDecodeError as error:
                 raise LocalApiError(400, "invalid_encoding", "request body must be UTF-8") from error
             except (json.JSONDecodeError, ValueError) as error:
@@ -153,7 +151,8 @@ def create_server(
 
         def _cors_headers(self) -> None:
             origin = self.headers.get("Origin")
-            if origin in {"http://127.0.0.1:5173", "http://localhost:5173"}:
+            # Reject origin values containing newline/carriage return to prevent header injection
+            if origin and "\n" not in origin and "\r" not in origin and origin in {"http://127.0.0.1:5173", "http://localhost:5173"}:
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")

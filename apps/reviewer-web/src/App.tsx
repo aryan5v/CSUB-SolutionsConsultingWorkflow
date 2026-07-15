@@ -802,7 +802,9 @@ export default function App() {
   useEffect(() => {
     let current = true;
     reviewApi.listQueue().then((items) => {
-      if (!current || items.length === 0) return;
+      if (!current) return;
+      setBackendConnected(true);
+      if (items.length === 0) return;
       const summaries = items.map(queueItemToSummary);
       const states = Object.fromEntries(items.map((item) => [item.case_id, item.state]));
       const active = items.find((item) => item.case_id === "TR-260714-014") ?? items[0];
@@ -813,7 +815,6 @@ export default function App() {
       const candidate = active.state.software_candidates[0];
       setMatchConfirmed(Boolean(active.state.confirmed_match_id) || !candidate?.requires_confirmation);
       if (active.state.draft_packet) setPacketDraft(packetToDraft(active.state.draft_packet));
-      setBackendConnected(true);
     }).catch(() => {
       if (current) setBackendConnected(false);
     });
