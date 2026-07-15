@@ -25,6 +25,7 @@ class HumanDecision:
     decided_at: str
     approved_fields: dict = field(default_factory=dict)
     comments: str | None = None
+    edits: tuple[dict, ...] = ()
 
     @property
     def idempotency_key(self) -> str:
@@ -32,15 +33,18 @@ class HumanDecision:
         return f"{self.case_id}:{self.decision_version}"
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "case_id": self.case_id,
             "decision_version": self.decision_version,
             "reviewer_id": self.reviewer_id,
             "action": self.action.value,
             "approved_fields": dict(self.approved_fields),
-            "comments": self.comments,
+            "edits": [dict(edit) for edit in self.edits],
             "decided_at": self.decided_at,
         }
+        if self.comments is not None:
+            data["comments"] = self.comments
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,22 +63,31 @@ class WritePreview:
     decision_version: int
     table: str
     record_id: str
+    expected_record_version: int
     before: dict
     after: dict
+    packet_version: int | None = None
+    packet_sha256: str | None = None
     field_changes: list[FieldChange] = field(default_factory=list)
     simulated: bool = True
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "case_id": self.case_id,
             "decision_version": self.decision_version,
             "table": self.table,
             "record_id": self.record_id,
+            "expected_record_version": self.expected_record_version,
             "before": self.before,
             "after": self.after,
             "field_changes": [fc.to_dict() for fc in self.field_changes],
             "simulated": True,
         }
+        if self.packet_version is not None:
+            data["packet_version"] = self.packet_version
+        if self.packet_sha256 is not None:
+            data["packet_sha256"] = self.packet_sha256
+        return data
 
 
 @dataclass(slots=True)

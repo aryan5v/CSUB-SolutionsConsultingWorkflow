@@ -8,12 +8,15 @@
     "WritePreview": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["case_id", "decision_version", "table", "record_id", "before", "after", "simulated"],
+      "required": ["case_id", "decision_version", "table", "record_id", "expected_record_version", "packet_version", "packet_sha256", "before", "after", "simulated"],
       "properties": {
         "case_id": { "type": "string" },
         "decision_version": { "type": "integer", "minimum": 1 },
         "table": { "type": "string" },
         "record_id": { "type": "string" },
+        "expected_record_version": { "type": "integer", "minimum": 1 },
+        "packet_version": { "type": "integer", "minimum": 1 },
+        "packet_sha256": { "type": "string", "minLength": 1 },
         "before": { "type": "object", "additionalProperties": true },
         "after": { "type": "object", "additionalProperties": true },
         "field_changes": {
@@ -69,6 +72,18 @@
         "action": { "type": "string", "enum": ["approve", "reject", "request_info"] },
         "approved_fields": { "type": "object", "additionalProperties": true },
         "comments": { "type": "string" },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["section_key", "body"],
+            "properties": {
+              "section_key": { "type": "string" },
+              "body": { "type": "string" }
+            }
+          }
+        },
         "decided_at": { "type": "string", "format": "date-time" }
       }
     }

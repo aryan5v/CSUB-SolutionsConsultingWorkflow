@@ -50,8 +50,18 @@
       ]
     },
     "connector_target": { "type": ["object", "null"], "additionalProperties": true },
-    "write_preview": { "type": ["object", "null"], "additionalProperties": true },
-    "write_result": { "type": ["object", "null"], "additionalProperties": true },
+    "write_preview": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://csub.example/contracts/servicenow-operations.schema.json#/$defs/WritePreview" }
+      ]
+    },
+    "write_result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://csub.example/contracts/servicenow-operations.schema.json#/$defs/WriteResult" }
+      ]
+    },
     "idempotency_key": { "type": ["string", "null"] },
     "workflow_version": { "type": "string" },
     "repair_passes_used": { "type": "integer", "minimum": 0, "maximum": 1 }

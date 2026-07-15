@@ -6,23 +6,30 @@ audit. Deterministic policy, orchestration, provider adapters, and document
 extraction live in separate modules, and every model/tool/AWS boundary is a
 small interface with a local fake.
 
-## Tuesday local vertical slice
+## Local vertical slice and browser API
 
 The slice runs on the **standard library only** with **no live AWS** and no
 institutional data. Deterministic fakes stand in for Bedrock, S3, and
-ServiceNow so the whole flow is reproducible in CI. See
-[ADR 0003](../../docs/decisions/0003-review-agent-local-slice.md) for the
-rationale and the Wednesday wiring plan.
+ServiceNow so the whole flow is reproducible in CI. `review_agent.api` composes
+the same workflow and connector behind the public application routes;
+`review_agent.server` exposes them to `apps/reviewer-web` for local development.
+See [ADR 0003](../../docs/decisions/0003-review-agent-local-slice.md) for the
+workflow rationale and
+[ADR 0005](../../docs/decisions/0005-local-review-api.md) for the local adapter.
 
 ```bash
 # From this workspace:
-make test                     # deterministic unit tests (44)
-PYTHONPATH=src python3 -m review_agent.demo   # low + medium + escalation + mock write-back
+make test                                  # deterministic unit/API tests (65)
+PYTHONPATH=src python3 -m review_agent.demo
+PYTHONPATH=src python3 -m review_agent.server --port 8787
 ```
 
-The demo runs a low-risk, a medium-risk, and a safe-escalation case, then a
+The CLI demo runs a low-risk, a medium-risk, and a safe-escalation case, then a
 simulated ServiceNow before/after preview and an idempotent commit with a packet
-attachment (labeled `Simulated ServiceNow`).
+attachment. The HTTP adapter additionally provides guided intake, queue/state,
+human match confirmation, packet edits and decisions, preview concurrency, and
+second-confirmation commit behavior for the browser. Every write remains
+labeled `Simulated ServiceNow`.
 
 ## Layout
 
@@ -39,8 +46,10 @@ src/review_agent/
   audit/           Structured audit log that rejects sensitive content (sec 7)
   config.py        Env-driven config (region, model IDs) with no secrets
   samples.py       Synthetic sanitized fixtures for the slice and tests
-  demo.py          Runnable vertical slice (python -m review_agent.demo)
-tests/             Deterministic unit tests (policy, lookup, mock connector, slice)
+  demo.py          Runnable CLI vertical slice
+  api.py           In-memory application API over the existing workflow
+  server.py        Standard-library HTTP/SSE adapter for local browser use
+tests/             Deterministic unit, workflow, connector, and HTTP API tests
 ```
 
 ## Trust boundaries

@@ -157,6 +157,7 @@ class MockServiceNowConnector:
             decision_version=decision_version,
             table=table,
             record_id=record.record_id,
+            expected_record_version=record.version,
             before=before,
             after=after,
             field_changes=changes,

@@ -3,8 +3,10 @@ VENV ?= .venv
 PRE_COMMIT ?= $(VENV)/bin/pre-commit
 
 REVIEW_AGENT ?= services/review-agent
+REVIEWER_WEB ?= apps/reviewer-web
+INFRA ?= infra
 
-.PHONY: bootstrap hooks check lint test verify review-agent agent-briefs aws-whoami
+.PHONY: bootstrap hooks check lint test verify review-agent reviewer-web infra-check agent-briefs aws-whoami
 
 bootstrap:
 	@$(PYTHON) -m venv $(VENV)
@@ -30,7 +32,20 @@ test:
 review-agent:
 	@$(MAKE) -C $(REVIEW_AGENT) test
 
-verify: check lint test review-agent
+# Locked React/Vite workspace: install, unit-test API seams, type-check, and build.
+reviewer-web:
+	@npm --prefix $(REVIEWER_WEB) ci
+	@npm --prefix $(REVIEWER_WEB) run test
+	@npm --prefix $(REVIEWER_WEB) run check
+	@npm --prefix $(REVIEWER_WEB) run build
+
+# Non-mutating CDK checks only. Deployment still requires the documented gate.
+infra-check:
+	@npm --prefix $(INFRA) ci
+	@npm --prefix $(INFRA) run typecheck
+	@npm --prefix $(INFRA) run synth
+
+verify: check lint test review-agent reviewer-web infra-check
 	@git diff --check
 
 agent-briefs:

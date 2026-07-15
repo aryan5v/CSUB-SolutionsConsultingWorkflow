@@ -1,0 +1,182 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ReviewApiError,
+  decisionVersion,
+  packetEditSection,
+  packetToDraft,
+  queueItemToSummary,
+  reviewApi,
+  type QueueItem,
+  type ReviewState,
+} from "./api";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function state(overrides: Partial<ReviewState> = {}): ReviewState {
+  return {
+    case_id: "TR-260714-014",
+    status: "awaiting_review",
+    workflow_version: "0.1.0",
+    case_input: {
+      product_name: "LabArchives",
+      vendor_name: "LabArchives, LLC",
+      requester: { name: "Sample Requester", email: "requester@example.edu" },
+      use_case: "Sanitized pilot",
+      expected_users: 120,
+      platform: ["web"],
+      data_classification: "internal",
+      estimated_cost_usd: 8000,
+      integrations: ["Canvas"],
+      uses_sso: true,
+      uses_ai: true,
+      classroom_or_public_use: true,
+    },
+    software_candidates: [],
+    confirmed_match_id: null,
+    policy_result: null,
+    specialist_results: {},
+    draft_packet: null,
+    human_edits: [],
+    human_decision: null,
+    write_preview: null,
+    write_result: null,
+    ...overrides,
+  };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("review API client", () => {
+  it("loads and maps review queue items", async () => {
+    const item: QueueItem = {
+      case_id: "TR-260714-014",
+      product: "LabArchives",
+      vendor: "LabArchives, LLC",
+      requester: "College of Science",
+      status: "Ready for review",
+      route: "Pending route",
+      match: "Fuzzy candidate",
+      match_detail: "Approved export · Row 172",
+      stage: "Match confirmation",
+      updated: "Local API",
+      owner: "Alex Reviewer",
+      state: state({ status: "awaiting_match_confirmation" }),
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [item] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const items = await reviewApi.listQueue();
+
+    expect(items).toEqual([item]);
+    expect(queueItemToSummary(item)).toMatchObject({
+      id: "TR-260714-014",
+      route: "Pending route",
+      matchDetail: "Approved export · Row 172",
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/review-queue", expect.any(Object));
+  });
+
+  it("sends human confirmation, decision, preview, and explicit commit requests", async () => {
+    const response = {
+      state: state(),
+      queue_item: {},
+      audit_events: [],
+      simulated: true,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reviewApi.analyzeCase("TR-260714-014", "approved-row-172");
+    await reviewApi.recordDecision("TR-260714-014", {
+      decision_version: 1,
+      reviewer_id: "alex.reviewer@example.edu",
+      action: "approve",
+      decided_at: "2026-07-14T20:30:00.000Z",
+      edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
+    });
+    await reviewApi.previewWriteback("TR-260714-014");
+    await reviewApi.commitWriteback("TR-260714-014", 3);
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      confirmed_match_id: "approved-row-172",
+      reviewer_id: "alex.reviewer@example.edu",
+    });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
+      case_id: "TR-260714-014",
+      action: "approve",
+      edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
+    });
+    expect(fetchMock.mock.calls[2][0]).toBe(
+      "/api/cases/TR-260714-014/servicenow/preview",
+    );
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({
+      second_confirmation: true,
+      expected_version: 3,
+    });
+  });
+
+  it("projects packets and increments versions after a recorded decision", () => {
+    const packet = {
+      packet_id: "packet-1",
+      case_id: "TR-260714-014",
+      packet_version: 2,
+      packet_type: "medium_risk" as const,
+      sections: [
+        { key: "summary", title: "Summary", body: "Body", editable: true },
+        { key: "routing", title: "Routing", body: "Committee", editable: true },
+      ],
+    };
+    expect(packetToDraft(packet)).toBe("Body");
+    expect(decisionVersion(state({ draft_packet: packet }))).toBe(2);
+    expect(decisionVersion(state({ draft_packet: packet }), true)).toBe(3);
+    expect(
+      decisionVersion(
+        state({
+          draft_packet: packet,
+          human_decision: {
+            case_id: "TR-260714-014",
+            decision_version: 2,
+            reviewer_id: "alex.reviewer@example.edu",
+            action: "approve",
+          },
+        }),
+      ),
+    ).toBe(3);
+    const lowPacket = {
+      ...packet,
+      packet_type: "low_risk" as const,
+      sections: [
+        { key: "recommendation", title: "Recommendation", body: "Low recommendation", editable: true },
+      ],
+    };
+    expect(packetEditSection(lowPacket)?.key).toBe("recommendation");
+    expect(packetToDraft(lowPacket)).toBe("Low recommendation");
+  });
+
+  it("surfaces structured API failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          { error: { code: "approval_required", message: "approval required" } },
+          403,
+        ),
+      ),
+    );
+
+    await expect(reviewApi.previewWriteback("TR-260714-014")).rejects.toEqual(
+      expect.objectContaining<Partial<ReviewApiError>>({
+        status: 403,
+        code: "approval_required",
+        message: "approval required",
+      }),
+    );
+  });
+});

@@ -37,6 +37,18 @@ class ContractValidationTests(unittest.TestCase):
         with self.assertRaises(ContractValidationError):
             validate(payload, "case-intake")
 
+    def test_min_items_violation_raises(self) -> None:
+        payload = low_risk_case().to_dict()
+        payload["platform"] = []
+        with self.assertRaises(ContractValidationError):
+            validate(payload, "case-intake")
+
+    def test_additional_property_violation_raises(self) -> None:
+        payload = low_risk_case().to_dict()
+        payload["model_selected_route"] = "low"
+        with self.assertRaises(ContractValidationError):
+            validate(payload, "case-intake")
+
     def test_packet_sha256_is_deterministic(self) -> None:
         packet = _compose_medium_packet()
         self.assertEqual(packet.sha256, packet.compute_sha256())

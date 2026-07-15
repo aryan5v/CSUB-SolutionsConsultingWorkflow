@@ -45,8 +45,20 @@ paths:
       summary: Start deterministic routing plus bounded specialist analysis.
       operationId: analyzeCase
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirmed_match_id: { type: string }
+                reviewer_id:
+                  type: string
+                  description: Required when confirmed_match_id is present; configured locally and derived from the trusted reviewer session in production.
       responses:
-        "202": { description: Analysis started; poll the stream. }
+        "202": { $ref: "#/components/responses/CaseAction" }
         "404": { $ref: "#/components/responses/NotFound" }
   /cases/{id}/stream:
     get:
@@ -68,7 +80,7 @@ paths:
           application/json:
             schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/HumanDecision" }
       responses:
-        "200": { description: Decision recorded. }
+        "200": { $ref: "#/components/responses/CaseAction" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /cases/{id}/servicenow/preview:
     post:
@@ -77,11 +89,7 @@ paths:
       operationId: previewServiceNow
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       responses:
-        "200":
-          description: Simulated write preview.
-          content:
-            application/json:
-              schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/WritePreview" }
+        "200": { $ref: "#/components/responses/CaseAction" }
   /cases/{id}/servicenow/commit:
     post:
       tags: [servicenow]
@@ -90,12 +98,19 @@ paths:
         second confirmation. Idempotent on case_id + decision_version.
       operationId: commitServiceNow
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [second_confirmation, expected_version]
+              properties:
+                second_confirmation: { const: true }
+                expected_version: { type: integer, minimum: 1 }
       responses:
-        "200":
-          description: Simulated write result.
-          content:
-            application/json:
-              schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/WriteResult" }
+        "200": { $ref: "#/components/responses/CaseAction" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { description: Stale expected version or missing approved decision. }
   /cases/{id}/packet:
@@ -116,8 +131,16 @@ paths:
       summary: List cases awaiting reviewer action.
       operationId: getReviewQueue
       responses:
-        "200": { description: Review queue items. }
+        "200":
+          description: Sanitized review queue and current graph states.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewQueue" }
 components:
+  schemas:
+    QueueItem: { $ref: "./schemas/review-queue-item.schema.json" }
+    CaseActionEnvelope: { $ref: "./schemas/case-action-response.schema.json" }
+    ReviewQueue: { $ref: "./schemas/review-queue.schema.json" }
   parameters:
     CaseId:
       name: id
@@ -125,6 +148,11 @@ components:
       required: true
       schema: { type: string }
   responses:
+    CaseAction:
+      description: Current graph state, queue projection, and non-sensitive audit events.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CaseActionEnvelope" }
     CaseCreated:
       description: Case created.
       content:

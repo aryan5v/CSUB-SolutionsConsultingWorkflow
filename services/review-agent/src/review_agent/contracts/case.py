@@ -45,4 +45,7 @@ class CaseIntake:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["data_classification"] = self.data_classification.value
-        return data
+        data["requester"] = {
+            key: value for key, value in data["requester"].items() if value is not None
+        }
+        return {key: value for key, value in data.items() if value is not None}

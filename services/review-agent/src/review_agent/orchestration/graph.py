@@ -170,11 +170,23 @@ class ReviewWorkflow:
             return state
         return self._analyze_and_compose(state)
 
-    def confirm_match(self, state: ReviewGraphState, record_id: str | None) -> ReviewGraphState:
+    def confirm_match(
+        self,
+        state: ReviewGraphState,
+        record_id: str | None,
+        *,
+        reviewer_id: str | None = None,
+    ) -> ReviewGraphState:
         """Reviewer confirms (or clears) a fuzzy/semantic match, then continue."""
         state.confirmed_match_id = record_id
         state.status = WorkflowStatus.POLICY
-        self._emit(state, "match.confirmed", ActorType.REVIEWER, record_id=record_id)
+        self._emit(
+            state,
+            "match.confirmed",
+            ActorType.REVIEWER,
+            actor_id=reviewer_id,
+            record_id=record_id,
+        )
         return self._analyze_and_compose(state)
 
     def _analyze_and_compose(self, state: ReviewGraphState) -> ReviewGraphState:
@@ -191,9 +203,21 @@ class ReviewWorkflow:
     ):
         """Return a simulated before/after preview. Dry-run by default (FR-7)."""
         connector.stage_decision(decision)  # type: ignore[attr-defined]
+        packet = state.draft_packet
+        if packet is None or packet.sha256 is None:
+            raise PermissionError("write-back preview requires a hashed packet")
         preview = connector.preview_update(state.case_id, decision.decision_version)
+        preview.packet_version = packet.packet_version
+        preview.packet_sha256 = packet.sha256
         state.write_preview = preview
-        self._emit(state, "servicenow.previewed", ActorType.REVIEWER, decision_version=decision.decision_version)
+        state.status = WorkflowStatus.WRITEBACK
+        self._emit(
+            state,
+            "servicenow.previewed",
+            ActorType.REVIEWER,
+            actor_id=decision.reviewer_id,
+            decision_version=decision.decision_version,
+        )
         return preview
 
     def commit_writeback(
@@ -211,6 +235,18 @@ class ReviewWorkflow:
             raise PermissionError("write-back requires an approved decision")
         if not second_confirmation:
             raise PermissionError("write-back requires an explicit second confirmation")
+        preview = state.write_preview
+        packet = state.draft_packet
+        if preview is None:
+            raise PermissionError("write-back requires a current preview")
+        if preview.decision_version != decision.decision_version:
+            raise PermissionError("write-back preview decision is stale")
+        if preview.expected_record_version != expected_version:
+            raise PermissionError("write-back expected version differs from preview")
+        if packet is None or packet.sha256 is None:
+            raise PermissionError("write-back requires a hashed packet")
+        if preview.packet_version != packet.packet_version or preview.packet_sha256 != packet.sha256:
+            raise PermissionError("write-back preview packet is stale")
         state.human_decision = decision
         state.idempotency_key = decision.idempotency_key
         result = connector.update_request(
@@ -225,6 +261,7 @@ class ReviewWorkflow:
             state,
             "servicenow.committed",
             ActorType.REVIEWER,
+            actor_id=decision.reviewer_id,
             decision_version=decision.decision_version,
             idempotency_key=result.idempotency_key,
             duplicate_suppressed=result.duplicate_suppressed,
@@ -242,7 +279,16 @@ class ReviewWorkflow:
                 return True
         return False
 
-    def _emit(self, state: ReviewGraphState, event_type: str, actor: ActorType, **detail: object) -> None:
+    def _emit(
+        self,
+        state: ReviewGraphState,
+        event_type: str,
+        actor: ActorType,
+        *,
+        actor_id: str | None = None,
+        decision_version: int | None = None,
+        **detail: object,
+    ) -> None:
         self._seq += 1
         self._audit.record(
             event_id=f"{state.case_id}-{self._seq:03d}",
@@ -250,6 +296,8 @@ class ReviewWorkflow:
             case_id=state.case_id,
             occurred_at=self._clock(),
             actor_type=actor,
+            actor_id=actor_id,
+            decision_version=decision_version,
             workflow_version=state.workflow_version,
             policy_version=state.policy_result.policy_version if state.policy_result else None,
             detail=dict(detail),

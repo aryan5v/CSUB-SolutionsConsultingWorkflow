@@ -34,7 +34,7 @@
     },
     "citations": {
       "type": "array",
-      "items": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" }
+      "items": { "$ref": "https://csub.example/contracts/citation.schema.json" }
     },
     "escalated": { "type": "boolean" },
     "escalation_reasons": { "type": "array", "items": { "type": "string" } }

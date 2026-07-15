@@ -56,7 +56,7 @@ the phased Twenty-to-vendor adaptation plan.
 - [x] Three-day implementation plan approved
 - [x] AWS and bounded-agent architecture selected
 - [ ] Ingest and validate the supplied Box dataset
-- [ ] Complete the local low- and medium-risk vertical slices
+- [x] Complete connected local low-, medium-, and safe-escalation vertical slices
 - [ ] Deploy the approved AWS environment
 - [ ] Evaluate, harden, and demo the prototype
 
@@ -80,12 +80,20 @@ the phased Twenty-to-vendor adaptation plan.
    make verify
    ```
 
-7. Start the local reviewer workspace:
+7. Start the connected local application in two terminals:
 
    ```bash
+   # Terminal 1: deterministic local API and workflow
+   PYTHONPATH=services/review-agent/src python3 -m review_agent.server --port 8787
+
+   # Terminal 2: reviewer workspace
    npm --prefix apps/reviewer-web ci
    npm --prefix apps/reviewer-web run dev
    ```
+
+   Open `http://127.0.0.1:5173`. The application uses sanitized synthetic data
+   and clearly labeled simulated ServiceNow operations; it does not require AWS
+   credentials for the local flow.
 
 ## Development principles
 

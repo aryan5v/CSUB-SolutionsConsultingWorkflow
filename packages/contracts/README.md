@@ -20,6 +20,9 @@ schemas/
   packet.schema.json             # Low/medium-risk Packet (FR-6)
   audit-event.schema.json        # Structured AuditEvent (sec 7)
   review-graph-state.schema.json # ReviewGraphState checkpoint (sec 5)
+  review-queue-item.schema.json  # Reviewer queue projection plus current state
+  review-queue.schema.json       # GET /review-queue response envelope
+  case-action-response.schema.json # Analyze/review/preview/commit response envelope
   servicenow-operations.schema.json  # WritePreview / WriteResult / HumanDecision (FR-7)
 ```
 
