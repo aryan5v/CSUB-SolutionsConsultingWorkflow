@@ -249,6 +249,34 @@ export type EvidenceArtifact = EvidenceMetadata & {
 export type PresignedUpload = { url: string; method?: "PUT" | "POST"; headers?: Record<string, string>; fields?: Record<string, string> };
 export type EvidenceRegistration = EvidenceArtifact & { upload?: PresignedUpload | null };
 export type EvidenceUploadResult = EvidenceArtifact & { transfer: "uploaded" | "simulated"; notice?: string };
+export type ResearchProvenance = {
+  provenance_id: string;
+  final_url: string;
+  redirect_chain: string[];
+  retrieved_at: string;
+  content_sha256: string;
+  mime_type: string;
+  byte_length: number;
+  scope: "official_vendor" | "standards";
+  resolved_ip: string;
+  vendor: string | null;
+  product: string | null;
+  source_locator: string | null;
+};
+export type CaseResearchResponse = {
+  case_id: string;
+  research_performed: boolean;
+  research: null | {
+    vendor: string | null;
+    product: string | null;
+    confirmed_host: string;
+    findings: Array<{ provenance: ResearchProvenance; untrusted_findings: Array<Record<string, unknown>> }>;
+    gaps: Array<{ requested_url: string; code: string; detail: string }>;
+    quarantined: Array<{ url: string; reason: string }>;
+    downloads_used: number;
+    deadline_exceeded: boolean;
+  };
+};
 export type ReviewProfileVersion = {
   workspace_id: string;
   profile_version_id: string;
@@ -450,6 +478,10 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     },
     analyzeCase(caseId: string, confirmedMatchId?: string): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: "alex.reviewer@example.edu" } : {}) });
+    },
+    getCaseResearch(caseId: string): Promise<CaseResearchResponse> {
+      if (mode === "fixture") return fixtureOnly({ case_id: caseId, research_performed: false, research: null });
+      return request(`/cases/${encodeURIComponent(caseId)}/research`);
     },
     rerunAnalysis(caseId: string, customInstruction: string): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: "alex.reviewer@example.edu", rerun: true, custom_instruction: customInstruction }) });
