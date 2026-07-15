@@ -486,7 +486,15 @@ class VendorBackend:
         }
 
     def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
-        """Active-profile requirements labeled received (covered/answered) or outstanding."""
+        """Active-profile requirements with an honest per-requirement status.
+
+        ``received``: an evidence artifact is linked to the requirement through
+        a coverage item. ``processing``: only an unvalidated free-text answer
+        exists; it is never presented as received evidence. ``outstanding``:
+        nothing was provided. The contract additionally reserves ``accepted``,
+        ``invalid``, and ``stale`` for evidence validation (issue #36), which
+        this projection does not perform.
+        """
         if not submission.intake_analysis_complete:
             # Staged intake: requirement names are exposed only after the
             # deterministic analysis step, matching unresolved_questions.
@@ -500,13 +508,18 @@ class VendorBackend:
         items: list[dict[str, Any]] = []
         for profile in self.profiles.active_profiles():
             for criterion in profile.criteria:
-                received = criterion.requirement_id in covered or criterion.requirement_id in answered
+                if criterion.requirement_id in covered:
+                    status = "received"
+                elif criterion.requirement_id in answered:
+                    status = "processing"
+                else:
+                    status = "outstanding"
                 items.append(
                     {
                         "requirement_id": criterion.requirement_id,
                         "question": criterion.question,
                         "expected_evidence": list(criterion.expected_evidence),
-                        "status": "received" if received else "outstanding",
+                        "status": status,
                     }
                 )
         return sorted(items, key=lambda item: item["requirement_id"])
@@ -522,13 +535,13 @@ class VendorBackend:
             raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
         if invite.status is InviteStatus.REVOKED:
             raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
-        if invite.status is InviteStatus.SUBMITTED:
-            # A submitted invitation stays valid for status reads: the vendor's
-            # part is done but the review continues.
-            return invite
+        # Expiry applies to submitted invitations too: the status view is
+        # readable after finalize, but only within the invitation's lifetime,
+        # matching the expiry semantics of every other token operation.
         expires = datetime.datetime.fromisoformat(invite.expires_at)
         if self._now_datetime() >= expires:
-            self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
+            if invite.status is not InviteStatus.SUBMITTED:
+                self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
             raise VendorBackendError("invite_expired", "invitation expired", status=410)
         return invite
 
@@ -753,8 +766,16 @@ class VendorBackend:
         summary: str,
         delivery: dict[str, Any],
         event_type: str = "slack.notification",
+        dedupe_key: str | None = None,
     ) -> IntegrationEvent:
-        """Persist an auditable notification event with its truthful delivery mode."""
+        """Persist an auditable notification event with its truthful delivery mode.
+
+        The raw recipient address is never persisted: the event carries a
+        SHA-256 digest instead, which stays auditable (a known address can be
+        verified against it) without storing personal data in the event log.
+        An optional ``dedupe_key`` is persisted so callers can record and check
+        delivery idempotently (issue #38).
+        """
         detail = {
             "summary": summary,
             "delivery": delivery.get("delivery"),
@@ -762,7 +783,9 @@ class VendorBackend:
             "channel": delivery.get("channel"),
         }
         if delivery.get("to"):
-            detail["recipient"] = delivery["to"]
+            detail["recipient_sha256"] = self._hash_recipient(str(delivery["to"]))
+        if dedupe_key is not None:
+            detail["dedupe_key"] = dedupe_key
         return self._event(
             event_type,
             "notification",
@@ -770,6 +793,17 @@ class VendorBackend:
             case_id=case_id,
             detail=detail,
         )
+
+    def notification_recorded(self, *, event_type: str, dedupe_key: str) -> bool:
+        """True when a notification with this dedupe key was already persisted."""
+        return any(
+            event.event_type == event_type and event.detail.get("dedupe_key") == dedupe_key
+            for event in self._list("event", IntegrationEvent)
+        )
+
+    @staticmethod
+    def _hash_recipient(recipient: str) -> str:
+        return hashlib.sha256(recipient.strip().lower().encode("utf-8")).hexdigest()
 
     # Immutable run versions --------------------------------------------------
 
