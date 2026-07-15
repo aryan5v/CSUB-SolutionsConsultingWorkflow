@@ -60,10 +60,10 @@ class ExpiryComputationTests(unittest.TestCase):
             compute_expires_on("pentest", {"report_date": "2026-05-01"}),
             datetime.date(2026, 5, 1) + datetime.timedelta(days=365),
         )
-        self.assertEqual(
-            compute_expires_on("pci", {"assessment_date": "2026-03-01"}),
-            datetime.date(2026, 3, 1) + datetime.timedelta(days=365),
-        )
+        # PCI has NO authoritative currency rule (issue #36 open question;
+        # issue #52): no expiry date may be computed — PCI AoCs route to the
+        # explicit pci.currency_unverified manual-review state at intake.
+        self.assertIsNone(compute_expires_on("pci", {"assessment_date": "2026-03-01"}))
         self.assertIsNone(compute_expires_on("coi", {"coverages": ["cyber liability"]}))
         self.assertIsNone(compute_expires_on("pentest", {"report_date": "not a date"}))
         self.assertIsNone(compute_expires_on("soc2", {"issued_date": "2026-01-01"}))

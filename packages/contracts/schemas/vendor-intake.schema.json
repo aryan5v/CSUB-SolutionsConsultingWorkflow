@@ -40,7 +40,8 @@
         "filename": {"type": "string", "minLength": 1, "maxLength": 255},
         "content_type": {"type": "string", "minLength": 1},
         "size_bytes": {"type": "integer", "minimum": 0, "maximum": 50000000},
-        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "content_base64": {"type": "string", "minLength": 1, "description": "Optional inline document bytes (base64, small files only; both runtimes cap JSON bodies at ~1 MB). Stored through the evidence storage seam after the sha256 and size are verified, so content validation (issue 36) can parse them."}
       }
     },
     "EvidenceArtifact": {
@@ -141,14 +142,15 @@
     },
     "EvidenceValidationFinding": {
       "type": "object", "additionalProperties": false,
-      "description": "One failed content check on an evidence artifact (issue 36). Only failures are persisted; they keep the requirement unresolved instead of counting the document as received.",
+      "description": "One failed or manual-review content check on an evidence artifact (issue 36). Only failures are persisted; they keep the requirement unresolved instead of counting the document as received. disposition 'manual_review' marks documents a human must decide on (unreadable dates, vendor/product mismatch, TBD rules such as PCI currency — issue 52).",
       "required": ["workspace_id", "finding_id", "submission_id", "artifact_id", "filename", "evidence_type", "check", "reason", "source_citation"],
       "properties": {
         "workspace_id": {"type": "string"}, "finding_id": {"type": "string"},
         "submission_id": {"type": "string"}, "artifact_id": {"type": "string"},
         "filename": {"type": "string"},
-        "evidence_type": {"enum": ["coi", "pentest", "pci"]},
+        "evidence_type": {"enum": ["coi", "pentest", "pci", "unknown"]},
         "check": {"type": "string"}, "reason": {"type": "string"},
+        "disposition": {"enum": ["failed", "manual_review"]},
         "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
       }
     },

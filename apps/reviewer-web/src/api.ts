@@ -256,8 +256,8 @@ export type VendorReviewStatus = {
   outcome: "approved" | "declined" | null;
   checklist: VendorChecklistItem[];
 };
-export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string };
-export type EvidenceArtifact = EvidenceMetadata & {
+export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string; content_base64?: string };
+export type EvidenceArtifact = Omit<EvidenceMetadata, "content_base64"> & {
   workspace_id: string;
   artifact_id: string;
   submission_id: string;
@@ -352,6 +352,21 @@ function authorization(token: string): HeadersInit {
 async function sha256(file: File): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Files at or below this size travel inline (base64) with the registration so
+// the API can store the bytes and run content validation; both runtimes cap
+// JSON bodies at ~1 MB, so base64 overhead keeps this well under the limit.
+export const INLINE_EVIDENCE_MAX_BYTES = 700_000;
+
+async function base64Content(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
 }
 
 function fixtureId(prefix: string): string {
@@ -591,7 +606,8 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     },
     registerEvidence(token: string, metadata: EvidenceMetadata): Promise<EvidenceRegistration> {
       if (mode === "fixture") {
-        const artifact: EvidenceArtifact = { ...metadata, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true };
+        const { content_base64: _inlineBytesStayLocal, ...fields } = metadata;
+        const artifact: EvidenceArtifact = { ...fields, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true };
         fixture.artifacts.push(artifact);
         fixture.submission.evidence_artifact_ids.push(artifact.artifact_id);
         fixture.submission.updated_at = new Date().toISOString();
@@ -600,8 +616,12 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       return request("/vendor/invites/current/evidence", { method: "POST", headers: authorization(token), body: JSON.stringify(metadata) }, "vendor");
     },
     async uploadEvidence(token: string, file: File): Promise<EvidenceUploadResult> {
-      const registration = await this.registerEvidence(token, { filename: file.name, content_type: file.type || "application/octet-stream", size_bytes: file.size, sha256: await sha256(file) });
+      const metadata: EvidenceMetadata = { filename: file.name, content_type: file.type || "application/octet-stream", size_bytes: file.size, sha256: await sha256(file) };
+      const inlined = mode !== "fixture" && file.size <= INLINE_EVIDENCE_MAX_BYTES;
+      if (inlined) metadata.content_base64 = await base64Content(file);
+      const registration = await this.registerEvidence(token, metadata);
       if (!registration.upload?.url) {
+        if (inlined) return { ...registration, transfer: "uploaded" };
         return { ...registration, transfer: "simulated", notice: "Evidence metadata was saved, but this API did not provide a presigned upload. The file bytes stayed in this browser." };
       }
       const uploadUrl = new URL(registration.upload.url, globalThis.location?.origin);

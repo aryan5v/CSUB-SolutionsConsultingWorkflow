@@ -13,6 +13,7 @@ structured-output contract as the specialists.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .model import ModelClient, invoke_structured
@@ -23,7 +24,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # Fields the validator understands. Anything else an extractor returns is
 # dropped so untrusted document text cannot smuggle arbitrary keys downstream.
 EXTRACTED_DATE_FIELDS = ("issued_date", "expires_date", "report_date", "assessment_date")
-EXTRACTED_TEXT_FIELDS = ("authority",)
+EXTRACTED_TEXT_FIELDS = ("authority", "vendor", "product")
+
+# A "cyber liability" mention negated on the same line ("NOT COVERED",
+# "EXCLUDED") is absence of coverage, not coverage.
+_NEGATED_MENTION = re.compile(r"excluded|exclusion|not\s+covered|no\s+coverage|none")
 
 
 @runtime_checkable
@@ -76,8 +81,12 @@ class DeterministicEvidenceExtractor:
                 candidate["coverages"].extend(
                     part.strip() for part in value.split(",") if part.strip()
                 )
-        if "cyber liability" in text.lower():
-            candidate["coverages"].append("cyber liability")
+        for line in text.lower().splitlines():
+            # A negated mention ("Cyber liability: NOT COVERED / EXCLUDED") is
+            # absence, not coverage; the validator filters negated entries too.
+            if "cyber liability" in line and not _NEGATED_MENTION.search(line):
+                candidate["coverages"].append("cyber liability")
+                break
         return _clean_fields(candidate)
 
 
@@ -92,9 +101,11 @@ class ModelEvidenceExtractor:
         "You extract metadata fields from one vendor evidence document. You may "
         "only extract; you must not judge validity, set thresholds, or approve "
         "anything. Return JSON with a 'fields' object using only these keys: "
-        "coverages (list of strings), issued_date, expires_date, report_date, "
-        "assessment_date, authority (ISO dates where possible). Include an "
-        "'uncertainty' string describing anything unreadable."
+        "coverages (list of strings; include only coverages the document states "
+        "as present — never coverages it marks excluded or not covered), "
+        "issued_date, expires_date, report_date, assessment_date, authority, "
+        "vendor, product (ISO dates where possible). Include an 'uncertainty' "
+        "string describing anything unreadable."
     )
 
     def __init__(self, model: ModelClient) -> None:

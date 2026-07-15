@@ -263,7 +263,7 @@ paths:
   /vendor/invites/{token}/evidence:
     post:
       tags: [vendor-intake]
-      summary: Register untrusted evidence metadata only.
+      summary: Register untrusted evidence metadata, optionally with inline bytes for content validation (issue 36).
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
       responses: {"200": {description: Evidence metadata registered.}}
