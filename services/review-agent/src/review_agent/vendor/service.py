@@ -37,6 +37,7 @@ from .repository import VendorRepository
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
+_NORMALIZE_TOKENS = re.compile(r"[^a-z0-9]+")
 
 
 class VendorBackendError(ValueError):
@@ -47,6 +48,8 @@ class VendorBackendError(ValueError):
 
 
 class VendorBackend:
+    MAX_RUN_VERSION = 2
+
     def __init__(
         self,
         repository: VendorRepository,
@@ -378,6 +381,12 @@ class VendorBackend:
     def save_answers(self, token: str, answers: dict[str, str]) -> Submission:
         invite = self._valid_invite(token)
         submission = self._draft_submission(invite)
+        if not submission.intake_analysis_complete:
+            raise VendorBackendError(
+                "intake_analysis_pending",
+                "run intake analysis before answering unresolved questions",
+                status=409,
+            )
         if not isinstance(answers, dict) or not answers:
             raise VendorBackendError("invalid_answers", "answers must be a non-empty object")
         unresolved = {item["requirement_id"] for item in self.unresolved_questions(token)}
@@ -399,6 +408,11 @@ class VendorBackend:
     def unresolved_questions(self, token: str) -> list[dict[str, Any]]:
         invite = self._valid_invite(token)
         submission = self._submission_for_invite(invite.invite_id)
+        # Staged intake: unresolved requirement questions are exposed only after
+        # the deterministic research/coverage/extraction step has run over the
+        # submitted evidence and trust-center metadata (issue #27).
+        if not submission.intake_analysis_complete:
+            return []
         covered = {
             item.requirement_id
             for item in self._list("coverage", CoverageItem)
@@ -418,6 +432,132 @@ class VendorBackend:
                     }
                 )
         return sorted(questions, key=lambda item: item["requirement_id"])
+
+    def intake_stage(self, token: str) -> dict[str, Any]:
+        """Return the current staged-intake position for the vendor UI."""
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        has_evidence = bool(submission.evidence_artifact_ids)
+        has_trust_center = submission.trust_center_url is not None
+        if submission.intake_analysis_complete:
+            stage = "questions"
+        elif has_trust_center and has_evidence:
+            stage = "ready_for_analysis"
+        else:
+            stage = "collecting_evidence"
+        return {
+            "stage": stage,
+            "intake_analysis_complete": submission.intake_analysis_complete,
+            "has_evidence": has_evidence,
+            "has_trust_center": has_trust_center,
+            "research_summary": submission.research_summary,
+        }
+
+    def run_intake_analysis(self, token: str) -> Submission:
+        """Deterministic research/coverage/extraction step (issue #27).
+
+        Prerequisites: the vendor has provided trust-center metadata and at least
+        one evidence artifact. The step performs deterministic "research" (records
+        the validated trust-center host and evidence inventory) and "extraction"
+        (matches evidence filenames/content-type tokens against each active
+        requirement's expected evidence, recording auto-coverage). No model
+        confirms a match and no policy threshold is set here. Only after this
+        completes are unresolved requirement questions exposed.
+        """
+        invite = self._valid_invite(token)
+        submission = self._draft_submission(invite)
+        if submission.trust_center_url is None:
+            raise VendorBackendError(
+                "analysis_prerequisites",
+                "provide a trust-center URL before running intake analysis",
+                status=409,
+            )
+        if not submission.evidence_artifact_ids:
+            raise VendorBackendError(
+                "analysis_prerequisites",
+                "provide at least one evidence artifact before running intake analysis",
+                status=409,
+            )
+        evidence = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.artifact_id in set(submission.evidence_artifact_ids)
+        ]
+        already_covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        auto_covered: list[str] = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in already_covered:
+                    continue
+                matched = self._extract_matches(criterion, evidence)
+                if not matched:
+                    continue
+                coverage = CoverageItem(
+                    coverage_id=self._id("coverage", "coverage"),
+                    submission_id=submission.submission_id,
+                    requirement_id=criterion.requirement_id,
+                    profile_version_id=profile.profile_version_id,
+                    evidence_artifact_ids=tuple(matched),
+                    source_citation={**dict(criterion.source_citation), "extraction": "deterministic"},
+                    workspace_id=self.workspace_id,
+                )
+                self._put("coverage", coverage.coverage_id, coverage)
+                submission = replace(
+                    submission,
+                    coverage_ids=(*submission.coverage_ids, coverage.coverage_id),
+                )
+                auto_covered.append(criterion.requirement_id)
+        host = urlsplit(submission.trust_center_url).hostname or "unknown"
+        research_summary = (
+            f"Reviewed trust-center host {host}; inventoried {len(evidence)} evidence "
+            f"artifact(s); auto-covered {len(auto_covered)} requirement(s) by deterministic "
+            f"extraction."
+        )
+        finished = replace(
+            submission,
+            intake_analysis_complete=True,
+            research_summary=research_summary,
+            updated_at=self._now(),
+        )
+        self._put("submission", finished.submission_id, finished)
+        self._event(
+            "intake.analyzed",
+            "submission",
+            finished.submission_id,
+            case_id=invite.case_id,
+            detail={
+                "auto_covered_requirement_ids": auto_covered,
+                "evidence_count": len(evidence),
+                "trust_center_host": host,
+                "simulated": True,
+            },
+        )
+        return finished
+
+    @staticmethod
+    def _extract_matches(criterion, evidence: list[EvidenceArtifact]) -> list[str]:
+        """Deterministic token match of evidence to a requirement's expected evidence.
+
+        Tokens are drawn from the requirement's ``expected_evidence`` phrases only
+        (length >= 3) and matched as substrings against each artifact's normalized
+        filename and content-type. This is a deterministic heuristic, not a model
+        or semantic match; unmatched requirements stay open for the vendor.
+        """
+        tokens: set[str] = set()
+        for phrase in criterion.expected_evidence:
+            for token in _NORMALIZE_TOKENS.split(phrase.lower()):
+                if len(token) >= 3:
+                    tokens.add(token)
+        matched: list[str] = []
+        for artifact in evidence:
+            haystack = _NORMALIZE.sub("", artifact.filename.lower()) + " " + artifact.content_type.lower()
+            if any(token in haystack for token in tokens):
+                matched.append(artifact.artifact_id)
+        return matched
 
     def finalize_submission(self, token: str) -> Submission:
         invite = self._valid_invite(token)
@@ -440,9 +580,93 @@ class VendorBackend:
         self._event("submission.finalized", "submission", finalized.submission_id, case_id=case.case_id)
         return finalized
 
+    # Reviewer-driven lifecycle transitions ----------------------------------
+
+    _ALLOWED_TRANSITIONS: dict[CaseLifecycle, frozenset[CaseLifecycle]] = {
+        CaseLifecycle.NEEDS_REVIEW: frozenset(
+            {
+                CaseLifecycle.DRAFT,
+                CaseLifecycle.INVITED,
+                CaseLifecycle.OPENED,
+                CaseLifecycle.IN_PROGRESS,
+                CaseLifecycle.SUBMITTED,
+                CaseLifecycle.ANALYZING,
+                CaseLifecycle.CHANGES_REQUESTED,
+                CaseLifecycle.NEEDS_REVIEW,
+            }
+        ),
+        CaseLifecycle.APPROVED: frozenset(
+            {CaseLifecycle.NEEDS_REVIEW, CaseLifecycle.ANALYZING, CaseLifecycle.CHANGES_REQUESTED,
+             CaseLifecycle.APPROVED}
+        ),
+        CaseLifecycle.CHANGES_REQUESTED: frozenset(
+            {CaseLifecycle.NEEDS_REVIEW, CaseLifecycle.ANALYZING, CaseLifecycle.CHANGES_REQUESTED}
+        ),
+        CaseLifecycle.DECLINED: frozenset(
+            {CaseLifecycle.NEEDS_REVIEW, CaseLifecycle.ANALYZING, CaseLifecycle.CHANGES_REQUESTED,
+             CaseLifecycle.DECLINED}
+        ),
+        CaseLifecycle.WRITEBACK_COMPLETE: frozenset(
+            {CaseLifecycle.APPROVED, CaseLifecycle.WRITEBACK_COMPLETE}
+        ),
+    }
+
+    def transition_case(self, case_id: str, target: CaseLifecycle) -> VendorCase:
+        """Persist a reviewer/analysis lifecycle transition (issue #27).
+
+        Idempotent (target == current is a no-op) and validated against the
+        documented forward transition map. Emits an integration event so the
+        state change is auditable and observable in the demo.
+        """
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        if not isinstance(case, VendorCase):
+            # A case that was never registered as a vendor case has no lifecycle
+            # to persist; callers treat this as a benign no-op.
+            return None  # type: ignore[return-value]
+        if case.lifecycle is target:
+            return case
+        allowed = self._ALLOWED_TRANSITIONS.get(target)
+        if allowed is None or case.lifecycle not in allowed:
+            raise VendorBackendError(
+                "invalid_transition",
+                f"cannot move case from {case.lifecycle.value} to {target.value}",
+                status=409,
+            )
+        updated = replace(case, lifecycle=target)
+        self._put("case", case_id, updated)
+        self._event(
+            "case.transitioned",
+            "case",
+            case_id,
+            case_id=case_id,
+            detail={"from": case.lifecycle.value, "to": target.value},
+        )
+        return updated
+
+    def get_case_lifecycle(self, case_id: str) -> str | None:
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        return case.lifecycle.value if isinstance(case, VendorCase) else None
+
+    def record_notification(
+        self, *, case_id: str | None, summary: str, delivery: dict[str, Any]
+    ) -> IntegrationEvent:
+        """Persist an auditable notification event with its truthful delivery mode."""
+        return self._event(
+            "slack.notification",
+            "notification",
+            case_id or "workspace",
+            case_id=case_id,
+            detail={
+                "summary": summary,
+                "delivery": delivery.get("delivery"),
+                "simulated": delivery.get("simulated", True),
+                "channel": delivery.get("channel"),
+            },
+        )
+
     # Immutable run versions --------------------------------------------------
 
-    def create_review_run(self, case_id: str) -> ReviewRun:
+    def create_review_run(self, case_id: str, instructions: str | None = None) -> ReviewRun:
         case = self._require("case", case_id, VendorCase)
         submissions = [
             item
@@ -459,6 +683,17 @@ class VendorBackend:
         previous = (
             self._require("run", previous_id, ReviewRun) if previous_id is not None else None
         )
+        # Exactly one rerun per demo case: run 1 is the initial run, run 2 is the
+        # single permitted rerun with custom instructions (issue #27).
+        if previous is not None and previous.run_version >= self.MAX_RUN_VERSION:
+            raise VendorBackendError(
+                "rerun_limit_reached",
+                "only one rerun is permitted per demo case",
+                status=409,
+            )
+        clean_instructions: str | None = None
+        if instructions is not None:
+            clean_instructions = self._text(instructions, "instructions")
         version = 1 if previous is None else previous.run_version + 1
         unresolved = tuple(item["requirement_id"] for item in self._questions_for_submission(submission))
         run = ReviewRun(
@@ -478,6 +713,7 @@ class VendorBackend:
             previous_run_id=previous.run_id if previous else None,
             decision_valid=False,
             write_preview_valid=False,
+            instructions=clean_instructions,
             workspace_id=self.workspace_id,
         )
         self._put("run", run.run_id, run)
@@ -488,7 +724,11 @@ class VendorBackend:
             "run",
             run.run_id,
             case_id=case_id,
-            detail={"run_version": version, "stale_decision_invalidated": previous is not None},
+            detail={
+                "run_version": version,
+                "stale_decision_invalidated": previous is not None,
+                "has_instructions": clean_instructions is not None,
+            },
         )
         return run
 
@@ -537,6 +777,45 @@ class VendorBackend:
         return {
             "matches": results,
             "semantic_disclosure": "semantic search unavailable in deterministic local mode",
+            "catalog_membership_is_approval": False,
+        }
+
+    def list_catalog(
+        self, *, query: str | None = None, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        """Paginated catalog listing for the Vendors page.
+
+        Unlike :meth:`search_catalog` (which requires a non-empty query and only
+        returns scored matches), this lists **all** rows so the frontend can page
+        through the full imported catalog. An optional ``query`` filters by a
+        case-insensitive substring across canonical name, vendor, and aliases.
+        Every original catalog field is preserved; catalog membership is never
+        treated as approval.
+        """
+        if limit < 1 or limit > 500:
+            raise VendorBackendError("invalid_limit", "limit must be between 1 and 500")
+        if offset < 0:
+            raise VendorBackendError("invalid_offset", "offset must be non-negative")
+        entries = self._list("catalog", SoftwareCatalogEntry)
+        if query:
+            needle = query.strip().lower()
+            if needle:
+                def matches(entry: SoftwareCatalogEntry) -> bool:
+                    haystack = [entry.canonical_name.lower(), entry.vendor.lower()]
+                    haystack.extend(alias.lower() for alias in entry.aliases if alias)
+                    if entry.short_name:
+                        haystack.append(entry.short_name.lower())
+                    return any(needle in value for value in haystack)
+
+                entries = [entry for entry in entries if matches(entry)]
+        entries.sort(key=lambda entry: (entry.source_row, entry.record_id))
+        total = len(entries)
+        window = entries[offset : offset + limit]
+        return {
+            "items": [entry.to_dict() for entry in window],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
             "catalog_membership_is_approval": False,
         }
 

@@ -11,10 +11,12 @@ from __future__ import annotations
 import datetime
 import hashlib
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from .adapters.model import DeterministicModelClient
+from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
+from .adapters.notifications import Notifier, build_notifier
 from .adapters.servicenow import (
     ConnectorError,
     MockServiceNowConnector,
@@ -22,7 +24,9 @@ from .adapters.servicenow import (
     UnapprovedWriteError,
     UnknownRecordError,
 )
+from .adapters.storage import InMemoryStorage, StorageClient
 from .audit.log import AuditLog, InMemoryAuditSink
+from .config import AppConfig
 from .contracts.case import CaseIntake, DataClassification, Requester
 from .contracts.common import SourceCoordinates
 from .contracts.graph_state import ReviewGraphState, WorkflowStatus
@@ -30,11 +34,12 @@ from .contracts.packet import PacketSection
 from .contracts.schema import ContractValidationError, validate, validate_definition
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
-from .contracts.vendor import SoftwareCatalogEntry
+from .contracts.vendor import CaseLifecycle, SoftwareCatalogEntry
 from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
 from .orchestration.state import InMemoryCheckpointer
+from .packet import render_packet_pdf
 from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
@@ -43,6 +48,29 @@ from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
 _FIXED_CLOCK = "2026-07-14T20:00:00+00:00"
+
+
+def _default_packet_storage(config: AppConfig) -> StorageClient:
+    """Generated-packet artifact store: S3 on AWS, in-memory locally.
+
+    On AWS (``USE_LOCAL_FAKES=false``) with a configured normalized/generated
+    bucket, packets are written to S3 with SSE-KMS and served via a
+    CloudFront-safe or presigned link. Locally, an in-memory store returns a
+    CloudFront-safe relative path so the browser flow works without AWS.
+    """
+    bucket = config.aws.generated_bucket
+    if not config.use_local_fakes and bucket:
+        from .adapters.storage import S3Storage
+
+        return S3Storage(
+            bucket=bucket,
+            region=config.aws.region,
+            kms_key_id=os.environ.get("GENERATED_BUCKET_KMS_KEY_ID") or None,
+            cloudfront_base_url=os.environ.get("PACKET_CLOUDFRONT_BASE_URL") or None,
+        )
+    return InMemoryStorage(
+        cloudfront_base_url=os.environ.get("PACKET_CLOUDFRONT_BASE_URL") or None
+    )
 
 
 class LocalApiError(RuntimeError):
@@ -90,7 +118,19 @@ class LocalReviewApi:
         *,
         seed_demo: bool = True,
         writeback_config: LocalWritebackConfig | None = None,
+        model_client: ModelClient | None = None,
+        packet_storage: StorageClient | None = None,
+        notifier: Notifier | None = None,
+        config: AppConfig | None = None,
     ) -> None:
+        # Live-AI wiring: the model client is constructed from configuration so
+        # that USE_LOCAL_FAKES=false injects a live Bedrock client into the
+        # research/security/accessibility path. It defaults to the deterministic
+        # fixture only when local fakes are enabled (issue #27).
+        self._config = config or AppConfig.from_env()
+        self._model_client = model_client or build_model_client(self._config)
+        self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
+        self._notifier: Notifier = notifier or build_notifier(self._config)
         records = sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
@@ -274,6 +314,13 @@ class LocalReviewApi:
                 confirmed_match_id,
                 reviewer_id=reviewer_id.strip(),
             )
+        if state.status in {WorkflowStatus.AWAITING_REVIEW, WorkflowStatus.ESCALATED}:
+            self._transition_vendor_case(case_id, CaseLifecycle.NEEDS_REVIEW)
+            self._notify(
+                case_id,
+                "case.needs_review",
+                f"Case {case_id} completed analysis and is ready for human review.",
+            )
         return self._case_payload(record)
 
     def review_case(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -375,6 +422,18 @@ class LocalReviewApi:
             decision_version=decision_version,
             detail={"action": action.value, "packet_edit_count": len(edits)},
         )
+        lifecycle_target = {
+            ReviewAction.APPROVE: CaseLifecycle.APPROVED,
+            ReviewAction.REJECT: CaseLifecycle.DECLINED,
+            ReviewAction.REQUEST_INFO: CaseLifecycle.CHANGES_REQUESTED,
+        }.get(action)
+        if lifecycle_target is not None:
+            self._transition_vendor_case(case_id, lifecycle_target)
+            self._notify(
+                case_id,
+                f"review.{lifecycle_target.value}",
+                f"Case {case_id} decision recorded: {action.value} (v{decision_version}).",
+            )
         return self._case_payload(record)
 
     def preview_servicenow(self, case_id: str) -> dict[str, Any]:
@@ -424,6 +483,7 @@ class LocalReviewApi:
             )
         except (ConnectorError, PermissionError) as error:
             raise self._connector_error(error) from error
+        self._transition_vendor_case(case_id, CaseLifecycle.WRITEBACK_COMPLETE)
         return self._case_payload(record)
 
     def get_packet(self, case_id: str) -> dict[str, Any]:
@@ -432,6 +492,47 @@ class LocalReviewApi:
         if packet is None:
             raise LocalApiError(404, "packet_not_found", "case has no generated packet")
         return packet.to_dict()
+
+    def get_packet_pdf(self, case_id: str) -> dict[str, Any]:
+        """Render the packet to a real PDF, store it, and return a view link.
+
+        The bytes are stored through the artifact store (S3 with SSE-KMS on AWS,
+        in-memory locally) under a deterministic, version- and hash-qualified key.
+        Regenerating is idempotent because the packet content hash is stable.
+        Material citations travel with the response so no claim is unsupported.
+        """
+        record = self._require_case(case_id)
+        packet = record.state.draft_packet
+        if packet is None:
+            raise LocalApiError(404, "packet_not_found", "case has no generated packet")
+        if packet.sha256 is None:
+            packet.sha256 = packet.compute_sha256()
+        title = (
+            f"VETTED Evidence Packet — {record.state.case_input.product_name} "
+            f"({record.state.case_input.vendor_name})"
+        )
+        pdf_bytes = render_packet_pdf(packet, title=title)
+        key = (
+            f"generated/{self._config.app_env}/{case_id}/"
+            f"packet-v{packet.packet_version}-{packet.sha256[:16]}.pdf"
+        )
+        stored_sha = self._packet_storage.put_object(key=key, body=pdf_bytes)
+        view_url = self._packet_storage.view_url(key=key, content_type="application/pdf")
+        simulated = isinstance(self._packet_storage, InMemoryStorage)
+        return {
+            "case_id": case_id,
+            "packet_id": packet.packet_id,
+            "packet_version": packet.packet_version,
+            "packet_type": packet.packet_type.value,
+            "key": key,
+            "view_url": view_url,
+            "content_type": "application/pdf",
+            "size_bytes": len(pdf_bytes),
+            "pdf_sha256": stored_sha,
+            "packet_sha256": packet.sha256,
+            "citations": [citation.to_dict() for citation in packet.citations],
+            "simulated_storage": simulated,
+        }
 
     def get_state(self, case_id: str) -> dict[str, Any]:
         return self._require_case(case_id).state.to_dict()
@@ -570,7 +671,15 @@ class LocalReviewApi:
 
     def vendor_questions(self, token: str) -> dict[str, Any]:
         return self._vendor_call(
-            lambda: {"items": self._vendor.unresolved_questions(token)}
+            lambda: {
+                "items": self._vendor.unresolved_questions(token),
+                **self._vendor.intake_stage(token),
+            }
+        )
+
+    def vendor_run_intake_analysis(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(
+            lambda: self._vendor.run_intake_analysis(token).to_vendor_dict()
         )
 
     def vendor_finalize(self, token: str) -> dict[str, Any]:
@@ -613,9 +722,17 @@ class LocalReviewApi:
             ).to_dict()
         )
 
-    def create_review_run(self, case_id: str) -> dict[str, Any]:
+    def create_review_run(self, case_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         record = self._require_case(case_id)
-        run = self._vendor_call(lambda: self._vendor.create_review_run(case_id))
+        instructions = None
+        if payload:
+            if set(payload) - {"instructions"}:
+                raise LocalApiError(400, "validation_error", "review run accepts only instructions")
+            raw = payload.get("instructions")
+            if raw is not None and not isinstance(raw, str):
+                raise LocalApiError(400, "validation_error", "instructions must be a string")
+            instructions = raw
+        run = self._vendor_call(lambda: self._vendor.create_review_run(case_id, instructions))
         record.state.human_decision = None
         record.state.write_preview = None
         record.state.write_result = None
@@ -628,6 +745,37 @@ class LocalReviewApi:
 
     def search_catalog(self, query: str, vendor: str | None = None) -> dict[str, Any]:
         return self._vendor_call(lambda: self._vendor.search_catalog(query, vendor))
+
+    def list_catalog(
+        self, query: str | None = None, limit: str | int | None = None, offset: str | int | None = None
+    ) -> dict[str, Any]:
+        parsed_limit = self._parse_bounded_int(limit, "limit", default=50, minimum=1, maximum=500)
+        parsed_offset = self._parse_bounded_int(offset, "offset", default=0, minimum=0, maximum=10_000_000)
+        clean_query = query.strip() if isinstance(query, str) and query.strip() else None
+        return self._vendor_call(
+            lambda: self._vendor.list_catalog(
+                query=clean_query, limit=parsed_limit, offset=parsed_offset
+            )
+        )
+
+    @staticmethod
+    def _parse_bounded_int(
+        value: str | int | None, name: str, *, default: int, minimum: int, maximum: int
+    ) -> int:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            raise LocalApiError(400, "validation_error", f"{name} must be an integer")
+        if isinstance(value, str):
+            try:
+                value = int(value)
+            except ValueError as error:
+                raise LocalApiError(400, "validation_error", f"{name} must be an integer") from error
+        if not isinstance(value, int) or value < minimum or value > maximum:
+            raise LocalApiError(
+                400, "validation_error", f"{name} must be between {minimum} and {maximum}"
+            )
+        return value
 
     def confirm_catalog_match(self, record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if set(payload) != {"match_method", "reviewer_id"}:
@@ -733,13 +881,14 @@ class LocalReviewApi:
         sink = InMemoryAuditSink()
         audit = AuditLog(sink=sink)
         workflow = ReviewWorkflow(
-            model=DeterministicModelClient(),
+            model=self._model_client,
             software_index=self._software_index,
             ruleset=default_ruleset(),
             registry=default_conflict_registry(),
             audit=audit,
             checkpointer=InMemoryCheckpointer(),
             clock=lambda: _FIXED_CLOCK,
+            specialist_profiles=self._specialist_profiles(),
         )
         state = ReviewGraphState(case_id=case_id, case_input=intake)
         record = _CaseRecord(state=state, workflow=workflow, audit=audit, audit_sink=sink)
@@ -946,6 +1095,32 @@ class LocalReviewApi:
         if record is None:
             raise LocalApiError(404, "case_not_found", f"case {case_id} not found")
         return record
+
+    def _specialist_profiles(self) -> dict[str, str]:
+        """Map specialist key -> active profile version id for run metadata."""
+        return {
+            profile.profile_key: profile.profile_version_id
+            for profile in self._profiles.active_profiles()
+            if profile.profile_key in {"security", "accessibility"}
+        }
+
+    def _transition_vendor_case(self, case_id: str, target: CaseLifecycle) -> None:
+        """Persist the vendor-case lifecycle transition, tolerating benign no-ops."""
+        try:
+            self._vendor.transition_case(case_id, target)
+        except VendorBackendError:
+            # A lifecycle that cannot legally advance (e.g. an already-closed
+            # case) must not mask the primary reviewer action; the workflow
+            # state remains the source of truth for the write boundary.
+            pass
+
+    def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
+        """Send/record a truthful notification (live Slack only when configured)."""
+        try:
+            delivery = self._notifier.notify(event_type=event_type, summary=summary)
+        except Exception:  # noqa: BLE001 - never let notification block the workflow
+            delivery = {"delivery": "failed", "simulated": False}
+        self._vendor.record_notification(case_id=case_id, summary=summary, delivery=delivery)
 
     @staticmethod
     def _required_text(payload: dict[str, Any], key: str) -> str:

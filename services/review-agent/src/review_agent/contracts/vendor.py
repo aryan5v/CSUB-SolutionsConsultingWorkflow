@@ -209,6 +209,8 @@ class Submission:
     answers: dict[str, str] = field(default_factory=dict)
     evidence_artifact_ids: tuple[str, ...] = ()
     coverage_ids: tuple[str, ...] = ()
+    intake_analysis_complete: bool = False
+    research_summary: str | None = None
     updated_at: str | None = None
     finalized_at: str | None = None
     workspace_id: str = DEFAULT_WORKSPACE_ID
@@ -290,6 +292,7 @@ class ReviewRun:
     previous_run_id: str | None = None
     decision_valid: bool = False
     write_preview_valid: bool = False
+    instructions: str | None = None
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_dict(self) -> dict[str, Any]:
@@ -305,6 +308,7 @@ class ReviewRun:
             "previous_run_id": self.previous_run_id,
             "decision_valid": self.decision_valid,
             "write_preview_valid": self.write_preview_valid,
+            "instructions": self.instructions,
         }
 
 

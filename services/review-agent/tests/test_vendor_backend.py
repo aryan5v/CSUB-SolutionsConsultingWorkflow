@@ -86,27 +86,37 @@ class VendorBackendTests(unittest.TestCase):
         token = self.issue()["token"]
         opened = self.backend.resolve_invite(token, mark_open=True)
         self.assertEqual(opened["invite"]["status"], "opened")
-        self.assertEqual(
-            {item["requirement_id"] for item in opened["questions"]},
-            {"SEC.DATA.001", "A11Y.VPAT.001"},
-        )
+        # Staged intake: no questions are exposed until the deterministic
+        # research/coverage/extraction step has run.
+        self.assertEqual(opened["questions"], [])
+        self.assertFalse(opened["submission"]["intake_analysis_complete"])
+        self.assertEqual(self.backend.unresolved_questions(token), [])
         artifact = self.backend.add_evidence(
             token,
             {
-                "filename": "security.pdf",
+                "filename": "soc2-report.pdf",
                 "content_type": "application/pdf",
                 "size_bytes": 100,
                 "sha256": "a" * 64,
             },
         )
-        coverage = self.backend.add_coverage(token, "SEC.DATA.001", [artifact.artifact_id])
-        self.assertEqual(coverage.source_citation["source_id"], "policy:security")
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        # Analysis is required before questions/answers are available.
+        with self.assertRaises(VendorBackendError) as pending:
+            self.backend.save_answers(token, {"A11Y.VPAT.001": "early"})
+        self.assertEqual(pending.exception.code, "intake_analysis_pending")
+        analyzed = self.backend.run_intake_analysis(token)
+        self.assertTrue(analyzed.intake_analysis_complete)
+        # "SOC 2" expected evidence deterministically covers SEC.DATA.001 from the
+        # soc2 filename, leaving only the accessibility requirement open.
         questions = self.backend.unresolved_questions(token)
         self.assertEqual([item["requirement_id"] for item in questions], ["A11Y.VPAT.001"])
-        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        del artifact
         self.backend.save_answers(token, {"A11Y.VPAT.001": "VPAT is attached on request."})
         recovered = self.backend.resolve_invite(token)
-        self.assertEqual(recovered["submission"]["trust_center_url"], "https://trust.vendor.example/security")
+        self.assertEqual(
+            recovered["submission"]["trust_center_url"], "https://trust.vendor.example/security"
+        )
         self.assertEqual(recovered["questions"], [])
 
     def test_unknown_requirements_and_nonpublic_urls_are_rejected(self) -> None:

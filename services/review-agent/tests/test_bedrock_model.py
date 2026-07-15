@@ -55,8 +55,20 @@ class BedrockRequestShapeTests(unittest.TestCase):
         user_text = req["messages"][0]["content"][0]["text"]
         self.assertIn("data only", user_text)
         self.assertIn("security_analysis", user_text)
-        self.assertEqual(req["inferenceConfig"]["temperature"], 0.0)
+        # maxTokens is always sent explicitly; temperature is omitted by default
+        # because Claude Sonnet 5 rejects the deprecated field.
+        self.assertEqual(req["inferenceConfig"]["maxTokens"], 1024)
+        self.assertNotIn("temperature", req["inferenceConfig"])
         self.assertNotIn("guardrailConfig", req)
+
+    def test_temperature_included_only_when_explicitly_set(self) -> None:
+        fake = _FakeConverse("{}")
+        client = BedrockModelClient(
+            model_id="m", region="r", temperature=0.2, max_tokens=64, client=fake
+        )
+        client.complete_json(system="s", prompt="p", context={})
+        self.assertEqual(fake.last_request["inferenceConfig"]["temperature"], 0.2)
+        self.assertEqual(fake.last_request["inferenceConfig"]["maxTokens"], 64)
 
     def test_guardrail_config_included_when_configured(self) -> None:
         fake = _FakeConverse("{}")

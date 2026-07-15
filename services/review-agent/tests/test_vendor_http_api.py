@@ -69,18 +69,35 @@ class VendorHttpRouteTests(unittest.TestCase):
         self.assertEqual(self.request(f"/vendor/invites/{token}/open", "POST", {})[0], 200)
         self.assertEqual(
             self.request(
+                f"/vendor/invites/{token}/evidence",
+                "POST",
+                {
+                    "filename": "vpat-report.pdf",
+                    "content_type": "application/pdf",
+                    "size_bytes": 100,
+                    "sha256": "a" * 64,
+                },
+            )[0],
+            200,
+        )
+        self.assertEqual(
+            self.request(
                 f"/vendor/invites/{token}/trust-center",
                 "POST",
                 {"trust_center_url": "https://trust.route.example"},
             )[0],
             200,
         )
+        # Staged intake: analysis must run before questions/answers are exposed.
+        self.assertEqual(self.request(f"/vendor/invites/{token}/analyze", "POST", {})[0], 200)
         _, questions = self.request(f"/vendor/invites/{token}/questions")
+        self.assertTrue(questions["intake_analysis_complete"])
         answers = {item["requirement_id"]: "Sanitized answer" for item in questions["items"]}
-        self.assertEqual(
-            self.request(f"/vendor/invites/{token}/answers", "POST", {"answers": answers})[0],
-            200,
-        )
+        if answers:
+            self.assertEqual(
+                self.request(f"/vendor/invites/{token}/answers", "POST", {"answers": answers})[0],
+                200,
+            )
         self.assertEqual(self.request(f"/vendor/invites/{token}/finalize", "POST", {})[0], 200)
         state = self.api._cases[self.case_id].state
         state.human_decision = cast(Any, object())

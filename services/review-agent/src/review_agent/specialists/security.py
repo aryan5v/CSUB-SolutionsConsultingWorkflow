@@ -8,16 +8,24 @@ policy engine.
 
 from __future__ import annotations
 
-from ..adapters.model import ModelClient
+from ..adapters.model import ModelClient, invoke_structured, model_label
 from ..contracts.case import CaseIntake
 from ..contracts.common import Citation, CitationScope
 from ..contracts.policy import PolicyResult
 
 SPECIALIST_NAME = "security"
+SPECIALIST_VERSION = "security@1"
 
 
-def run_security(case: CaseIntake, policy: PolicyResult, model: ModelClient) -> dict:
-    raw = model.complete_json(
+def run_security(
+    case: CaseIntake,
+    policy: PolicyResult,
+    model: ModelClient,
+    *,
+    profile_version_id: str | None = None,
+) -> dict:
+    raw = invoke_structured(
+        model,
         system="You are a security review specialist. Summarize and compare only; "
         "do not set risk tiers or required documents.",
         prompt=f"Summarize the security posture questions for {case.product_name}.",
@@ -44,6 +52,13 @@ def run_security(case: CaseIntake, policy: PolicyResult, model: ModelClient) -> 
         "findings": raw.get("findings", []),
         "citations": [c.to_dict() for c in citations],
         "uncertainty": raw.get("uncertainty", ""),
+        "metadata": {
+            "specialist_version": SPECIALIST_VERSION,
+            "model": model_label(model),
+            "simulated": raw.get("_model", {}).get("simulated", True),
+            "repair_passes": raw.get("_model", {}).get("repair_passes", 0),
+            "profile_version_id": profile_version_id,
+        },
     }
 
 

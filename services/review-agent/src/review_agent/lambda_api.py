@@ -96,6 +96,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/vendor/invites/current/trust-center"),
     ("POST", "/vendor/invites/current/answers"),
     ("POST", "/vendor/invites/current/coverage"),
+    ("POST", "/vendor/invites/current/analyze"),
     ("POST", "/vendor/invites/current/finalize"),
     ("GET", "/intake"),
     ("POST", "/intake"),
@@ -103,6 +104,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/intake/trust-center"),
     ("POST", "/intake/answers"),
     ("POST", "/intake/coverage"),
+    ("POST", "/intake/analyze"),
     ("GET", "/intake/questions"),
     ("POST", "/intake/finalize"),
 }
@@ -137,6 +139,51 @@ class InMemoryWorkspaceStore:
 
     def replace_catalog(self, workspace_id: str, entries: list[dict[str, Any]]) -> None:
         self._catalogs[workspace_id] = _json_clone(entries)
+
+
+class FileWorkspaceStore:
+    """JSON-file-backed store for boto3-free local seeding and demo verification.
+
+    Uses only the standard library, so an operator can reconcile the 982-row
+    workbook and seed the sanitized demo workspace to a local file without AWS
+    credentials or the ``aws`` extra. The Lambda runtime still uses
+    ``DynamoWorkspaceStore``; this store makes the seed CLI reliably runnable and
+    inspectable during development.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path).expanduser()
+
+    def _read(self) -> dict[str, Any]:
+        if not self._path.is_file():
+            return {"snapshots": {}, "catalogs": {}}
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise RuntimeError("workspace file is malformed")
+        data.setdefault("snapshots", {})
+        data.setdefault("catalogs", {})
+        return data
+
+    def _write(self, data: dict[str, Any]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(_json_dumps(data), encoding="utf-8")
+
+    def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
+        value = self._read()["snapshots"].get(workspace_id)
+        return _json_clone(value) if value is not None else None
+
+    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+        data = self._read()
+        data["snapshots"][workspace_id] = _json_clone(snapshot)
+        self._write(data)
+
+    def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
+        return _json_clone(self._read()["catalogs"].get(workspace_id, []))
+
+    def replace_catalog(self, workspace_id: str, entries: list[dict[str, Any]]) -> None:
+        data = self._read()
+        data["catalogs"][workspace_id] = _json_clone(entries)
+        self._write(data)
 
 
 class DynamoWorkspaceStore:
@@ -599,6 +646,11 @@ def restore_api(
     api._connector = _restore_connector(snapshot.get("connector"))
     api._cases = {}
     api._case_sequence = int(snapshot.get("case_sequence", 0))
+    specialist_profiles = {
+        profile.profile_key: profile.profile_version_id
+        for profile in api._profiles.active_profiles()
+        if profile.profile_key in {"security", "accessibility"}
+    }
     case_values = snapshot.get("cases", {})
     if not isinstance(case_values, dict):
         raise RuntimeError("workspace case snapshot is malformed")
@@ -612,7 +664,7 @@ def restore_api(
             raise RuntimeError("workspace audit snapshot is malformed")
         sink.events = [_audit_event(event) for event in events]
         audit = AuditLog(sink=sink)
-        workflow = _workflow(api._software_index, audit)
+        workflow = _workflow(api._software_index, audit, specialist_profiles, api._model_client)
         workflow._seq = int(value.get("workflow_sequence", len(events)))
         documents = value.get("documents", [])
         if not isinstance(documents, list):
@@ -718,6 +770,17 @@ def _dispatch(
         return api.create_case(body), 201, True
     if method == "GET" and path == "/integration-events":
         return api.integration_events(), 200, False
+    if method == "GET" and path == "/catalog":
+        query = _query(event)
+        return (
+            api.list_catalog(
+                query.get("q", [None])[0],
+                query.get("limit", [None])[0],
+                query.get("offset", [None])[0],
+            ),
+            200,
+            False,
+        )
     if method == "GET" and path == "/catalog/search":
         query = _query(event)
         return api.search_catalog(query.get("q", [""])[0], query.get("vendor", [None])[0]), 200, False
@@ -837,12 +900,14 @@ def _dispatch_case(
         return api.commit_servicenow(case_id, body), 200, True
     if method == "GET" and suffix == "packet":
         return api.get_packet(case_id), 200, False
+    if method == "GET" and suffix == "packet/pdf":
+        return api.get_packet_pdf(case_id), 200, False
     if method == "POST" and suffix == "invites":
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
         return api.list_case_invites(case_id), 200, False
     if method == "POST" and suffix == "review-runs":
-        return api.create_review_run(case_id), 201, True
+        return api.create_review_run(case_id, body), 201, True
     if method == "GET" and suffix == "review-runs":
         return api.list_review_runs(case_id), 200, False
     raise LocalApiError(404, "route_not_found", "route not found")
@@ -865,6 +930,7 @@ def _dispatch_intake(
         "/vendor/invites/current/trust-center": "/intake/trust-center",
         "/vendor/invites/current/answers": "/intake/answers",
         "/vendor/invites/current/coverage": "/intake/coverage",
+        "/vendor/invites/current/analyze": "/intake/analyze",
         "/vendor/invites/current/finalize": "/intake/finalize",
     }
     path = aliases.get(path, path)
@@ -877,6 +943,7 @@ def _dispatch_intake(
         ("POST", "/intake/trust-center"): lambda: api.vendor_set_trust_center(token, body),
         ("POST", "/intake/answers"): lambda: api.vendor_save_answers(token, body),
         ("POST", "/intake/coverage"): lambda: api.vendor_add_coverage(token, body),
+        ("POST", "/intake/analyze"): lambda: api.vendor_run_intake_analysis(token),
         ("GET", "/intake/questions"): lambda: api.vendor_questions(token),
         ("POST", "/intake/finalize"): lambda: api.vendor_finalize(token),
     }
@@ -1015,15 +1082,21 @@ def _log(correlation_id: str, event_type: str, status: int) -> None:
     print(_json_dumps({"correlation_id": correlation_id, "event_type": event_type, "status": status}))
 
 
-def _workflow(index: ApprovedSoftwareIndex, audit: AuditLog) -> ReviewWorkflow:
+def _workflow(
+    index: ApprovedSoftwareIndex,
+    audit: AuditLog,
+    specialist_profiles: dict[str, str] | None = None,
+    model: Any | None = None,
+) -> ReviewWorkflow:
     return ReviewWorkflow(
-        model=DeterministicModelClient(),
+        model=model or DeterministicModelClient(),
         software_index=index,
         ruleset=default_ruleset(),
         registry=default_conflict_registry(),
         audit=audit,
         checkpointer=InMemoryCheckpointer(),
         clock=lambda: _FIXED_CLOCK,
+        specialist_profiles=specialist_profiles or {},
     )
 
 
@@ -1462,6 +1535,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--foundation-stack", default="ReviewFoundationStack")
     parser.add_argument("--profile")
     parser.add_argument("--region")
+    parser.add_argument(
+        "--out",
+        help="seed to a local JSON workspace file (stdlib only, no AWS/boto3 required)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="reconcile and report counts only; write nothing",
+    )
+    parser.add_argument(
+        "--expected-rows",
+        type=int,
+        default=982,
+        help="required reconciled catalog row count (default 982)",
+    )
     args = parser.parse_args(argv)
     reader = XlsxWorkbookReader(Path(args.workbook))
     normalized = normalize_workbook(
@@ -1473,15 +1561,44 @@ def main(argv: list[str] | None = None) -> int:
     if not report.rows_reconcile or not report.columns_reconcile:
         print("seed refused: workbook reconciliation failed", file=sys.stderr)
         return 2
-    if report.output_rows != 982:
-        print(f"seed refused: expected 982 catalog rows, got {report.output_rows}", file=sys.stderr)
+    if report.output_rows != args.expected_rows:
+        print(
+            f"seed refused: expected {args.expected_rows} catalog rows, got {report.output_rows}",
+            file=sys.stderr,
+        )
         return 2
-    store = DynamoWorkspaceStore.from_stacks(
-        platform_stack=args.platform_stack,
-        foundation_stack=args.foundation_stack,
-        profile=args.profile,
-        region=args.region,
-    )
+    if args.dry_run:
+        print(
+            _json_dumps(
+                {
+                    "dry_run": True,
+                    "workspace_id": args.workspace_id,
+                    "reconciled_rows": report.output_rows,
+                    "preserved_columns": report.preserved_columns,
+                    "duplicate_identity_groups": report.duplicate_identity_groups,
+                    "catalog_membership_is_approval": False,
+                }
+            )
+        )
+        return 0
+    if args.out:
+        store: WorkspaceStore = FileWorkspaceStore(args.out)
+    else:
+        try:
+            store = DynamoWorkspaceStore.from_stacks(
+                platform_stack=args.platform_stack,
+                foundation_stack=args.foundation_stack,
+                profile=args.profile,
+                region=args.region,
+            )
+        except ImportError:
+            print(
+                "seed refused: boto3 is required for the DynamoDB seed. Install the "
+                "workspace's declared AWS extra (pip install -e '.[aws]') or seed a "
+                "local file with --out PATH.",
+                file=sys.stderr,
+            )
+            return 3
     result = seed_workspace(
         store,
         workspace_id=args.workspace_id,

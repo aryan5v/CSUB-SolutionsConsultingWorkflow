@@ -16,7 +16,7 @@ _CASE_ROUTE = re.compile(r"^/cases/([^/]+)(?:/(.*))?$")
 _RESOURCE_ROUTE = re.compile(r"^/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?$")
 _INVITE_ROUTE = re.compile(r"^/invites/([^/]+)/(revoke|resend)$")
 _VENDOR_TOKEN_ROUTE = re.compile(
-    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|questions|finalize))?$"
+    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize))?$"
 )
 _PROFILE_ROUTE = re.compile(r"^/review-profiles/([^/]+)(?:/(fixture-test|activate|rollback))?$")
 _CATALOG_CONFIRM_ROUTE = re.compile(r"^/catalog/matches/([^/]+)/confirm$")
@@ -69,6 +69,16 @@ def create_server(
                     return
                 if method == "GET" and path == "/integration-events":
                     self._json(HTTPStatus.OK, application.integration_events())
+                    return
+                if method == "GET" and path == "/catalog":
+                    self._json(
+                        HTTPStatus.OK,
+                        application.list_catalog(
+                            query.get("q", [None])[0],
+                            query.get("limit", [None])[0],
+                            query.get("offset", [None])[0],
+                        ),
+                    )
                     return
                 if method == "GET" and path == "/catalog/search":
                     search = query.get("q", [""])[0]
@@ -240,6 +250,8 @@ def create_server(
                 result = application.vendor_save_answers(token, self._body())
             elif method == "POST" and action == "coverage":
                 result = application.vendor_add_coverage(token, self._body())
+            elif method == "POST" and action == "analyze":
+                result = application.vendor_run_intake_analysis(token)
             elif method == "GET" and action == "questions":
                 result = application.vendor_questions(token)
             elif method == "POST" and action == "finalize":
@@ -280,12 +292,14 @@ def create_server(
                 self._json(HTTPStatus.OK, application.commit_servicenow(case_id, self._body()))
             elif method == "GET" and suffix == "packet":
                 self._json(HTTPStatus.OK, application.get_packet(case_id))
+            elif method == "GET" and suffix == "packet/pdf":
+                self._json(HTTPStatus.OK, application.get_packet_pdf(case_id))
             elif method == "POST" and suffix == "invites":
                 self._json(HTTPStatus.CREATED, application.issue_vendor_invite(case_id, self._body()))
             elif method == "GET" and suffix == "invites":
                 self._json(HTTPStatus.OK, application.list_case_invites(case_id))
             elif method == "POST" and suffix == "review-runs":
-                self._json(HTTPStatus.CREATED, application.create_review_run(case_id))
+                self._json(HTTPStatus.CREATED, application.create_review_run(case_id, self._body()))
             elif method == "GET" and suffix == "review-runs":
                 self._json(HTTPStatus.OK, application.list_review_runs(case_id))
             else:

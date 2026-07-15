@@ -265,12 +265,6 @@ class LambdaApiTests(unittest.TestCase):
             authenticated=False,
             body={},
         )
-        _, questions = self.call(
-            "GET",
-            "/vendor/invites/current/questions",
-            headers=headers,
-            authenticated=False,
-        )
         evidence_response, artifact = self.call(
             "POST",
             "/vendor/invites/current/evidence",
@@ -284,18 +278,6 @@ class LambdaApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(evidence_response["statusCode"], 200)
-        covered_requirement = questions["items"][0]["requirement_id"]
-        coverage_response, _ = self.call(
-            "POST",
-            "/vendor/invites/current/coverage",
-            headers=headers,
-            authenticated=False,
-            body={
-                "requirement_id": covered_requirement,
-                "evidence_artifact_ids": [artifact["artifact_id"]],
-            },
-        )
-        self.assertEqual(coverage_response["statusCode"], 200)
         trust_response, _ = self.call(
             "POST",
             "/vendor/invites/current/trust-center",
@@ -304,15 +286,34 @@ class LambdaApiTests(unittest.TestCase):
             body={"trust_center_url": "https://trust.example.edu/security"},
         )
         self.assertEqual(trust_response["statusCode"], 200)
-        _, remaining = self.call(
+        # Staged intake: questions are empty until the deterministic analysis runs.
+        _, pre_analysis = self.call(
             "GET",
             "/vendor/invites/current/questions",
             headers=headers,
             authenticated=False,
         )
+        self.assertEqual(pre_analysis["items"], [])
+        self.assertFalse(pre_analysis["intake_analysis_complete"])
+        analyze_response, _ = self.call(
+            "POST",
+            "/vendor/invites/current/analyze",
+            headers=headers,
+            authenticated=False,
+            body={},
+        )
+        self.assertEqual(analyze_response["statusCode"], 200)
+        _, questions = self.call(
+            "GET",
+            "/vendor/invites/current/questions",
+            headers=headers,
+            authenticated=False,
+        )
+        self.assertTrue(questions["intake_analysis_complete"])
+        del artifact
         answers = {
             item["requirement_id"]: "Sanitized deterministic answer."
-            for item in remaining["items"]
+            for item in questions["items"]
         }
         if answers:
             answers_response, _ = self.call(

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..adapters.model import ModelClient
+from ..adapters.model import ModelClient, ModelStructureError
 from ..adapters.servicenow import ServiceNowConnector
 from ..audit.log import AuditLog
 from ..contracts.audit import ActorType
@@ -45,6 +46,7 @@ class ReviewWorkflow:
         audit: AuditLog,
         checkpointer: Checkpointer | None = None,
         clock: Callable[[], str] = _utc_now,
+        specialist_profiles: dict[str, str] | None = None,
     ) -> None:
         self._model = model
         self._index = software_index
@@ -53,6 +55,7 @@ class ReviewWorkflow:
         self._audit = audit
         self._checkpointer = checkpointer
         self._clock = clock
+        self._specialist_profiles = dict(specialist_profiles or {})
         self._seq = 0
 
     def _checkpoint(self, state: ReviewGraphState) -> None:
@@ -110,14 +113,52 @@ class ReviewWorkflow:
         return state
 
     def run_specialists(self, state: ReviewGraphState) -> ReviewGraphState:
-        # Security and accessibility run in parallel conceptually; deterministic
-        # fakes make ordering irrelevant in the local slice.
+        # Security and accessibility are independent nodes; run them concurrently
+        # (deterministic fakes make results order-independent, and a live Bedrock
+        # model benefits from the parallelism). Each output persists version,
+        # model, and profile-version metadata.
         if state.policy_result is None:
             raise ValueError("policy_result must be evaluated before running specialists")
-        security = run_security(state.case_input, state.policy_result, self._model)
-        accessibility = run_accessibility(state.case_input, state.policy_result, self._model)
-        state.specialist_results = {"security": security, "accessibility": accessibility}
-        self._emit(state, "specialists.completed", ActorType.MODEL)
+        policy = state.policy_result
+        case = state.case_input
+        tasks = {
+            "security": lambda: run_security(
+                case, policy, self._model,
+                profile_version_id=self._specialist_profiles.get("security"),
+            ),
+            "accessibility": lambda: run_accessibility(
+                case, policy, self._model,
+                profile_version_id=self._specialist_profiles.get("accessibility"),
+            ),
+        }
+        results: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            futures = {executor.submit(func): name for name, func in tasks.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except ModelStructureError as error:
+                    # Explicit model failure: record a reviewable failed result
+                    # rather than silently substituting a fixture.
+                    errors[name] = str(error)
+        if errors:
+            raise ModelStructureError(
+                "specialist model failure: "
+                + "; ".join(f"{name}: {message}" for name, message in sorted(errors.items()))
+            )
+        state.specialist_results = {
+            "security": results["security"],
+            "accessibility": results["accessibility"],
+        }
+        self._emit(
+            state,
+            "specialists.completed",
+            ActorType.MODEL,
+            security_model=results["security"].get("metadata", {}).get("model"),
+            accessibility_model=results["accessibility"].get("metadata", {}).get("model"),
+        )
         return state
 
     def check_and_repair(self, state: ReviewGraphState) -> ReviewGraphState:
