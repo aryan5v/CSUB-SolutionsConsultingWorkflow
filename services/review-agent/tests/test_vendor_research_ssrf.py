@@ -106,7 +106,7 @@ class PublicIpTests(unittest.TestCase):
 
 class DestinationParsingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.allowlist = DomainAllowlist(vendor_domain="vendor.com")
+        self.allowlist = DomainAllowlist(confirmed_host="vendor.com")
         self.policy = ResearchPolicy()
 
     def _block_code(self, url: str) -> str:
@@ -141,6 +141,42 @@ class DestinationParsingTests(unittest.TestCase):
             parse_destination("https://trust.vendor.com/x", self.allowlist, self.policy),
             "trust.vendor.com",
         )
+
+
+class MultiTenantPublicSuffixTests(unittest.TestCase):
+    """Fail-closed exact-host boundary for multi-tenant public suffixes (#44).
+
+    A guessed registrable-domain fallback would treat ``github.io`` as the
+    registrable domain and let one tenant reach another. The exact-host model
+    forbids it.
+    """
+
+    def test_sibling_tenant_on_public_suffix_is_off_domain(self) -> None:
+        allow = DomainAllowlist.derive("https://vendor.github.io/trust")
+        self.assertEqual(allow.confirmed_host, "vendor.github.io")
+        self.assertTrue(allow.is_allowed("vendor.github.io"))
+        self.assertTrue(allow.is_allowed("docs.vendor.github.io"))
+        self.assertFalse(allow.is_allowed("attacker.github.io"))
+        self.assertFalse(allow.is_allowed("github.io"))
+
+    def test_sibling_subdomain_requires_confirmation(self) -> None:
+        # Confirmed host is a subdomain; a sibling subdomain and the apex are
+        # NOT auto-allowed (they need explicit human confirmation).
+        allow = DomainAllowlist.derive("https://trust.vendor.com/")
+        self.assertTrue(allow.is_allowed("trust.vendor.com"))
+        self.assertFalse(allow.is_allowed("docs.vendor.com"))
+        self.assertFalse(allow.is_allowed("vendor.com"))
+
+    def test_appspot_sibling_rejected_end_to_end(self) -> None:
+        resolver = FakeResolver({"vendor.appspot.com": [PUBLIC_IP]})
+        transport = FakeTransport({})
+        result = _service(transport, resolver).research(
+            official_url="https://vendor.appspot.com/trust",
+            targets=["https://attacker.appspot.com/steal"],
+        )
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.quarantined), 1)
+        self.assertIn("attacker.appspot.com", result.quarantined[0].url)
 
 
 class ResearchDestinationTests(unittest.TestCase):
@@ -337,6 +373,113 @@ class ResearchDestinationTests(unittest.TestCase):
         )
         self.assertTrue(result.deadline_exceeded)
         self.assertEqual(result.gaps[0].code, "deadline_exceeded")
+
+
+class RedirectResolutionTests(unittest.TestCase):
+    def test_relative_redirect_is_resolved_against_current_url(self) -> None:
+        resolver = FakeResolver({"trust.vendor.com": [PUBLIC_IP]})
+        transport = FakeTransport(
+            {
+                "https://trust.vendor.com/a/vpat": {
+                    "status": 302,
+                    "headers": {"location": "../docs/vpat.pdf"},
+                },
+                "https://trust.vendor.com/docs/vpat.pdf": {
+                    "status": 200,
+                    "headers": {"content-type": "application/pdf"},
+                },
+            }
+        )
+        result = _service(transport, resolver).research(
+            official_url="https://trust.vendor.com/",
+            targets=["https://trust.vendor.com/a/vpat"],
+        )
+        self.assertEqual(len(result.findings), 1)
+        prov = result.findings[0].provenance
+        self.assertEqual(prov.final_url, "https://trust.vendor.com/docs/vpat.pdf")
+        self.assertEqual(prov.redirect_chain, ("https://trust.vendor.com/a/vpat",))
+
+    def test_absolute_path_relative_redirect_same_host_followed(self) -> None:
+        resolver = FakeResolver({"trust.vendor.com": [PUBLIC_IP]})
+        transport = FakeTransport(
+            {
+                "https://trust.vendor.com/old": {
+                    "status": 301,
+                    "headers": {"location": "/new.pdf"},
+                },
+                "https://trust.vendor.com/new.pdf": {
+                    "status": 200,
+                    "headers": {"content-type": "application/pdf"},
+                },
+            }
+        )
+        result = _service(transport, resolver).research(
+            official_url="https://trust.vendor.com/",
+            targets=["https://trust.vendor.com/old"],
+        )
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].provenance.final_url, "https://trust.vendor.com/new.pdf")
+
+    def test_protocol_relative_redirect_off_domain_is_quarantined(self) -> None:
+        resolver = FakeResolver({"trust.vendor.com": [PUBLIC_IP]})
+        transport = FakeTransport(
+            {
+                "https://trust.vendor.com/vpat": {
+                    "status": 302,
+                    "headers": {"location": "//evil.example/steal"},
+                }
+            }
+        )
+        result = _service(transport, resolver).research(
+            official_url="https://trust.vendor.com/",
+            targets=["https://trust.vendor.com/vpat"],
+        )
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.quarantined), 1)
+        self.assertIn("evil.example", result.quarantined[0].url)
+
+    def test_download_limit_enforced_across_redirect_hops(self) -> None:
+        # A single redirect needs a second network call; with max_downloads=1
+        # the redirect hop is refused before any further transport call.
+        resolver = FakeResolver({"trust.vendor.com": [PUBLIC_IP]})
+        transport = FakeTransport(
+            {
+                "https://trust.vendor.com/a": {
+                    "status": 302,
+                    "headers": {"location": "https://trust.vendor.com/b"},
+                },
+                "https://trust.vendor.com/b": {"status": 200},
+            }
+        )
+        result = _service(transport, resolver, max_downloads=1).research(
+            official_url="https://trust.vendor.com/",
+            targets=["https://trust.vendor.com/a"],
+        )
+        self.assertEqual(result.findings, [])
+        self.assertEqual(result.gaps[0].code, "download_limit")
+
+
+class HttpErrorStatusTests(unittest.TestCase):
+    def _gap_for_status(self, status: int) -> tuple[str, str]:
+        resolver = FakeResolver({"trust.vendor.com": [PUBLIC_IP]})
+        transport = FakeTransport({"https://trust.vendor.com/doc": {"status": status}})
+        result = _service(transport, resolver).research(
+            official_url="https://trust.vendor.com/",
+            targets=["https://trust.vendor.com/doc"],
+        )
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.gaps), 1)
+        return result.gaps[0].code, result.gaps[0].detail
+
+    def test_404_is_a_gap_not_evidence(self) -> None:
+        code, detail = self._gap_for_status(404)
+        self.assertEqual(code, "http_error")
+        self.assertIn("404", detail)
+
+    def test_500_is_a_gap_not_evidence(self) -> None:
+        code, detail = self._gap_for_status(500)
+        self.assertEqual(code, "http_error")
+        self.assertIn("500", detail)
 
 
 if __name__ == "__main__":

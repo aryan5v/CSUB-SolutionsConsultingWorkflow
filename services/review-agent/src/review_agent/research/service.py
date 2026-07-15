@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from ..institutional.untrusted import scan_untrusted_text
 from .domain import DomainAllowlist, DomainError
@@ -129,13 +129,17 @@ class GuardedHttpTransport:
         if parsed.query:
             path = f"{path}?{parsed.query}"
         context = ssl.create_default_context()
+        conn: http.client.HTTPSConnection | None = None
+        raw_sock: socket.socket | None = None
+        tls_sock: ssl.SSLSocket | None = None
+        response = None
         try:
             raw_sock = socket.create_connection((ip, 443), timeout=timeout)
-        except OSError as error:
-            raise ResearchError("connect_error", f"could not connect to {host}") from error
-        try:
             tls_sock = context.wrap_socket(raw_sock, server_hostname=host)
-            conn = http.client.HTTPSConnection(host, 443, timeout=timeout)
+            # Inject the already-connected, IP-pinned TLS socket so http.client
+            # never calls connect() again (which would re-resolve the host and
+            # could drift off the validated IP).
+            conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
             conn.sock = tls_sock
             conn.request(
                 "GET",
@@ -172,11 +176,20 @@ class GuardedHttpTransport:
                 connected_ip=ip,
                 oversized=oversized,
             )
+        except OSError as error:
+            raise ResearchError("connect_error", f"could not fetch from {host}") from error
         finally:
-            try:
+            # Close everything exactly once. ``conn.close`` closes the injected
+            # TLS socket (and its underlying raw socket); if the connection was
+            # never built, close whichever socket was opened.
+            if response is not None:
+                response.close()
+            if conn is not None:
+                conn.close()
+            elif tls_sock is not None:
+                tls_sock.close()
+            elif raw_sock is not None:
                 raw_sock.close()
-            except OSError:
-                pass
 
 
 def _utc_now() -> str:
@@ -242,12 +255,12 @@ class VendorResearchService:
             return ResearchResult(
                 vendor=vendor,
                 product=product,
-                vendor_domain="",
+                confirmed_host="",
                 gaps=[ResearchGap(official_url, "invalid_official_url", str(error))],
             )
 
         result = ResearchResult(
-            vendor=vendor, product=product, vendor_domain=allowlist.vendor_domain
+            vendor=vendor, product=product, confirmed_host=allowlist.confirmed_host
         )
         budget = _Budget(started_at=self._monotonic())
 
@@ -327,6 +340,19 @@ class VendorResearchService:
         chain: list[str] = []
         current = url
         for _hop in range(self._policy.max_redirects + 1):
+            # Enforce the download-count and total-deadline budgets before any
+            # network work in this hop (initial request and every redirect), and
+            # clamp this request's timeout to the remaining budget.
+            if budget.downloads_used >= self._policy.max_downloads:
+                raise ResearchError("download_limit", "download count limit reached")
+            remaining = self._policy.total_deadline_seconds - (
+                self._monotonic() - budget.started_at
+            )
+            if remaining <= 0:
+                budget.deadline_exceeded = True
+                raise ResearchError("deadline_exceeded", "research time budget exhausted")
+            timeout = min(self._policy.per_request_timeout_seconds, remaining)
+
             host = parse_destination(current, allowlist, self._policy)
             pinned_ip = self._resolve_and_pin(host)
 
@@ -335,7 +361,7 @@ class VendorResearchService:
                 ip=pinned_ip,
                 host=host,
                 url=current,
-                timeout=self._policy.per_request_timeout_seconds,
+                timeout=timeout,
                 max_bytes=self._policy.max_response_bytes,
             )
             if response.connected_ip != pinned_ip:
@@ -354,10 +380,17 @@ class VendorResearchService:
                 location = response.headers.get("location")
                 if not location:
                     raise ResearchBlocked("redirect_no_location", "redirect without a Location")
-                # Absolute HTTPS only; re-validated on the next loop. A host
-                # change off the allowlist raises off_domain -> quarantine.
-                current = location.strip()
+                # Resolve relative redirects against the current URL, then
+                # re-validate on the next loop. A same-host relative redirect is
+                # allowed; a protocol-relative (``//other``) or absolute
+                # off-domain redirect resolves to an off-allowlist host and is
+                # quarantined by parse_destination.
+                current = urljoin(current, location.strip())
                 continue
+
+            # 4xx/5xx (and any other non-2xx) bodies are never evidence.
+            if not (200 <= response.status < 300):
+                raise ResearchError("http_error", f"non-success status {response.status}")
 
             scope = allowlist.scope_of(host)
             if scope is None:  # defensive; parse_destination already enforced this
@@ -430,3 +463,25 @@ class VendorResearchService:
             result.quarantined.append(
                 QuarantinedLink(link, f"off-domain link on {host}; requires human confirmation")
             )
+
+
+@runtime_checkable
+class VendorResearchProvider(Protocol):
+    """Structural interface a review/submission path depends on for research.
+
+    :class:`VendorResearchService` satisfies this. Injecting it (rather than
+    importing the concrete service) keeps the vendor backend decoupled and lets
+    the local slice run with no provider configured (research simply not
+    performed) instead of fabricating findings.
+    """
+
+    def research(
+        self,
+        *,
+        official_url: str,
+        targets: Sequence[str],
+        vendor: str | None = None,
+        product: str | None = None,
+        source_locators: dict[str, str] | None = None,
+    ) -> ResearchResult:
+        ...

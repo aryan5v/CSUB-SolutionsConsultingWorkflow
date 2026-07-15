@@ -101,7 +101,7 @@ class QuarantinedLink:
 class ResearchResult:
     vendor: str | None
     product: str | None
-    vendor_domain: str
+    confirmed_host: str
     findings: list[ResearchFinding] = field(default_factory=list)
     gaps: list[ResearchGap] = field(default_factory=list)
     quarantined: list[QuarantinedLink] = field(default_factory=list)
@@ -112,7 +112,7 @@ class ResearchResult:
         return {
             "vendor": self.vendor,
             "product": self.product,
-            "vendor_domain": self.vendor_domain,
+            "confirmed_host": self.confirmed_host,
             "findings": [f.to_dict() for f in self.findings],
             "gaps": [g.to_dict() for g in self.gaps],
             "quarantined": [q.to_dict() for q in self.quarantined],

@@ -18,7 +18,12 @@ from review_agent.research import (
     VendorResearchService,
     provenance_to_citation,
 )
-from review_agent.research.domain import DomainAllowlist, registrable_domain
+from review_agent.research.domain import (
+    DomainAllowlist,
+    DomainError,
+    confirmed_host_from_url,
+    validate_public_dns_host,
+)
 from review_agent.specialists.citations import check_citations
 
 PUBLIC_IP = "93.184.216.34"
@@ -64,15 +69,28 @@ def _service(transport: FakeTransport, resolver: FakeResolver, **kw) -> VendorRe
     )
 
 
-class RegistrableDomainTests(unittest.TestCase):
-    def test_registrable_domain_basic_and_multi_label(self) -> None:
-        self.assertEqual(registrable_domain("trust.vendor.com"), "vendor.com")
-        self.assertEqual(registrable_domain("docs.vendor.co.uk"), "vendor.co.uk")
+class ConfirmedHostTests(unittest.TestCase):
+    def test_confirmed_host_is_exact_host_no_registrable_guess(self) -> None:
+        self.assertEqual(confirmed_host_from_url("https://trust.vendor.com/x"), "trust.vendor.com")
+        self.assertEqual(confirmed_host_from_url("https://vendor.github.io/x"), "vendor.github.io")
+
+    def test_ip_literal_and_single_label_confirmed_hosts_rejected(self) -> None:
+        for url in ("https://127.0.0.1/x", "https://2130706433/x", "https://localhost/x"):
+            with self.assertRaises(DomainError):
+                confirmed_host_from_url(url)
+        with self.assertRaises(DomainError):
+            validate_public_dns_host("10.0.0.1")
 
     def test_allowlist_scope(self) -> None:
-        allow = DomainAllowlist(vendor_domain="vendor.com", standards_authorities=("w3.org",))
+        allow = DomainAllowlist(
+            confirmed_host="trust.vendor.com", standards_authorities=("w3.org",)
+        )
         self.assertEqual(allow.scope_of("trust.vendor.com"), "official_vendor")
+        self.assertEqual(allow.scope_of("docs.trust.vendor.com"), "official_vendor")
         self.assertEqual(allow.scope_of("www.w3.org"), "standards")
+        # Sibling and apex are not auto-allowed under the exact-host model.
+        self.assertIsNone(allow.scope_of("docs.vendor.com"))
+        self.assertIsNone(allow.scope_of("vendor.com"))
         self.assertIsNone(allow.scope_of("evil.example"))
 
 

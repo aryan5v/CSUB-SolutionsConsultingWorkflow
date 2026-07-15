@@ -13,7 +13,13 @@ Provider calls sit behind small interfaces (:class:`Resolver`,
 
 from __future__ import annotations
 
-from .domain import DomainAllowlist, DomainError, registrable_domain, registrable_domain_from_url
+from .domain import (
+    DomainAllowlist,
+    DomainError,
+    confirmed_host_from_url,
+    is_ip_literal_like,
+    validate_public_dns_host,
+)
 from .policy import ResearchPolicy
 from .provenance import (
     ProvenanceRecord,
@@ -30,9 +36,10 @@ from .service import (
     ResearchError,
     Resolver,
     SystemResolver,
+    VendorResearchProvider,
     VendorResearchService,
 )
-from .ssrf import ResearchBlocked, assert_public_ip, is_ip_literal_like, parse_destination
+from .ssrf import ResearchBlocked, assert_public_ip, parse_destination
 
 __all__ = [
     "DomainAllowlist",
@@ -50,11 +57,12 @@ __all__ = [
     "ResearchResult",
     "Resolver",
     "SystemResolver",
+    "VendorResearchProvider",
     "VendorResearchService",
     "assert_public_ip",
+    "confirmed_host_from_url",
     "is_ip_literal_like",
     "parse_destination",
     "provenance_to_citation",
-    "registrable_domain",
-    "registrable_domain_from_url",
+    "validate_public_dns_host",
 ]

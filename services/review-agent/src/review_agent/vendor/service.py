@@ -9,7 +9,7 @@ import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlsplit
 
 from ..contracts.vendor import (
@@ -33,6 +33,9 @@ from ..contracts.vendor import (
 )
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..research import VendorResearchProvider
 
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -59,6 +62,7 @@ class VendorBackend:
         clock: Callable[[], datetime.datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
         invite_ttl: datetime.timedelta = datetime.timedelta(days=7),
+        research_provider: VendorResearchProvider | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
@@ -68,6 +72,13 @@ class VendorBackend:
         self._clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
+        # Optional official-domain research provider. Left ``None`` in the
+        # dependency-free local slice: research is then simply not performed
+        # (recorded honestly) rather than fabricated. Injected with a
+        # VendorResearchService (guarded transport) where live research is
+        # approved. It only annotates provenance and surfaces gaps; it never
+        # sets coverage, policy, approval, or requirements.
+        self._research = research_provider
 
     # Reviewer-owned vendor/product/contact records ---------------------------
 
@@ -511,11 +522,17 @@ class VendorBackend:
                     coverage_ids=(*submission.coverage_ids, coverage.coverage_id),
                 )
                 auto_covered.append(criterion.requirement_id)
-        host = urlsplit(submission.trust_center_url).hostname or "unknown"
+        host = urlsplit(str(submission.trust_center_url)).hostname or "unknown"
+        # Official-domain research (issue #44): fetch the confirmed trust-center
+        # URL through the guarded provider when one is configured, capturing
+        # resolvable provenance for same-domain evidence and surfacing failures
+        # as gaps. This annotates only; coverage/questions above are unchanged
+        # and research never approves, sets policy, or invents requirements.
+        research_dict, research_note = self._run_official_domain_research(submission)
         research_summary = (
             f"Reviewed trust-center host {host}; inventoried {len(evidence)} evidence "
             f"artifact(s); auto-covered {len(auto_covered)} requirement(s) by deterministic "
-            f"extraction."
+            f"extraction. {research_note}"
         )
         finished = replace(
             submission,
@@ -533,10 +550,63 @@ class VendorBackend:
                 "auto_covered_requirement_ids": auto_covered,
                 "evidence_count": len(evidence),
                 "trust_center_host": host,
+                "research_performed": research_dict is not None,
+                "research": research_dict,
                 "simulated": True,
             },
         )
         return finished
+
+    def _run_official_domain_research(
+        self, submission: Submission
+    ) -> tuple[dict | None, str]:
+        """Run guarded official-domain research for the trust-center URL.
+
+        Returns ``(research_result_dict_or_None, human_summary_note)``. When no
+        provider is configured, research is not performed and this is stated
+        truthfully; nothing is fabricated. Research output is provenance/gaps
+        only and does not alter coverage, questions, policy, or approval.
+        """
+
+        if self._research is None or submission.trust_center_url is None:
+            return None, "Live official-domain research was not performed in this environment."
+        product = self._require("product", submission.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        result = self._research.research(
+            official_url=submission.trust_center_url,
+            targets=[submission.trust_center_url],
+            vendor=vendor.name,
+            product=product.name,
+        )
+        research_dict = result.to_dict()
+        note = (
+            f"Official-domain research captured {len(result.findings)} provenance-backed "
+            f"source(s), {len(result.gaps)} gap(s) for manual review, and quarantined "
+            f"{len(result.quarantined)} off-domain link(s)."
+        )
+        return research_dict, note
+
+    def intake_research(self, token: str) -> dict | None:
+        """Return the provenance/gaps payload from the latest intake analysis.
+
+        Provides reviewers/analysis a resolvable record of official-domain
+        research (final URL, redirect chain, hash, MIME, scope, gaps, quarantined
+        links). Returns ``None`` if analysis has not run or no provider was
+        configured.
+        """
+
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        events = [
+            event
+            for event in self._list("event", IntegrationEvent)
+            if event.resource_id == submission.submission_id
+            and event.event_type == "intake.analyzed"
+        ]
+        if not events:
+            return None
+        latest = max(events, key=lambda event: event.occurred_at)
+        return latest.detail.get("research")
 
     @staticmethod
     def _extract_matches(criterion, evidence: list[EvidenceArtifact]) -> list[str]:

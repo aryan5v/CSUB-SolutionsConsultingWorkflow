@@ -25,7 +25,7 @@ from __future__ import annotations
 import ipaddress
 from urllib.parse import urlsplit
 
-from .domain import DomainAllowlist
+from .domain import DomainAllowlist, is_ip_literal_like
 from .policy import ResearchPolicy
 
 
@@ -41,34 +41,6 @@ class ResearchBlocked(Exception):
         self.code = code
         self.detail = detail
         self.url = url
-
-
-def is_ip_literal_like(host: str) -> bool:
-    """Return ``True`` if ``host`` could be interpreted as a numeric IP address.
-
-    Catches standard dotted IPv4/IPv6 plus the alternate forms attackers use to
-    dodge naive string checks: decimal (``2130706433``), hex (``0x7f000001``),
-    octal (``017700000001``), and short dotted (``127.1``).
-    """
-
-    value = host.strip().strip("[]")
-    if not value:
-        return False
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        pass
-    if value.isdigit():
-        return True
-    labels = value.split(".")
-    for label in labels:
-        lowered = label.lower()
-        if lowered.startswith("0x"):
-            return True
-        if len(lowered) > 1 and lowered.startswith("0") and lowered.isdigit():
-            return True
-    return bool(labels) and all(label.isdigit() for label in labels)
 
 
 def assert_public_ip(ip_text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
