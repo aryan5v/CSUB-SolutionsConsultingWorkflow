@@ -443,7 +443,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
           <div><p className="eyebrow">Last 7 days</p><h2>Review activity</h2><p>Local demo volume, not a performance score.</p></div>
           <span className="ascii-note" aria-label="Trend is increasing">TREND +</span>
         </div>
-        <div className="chart-summary"><strong>23</strong><span>requests entered review</span><small>18 reached human review</small></div>
+        <div className="chart-summary"><strong>28</strong><span>requests entered review</span><small>18 reached human review</small></div>
         <div className="chart-frame" aria-label="Area chart of requests entering review and reaching human review over the last seven days">
           <AreaChart data={activityData} config={activityConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="day" />
@@ -497,7 +497,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
       </section>
       <section className="panel dither-insight-card">
         <div className="panel-heading"><div><p className="eyebrow">Last 7 days</p><h2>Decision outcomes</h2><p>Local demo volume by outcome, not a performance score.</p></div><span className="ascii-note">DEMO DATA</span></div>
-        <div className="dither-small-chart" aria-label="Bar chart of approved, changes requested, and escalated outcomes over the last seven days">
+        <div className="dither-small-chart" aria-label="Bar chart of approved and safely escalated outcomes over the last seven days">
           <BarChart data={outcomeChartData} config={outcomeChartConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="day" />
             <YAxis />
