@@ -129,6 +129,7 @@ class GuardedHttpTransport:
         if parsed.query:
             path = f"{path}?{parsed.query}"
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         conn: http.client.HTTPSConnection | None = None
         raw_sock: socket.socket | None = None
         tls_sock: ssl.SSLSocket | None = None

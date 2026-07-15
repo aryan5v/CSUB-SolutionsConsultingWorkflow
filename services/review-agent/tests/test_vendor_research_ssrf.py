@@ -7,14 +7,18 @@ deterministically.
 
 from __future__ import annotations
 
+import ssl
 import unittest
+from unittest import mock
 
 import _bootstrap  # noqa: F401
 
 from review_agent.research import (
     DomainAllowlist,
+    GuardedHttpTransport,
     RawResponse,
     ResearchBlocked,
+    ResearchError,
     ResearchPolicy,
     VendorResearchService,
     assert_public_ip,
@@ -50,6 +54,37 @@ class FakeTransport:
             connected_ip=self._connected_ip or ip,
             oversized=spec.get("oversized", False),
         )
+
+
+class GuardedHttpTransportTests(unittest.TestCase):
+    def test_tls_context_requires_tls_1_2_and_certificate_verification(self) -> None:
+        contexts: list[ssl.SSLContext] = []
+        create_default_context = ssl.create_default_context
+
+        def capture_context() -> ssl.SSLContext:
+            context = create_default_context()
+            contexts.append(context)
+            return context
+
+        with (
+            mock.patch("ssl.create_default_context", side_effect=capture_context),
+            mock.patch("socket.create_connection", side_effect=OSError("stop")) as connect,
+            self.assertRaises(ResearchError),
+        ):
+            GuardedHttpTransport().fetch(
+                ip=PUBLIC_IP,
+                host="trust.vendor.com",
+                url="https://trust.vendor.com/evidence",
+                timeout=1.5,
+                max_bytes=1024,
+            )
+
+        self.assertEqual(len(contexts), 1)
+        context = contexts[0]
+        self.assertGreaterEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        connect.assert_called_once_with((PUBLIC_IP, 443), timeout=1.5)
 
 
 def _service(
