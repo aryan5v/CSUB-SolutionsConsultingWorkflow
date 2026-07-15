@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { LockKeyhole, LogOut, ShieldCheck } from "lucide-react";
-import type { ReviewerAuthProvider, ReviewerAuthSnapshot } from "./auth";
-import { betterAuthReviewer } from "./authClient";
+import { reviewerAuth, type ReviewerAuthProvider, type ReviewerAuthSnapshot } from "./auth";
 
 export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolean {
   return mode === "live";
@@ -10,7 +9,7 @@ export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolea
 export default function AuthGate({
   children,
   mode,
-  provider = betterAuthReviewer,
+  provider = reviewerAuth,
 }: {
   children: ReactNode;
   mode: "live" | "fixture";

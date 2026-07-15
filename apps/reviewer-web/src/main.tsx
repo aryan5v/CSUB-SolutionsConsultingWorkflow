@@ -11,8 +11,8 @@ import { consumeInviteTokenFromFragment, reviewApi } from "./api";
  * One React application owns every public and authenticated surface. Route
  * selection is a small pathname switch so we avoid a router dependency:
  *   /          public VETTED landing
- *   /login     reviewer sign-in (Better Auth)
- *   /signup    reviewer account creation (Better Auth)
+ *   /login     reviewer sign-in (Cognito authorization code + PKCE)
+ *   /signup    reviewer account creation through the campus-hosted UI
  *   /intake    public, file-first vendor intake
  *   /app/*     authenticated reviewer workspace
  *

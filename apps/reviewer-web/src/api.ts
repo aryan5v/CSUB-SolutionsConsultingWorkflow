@@ -1,5 +1,4 @@
-import type { ReviewerAuthProvider } from "./auth";
-import { betterAuthReviewer } from "./authClient";
+import { reviewerAuth, type ReviewerAuthProvider } from "./auth";
 
 export type QueueStatus = "Ready for review" | "Analyzing" | "Needs evidence" | "Completed";
 export type RiskRoute = "Low risk" | "Medium risk" | "Safe escalation" | "Pending route";
@@ -382,7 +381,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
   const baseUrl = (options.baseUrl ?? import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
   const mode = options.mode ?? configuredMode();
   const runFetch = (input: RequestInfo | URL, init?: RequestInit) => (options.fetchImpl ?? globalThis.fetch)(input, init);
-  const authProvider = options.authProvider ?? betterAuthReviewer;
+  const authProvider = options.authProvider ?? reviewerAuth;
   const fixture = createFixtureAdapter();
 
   function fixtureInviteView(markOpen = false): VendorInviteView {

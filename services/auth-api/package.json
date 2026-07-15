@@ -4,12 +4,12 @@
   "private": true,
   "description": "Better Auth stateless session Lambda for the CSUB reviewer application.",
   "type": "module",
-  "main": "dist/index.mjs",
+  "main": "dist/index.js",
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "npm run clean && esbuild src/handler.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.mjs"
+    "build": "npm run clean && esbuild src/handler.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/index.js"
   },
   "engines": {
     "node": ">=22"

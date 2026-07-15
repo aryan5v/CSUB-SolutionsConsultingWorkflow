@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { authClient as defaultAuthClient, type AuthClient } from "./authClient";
+import { reviewerAuth } from "./auth";
 import "./landing.css";
 
 /*
- * Dedicated reviewer sign-in and account-creation surfaces. The auth server is
- * OIDC only, so both pages run through Better Auth generic OAuth against the
- * campus Cognito provider. Sign-in calls `signIn.oauth2`; account creation
- * calls the same route with `requestSignUp: true` so Cognito opens its sign-up
- * screen. There is no local email/password path. Failures are shown in plain
- * language; a completed sign-in returns the reviewer to the workspace at `/app`.
+ * Dedicated reviewer sign-in and account-creation surfaces. The branded page
+ * starts Cognito's authorization-code-with-PKCE flow directly. Better Auth is
+ * still deployed as the session service, but this direct campus path keeps
+ * reviewer access independent from CDN handling of auth POST requests.
  */
 
 const VETTED_LOGO = "/vetted-logo.png";
@@ -59,7 +58,7 @@ function WorkspaceNote({ mode }: { mode: Mode }) {
 
 export function AuthPage({
   mode,
-  client = defaultAuthClient,
+  client: _client = defaultAuthClient,
 }: {
   mode: Mode;
   client?: AuthClient;
@@ -72,13 +71,13 @@ export function AuthPage({
     if (busy) return;
     setBusy(true);
     setError("");
-    const result = await client.signInWithCognito({ requestSignUp: !isLogin });
-    if (!result.ok) {
+    try {
+      await reviewerAuth.signIn();
+    } catch (cause) {
       setBusy(false);
-      setError(result.error?.message ?? "That did not work. Try again.");
-      return;
+      setError(cause instanceof Error ? cause.message : "That did not work. Try again.");
     }
-    // On success the client redirects to Cognito; keep the button busy.
+    // On success Cognito owns the next page; keep the button busy.
   };
 
   const title = isLogin ? "Sign in to Vetted" : "Create your Vetted account";
