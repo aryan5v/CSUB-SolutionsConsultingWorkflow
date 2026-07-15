@@ -16,7 +16,7 @@ _CASE_ROUTE = re.compile(r"^/cases/([^/]+)(?:/(.*))?$")
 _RESOURCE_ROUTE = re.compile(r"^/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?$")
 _INVITE_ROUTE = re.compile(r"^/invites/([^/]+)/(revoke|resend)$")
 _VENDOR_TOKEN_ROUTE = re.compile(
-    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize))?$"
+    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|findings))?$"
 )
 _PROFILE_ROUTE = re.compile(r"^/review-profiles/([^/]+)(?:/(fixture-test|activate|rollback))?$")
 _CATALOG_CONFIRM_ROUTE = re.compile(r"^/catalog/matches/([^/]+)/confirm$")
@@ -254,6 +254,8 @@ def create_server(
                 result = application.vendor_run_intake_analysis(token)
             elif method == "GET" and action == "questions":
                 result = application.vendor_questions(token)
+            elif method == "GET" and action == "findings":
+                result = application.vendor_evidence_findings(token)
             elif method == "POST" and action == "finalize":
                 result = application.vendor_finalize(token)
             else:
@@ -290,6 +292,8 @@ def create_server(
                 self._json(HTTPStatus.OK, application.preview_servicenow(case_id))
             elif method == "POST" and suffix == "servicenow/commit":
                 self._json(HTTPStatus.OK, application.commit_servicenow(case_id, self._body()))
+            elif method == "GET" and suffix == "evidence-findings":
+                self._json(HTTPStatus.OK, application.case_evidence_findings(case_id))
             elif method == "GET" and suffix == "packet":
                 self._json(HTTPStatus.OK, application.get_packet(case_id))
             elif method == "GET" and suffix == "packet/pdf":

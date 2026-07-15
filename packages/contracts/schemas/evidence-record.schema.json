@@ -11,7 +11,7 @@
     "case_id": { "type": "string" },
     "evidence_type": {
       "type": "string",
-      "enum": ["hecvat", "soc2", "pci", "pentest", "vpat_acr", "email", "taap", "completed_review", "other"]
+      "enum": ["hecvat", "soc2", "pci", "pentest", "vpat_acr", "coi", "email", "taap", "completed_review", "other"]
     },
     "vendor": { "type": "string" },
     "product": { "type": "string" },
