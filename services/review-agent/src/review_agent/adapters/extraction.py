@@ -25,6 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # dropped so untrusted document text cannot smuggle arbitrary keys downstream.
 EXTRACTED_DATE_FIELDS = ("issued_date", "expires_date", "report_date", "assessment_date")
 EXTRACTED_TEXT_FIELDS = ("authority", "vendor", "product")
+EXTRACTION_COORDINATES_FIELD = "_source_coordinates"
 
 # A "cyber liability" mention negated on the same line ("NOT COVERED",
 # "EXCLUDED") is absence of coverage, not coverage.
@@ -36,11 +37,13 @@ class EvidenceExtractor(Protocol):
     def extract_fields(
         self, *, filename: str, content_type: str, evidence_type: str, text: str
     ) -> dict:
-        """Return ``{coverages: [str], issued_date, expires_date, ...}`` (all optional)."""
+        """Return extracted values and optional trusted ``_source_coordinates``."""
         ...
 
 
-def _clean_fields(candidate: dict[str, Any]) -> dict[str, Any]:
+def _clean_fields(
+    candidate: dict[str, Any], *, source_coordinates: dict[str, dict[str, int]] | None = None
+) -> dict[str, Any]:
     fields: dict[str, Any] = {"coverages": []}
     raw_coverages = candidate.get("coverages")
     if isinstance(raw_coverages, list):
@@ -51,6 +54,20 @@ def _clean_fields(candidate: dict[str, Any]) -> dict[str, Any]:
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
             fields[key] = value.strip()
+    if source_coordinates:
+        allowed = {"coverages", *EXTRACTED_DATE_FIELDS, *EXTRACTED_TEXT_FIELDS}
+        coordinates = {
+            key: {"line": coordinate["line"]}
+            for key, coordinate in source_coordinates.items()
+            if key in allowed
+            and isinstance(coordinate, dict)
+            and isinstance(coordinate.get("line"), int)
+            and not isinstance(coordinate["line"], bool)
+            and coordinate["line"] >= 1
+            and key in fields
+        }
+        if coordinates:
+            fields[EXTRACTION_COORDINATES_FIELD] = coordinates
     return fields
 
 
@@ -60,14 +77,16 @@ class DeterministicEvidenceExtractor:
     A pure function of the document text: no model, no network. Lines like
     ``expires_date: 2026-06-30`` populate the known fields; a ``coverage:``
     line (comma-separated) or a plain "cyber liability" mention populates
-    coverages.
+    coverages. Every extracted value carries its exact one-based source line.
     """
 
     def extract_fields(
         self, *, filename: str, content_type: str, evidence_type: str, text: str
     ) -> dict:
         candidate: dict[str, Any] = {"coverages": []}
-        for line in text.splitlines():
+        coordinates: dict[str, dict[str, int]] = {}
+        lines = text.splitlines()
+        for line_number, line in enumerate(lines, start=1):
             key, separator, value = line.partition(":")
             if not separator:
                 continue
@@ -77,17 +96,21 @@ class DeterministicEvidenceExtractor:
                 continue
             if key in EXTRACTED_DATE_FIELDS + EXTRACTED_TEXT_FIELDS:
                 candidate[key] = value
+                coordinates[key] = {"line": line_number}
             elif key in {"coverage", "coverages"}:
-                candidate["coverages"].extend(
-                    part.strip() for part in value.split(",") if part.strip()
-                )
-        for line in text.lower().splitlines():
+                values = [part.strip() for part in value.split(",") if part.strip()]
+                if values:
+                    candidate["coverages"].extend(values)
+                    coordinates.setdefault("coverages", {"line": line_number})
+        for line_number, line in enumerate(lines, start=1):
+            lowered = line.lower()
             # A negated mention ("Cyber liability: NOT COVERED / EXCLUDED") is
             # absence, not coverage; the validator filters negated entries too.
-            if "cyber liability" in line and not _NEGATED_MENTION.search(line):
+            if "cyber liability" in lowered and not _NEGATED_MENTION.search(lowered):
                 candidate["coverages"].append("cyber liability")
+                coordinates.setdefault("coverages", {"line": line_number})
                 break
-        return _clean_fields(candidate)
+        return _clean_fields(candidate, source_coordinates=coordinates)
 
 
 class ModelEvidenceExtractor:

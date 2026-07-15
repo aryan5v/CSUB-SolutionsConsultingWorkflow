@@ -80,8 +80,8 @@
     },
     "EvidenceValidationFinding": {
       "type": "object", "additionalProperties": false,
-      "description": "One failed or manual-review content check on an evidence artifact (issue 36). Only failures are persisted; they keep the requirement unresolved instead of counting the document as received. disposition 'manual_review' marks documents a human must decide on (unreadable dates, vendor/product mismatch, TBD rules such as PCI currency — issue 52).",
-      "required": ["workspace_id", "finding_id", "submission_id", "artifact_id", "filename", "evidence_type", "check", "reason", "source_citation"],
+      "description": "One failed or manual-review content check on an evidence artifact (issue 36). Findings keep requirements unresolved. Unavailable, unreadable, unclassified, mismatched, and policy-TBD evidence is retained and routed to manual review; metadata or filenames alone never provide automatic coverage.",
+      "required": ["workspace_id", "finding_id", "submission_id", "artifact_id", "filename", "evidence_type", "check", "reason", "disposition", "source_citation"],
       "properties": {
         "workspace_id": {"type": "string"}, "finding_id": {"type": "string"},
         "submission_id": {"type": "string"}, "artifact_id": {"type": "string"},
@@ -89,7 +89,18 @@
         "evidence_type": {"enum": ["coi", "pentest", "pci", "unknown"]},
         "check": {"type": "string"}, "reason": {"type": "string"},
         "disposition": {"enum": ["failed", "manual_review"]},
-        "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
+        "source_citation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_id", "filename", "sha256", "line"],
+          "properties": {
+            "source_id": {"type": "string", "minLength": 1},
+            "filename": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+            "line": {"type": "integer", "minimum": 1},
+            "rule_source_id": {"type": "string", "minLength": 1},
+            "rule_section": {"type": "string", "minLength": 1}
+          }
+        }
       }
     },
     "Submission": {

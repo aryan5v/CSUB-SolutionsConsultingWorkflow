@@ -423,6 +423,75 @@ class LambdaApiTests(unittest.TestCase):
         findings = json.loads(response["body"])["items"]
         self.assertEqual([item["check"] for item in findings], ["coi.expired"])
         self.assertEqual(findings[0]["disposition"], "failed")
+        self.assertEqual(findings[0]["source_citation"]["source_id"], findings[0]["artifact_id"])
+        self.assertEqual(findings[0]["source_citation"]["filename"], "coi-acme.txt")
+        self.assertEqual(findings[0]["source_citation"]["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(findings[0]["source_citation"]["line"], 3)
+        self.assertEqual(findings[0]["source_citation"]["rule_source_id"], "issue:36")
+
+    def test_large_metadata_only_evidence_fails_closed_across_restore(self) -> None:
+        issued = self._issue_invite()
+        headers = {"authorization": f"Bearer {issued['token']}"}
+        self.call("POST", "/intake", headers=headers, authenticated=False, body={})
+        upload, artifact = self.call(
+            "POST",
+            "/vendor/invites/current/evidence",
+            headers=headers,
+            authenticated=False,
+            body={
+                "filename": "vpat-large.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 700_001,
+                "sha256": "d" * 64,
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+        self.call(
+            "POST",
+            "/vendor/invites/current/trust-center",
+            headers=headers,
+            authenticated=False,
+            body={"trust_center_url": "https://trust.example.edu/security"},
+        )
+        analyze, _ = self.call(
+            "POST",
+            "/vendor/invites/current/analyze",
+            headers=headers,
+            authenticated=False,
+            body={},
+        )
+        self.assertEqual(analyze["statusCode"], 200)
+
+        cold = create_handler(self.store)
+        finding_response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/findings",
+                headers=headers,
+                authenticated=False,
+            ),
+            None,
+        )
+        findings = json.loads(finding_response["body"])["items"]
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings],
+            [("evidence.content_unavailable", "manual_review")],
+        )
+        self.assertEqual(findings[0]["artifact_id"], artifact["artifact_id"])
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        question_response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/questions",
+                headers=headers,
+                authenticated=False,
+            ),
+            None,
+        )
+        question_ids = {
+            item["requirement_id"] for item in json.loads(question_response["body"])["items"]
+        }
+        self.assertIn("A11Y.VPAT.001", question_ids)
 
     def test_review_fuzzy_confirmation_and_two_step_idempotent_writeback_survive_cold_start(self) -> None:
         _, queue = self.call("GET", "/review-queue")

@@ -9,8 +9,12 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
-from review_agent.adapters.extraction import DeterministicEvidenceExtractor
+from review_agent.adapters.extraction import (
+    EXTRACTION_COORDINATES_FIELD,
+    DeterministicEvidenceExtractor,
+)
 from review_agent.adapters.storage import InMemoryStorage
+from review_agent.contracts.schema import validate_definition
 from review_agent.evidence.validation import (
     classify_evidence_type,
     validate_evidence,
@@ -73,7 +77,7 @@ report_date: 2025-06-01
 authority: Example Security Labs
 """
 
-STALE_AOC = """PCI DSS ATTESTATION OF COMPLIANCE
+DATED_AOC = """PCI DSS ATTESTATION OF COMPLIANCE
 assessment_date: 2025-05-01
 """
 
@@ -85,6 +89,23 @@ class ValidationRuleTests(unittest.TestCase):
     def fields(self, text: str, evidence_type: str) -> dict:
         return self.extractor.extract_fields(
             filename="doc.txt", content_type="text/plain", evidence_type=evidence_type, text=text
+        )
+
+    def test_deterministic_extraction_records_exact_field_lines(self) -> None:
+        fields = self.fields(
+            "CERTIFICATE OF INSURANCE\n"
+            "vendor: Example Vendor\n"
+            "coverage: cyber liability\n"
+            "expires_date: 2026-06-30\n",
+            "coi",
+        )
+        self.assertEqual(
+            fields[EXTRACTION_COORDINATES_FIELD],
+            {
+                "vendor": {"line": 2},
+                "coverages": {"line": 3},
+                "expires_date": {"line": 4},
+            },
         )
 
     def test_classification_is_deterministic_filename_matching(self) -> None:
@@ -128,7 +149,7 @@ class ValidationRuleTests(unittest.TestCase):
     def test_pci_attestation_routes_to_manual_review_not_an_invented_threshold(self) -> None:
         # The authoritative PCI currency rule is TBD (issue #36 open question;
         # issue #52): no age threshold may pass or fail an AoC automatically.
-        for text in (STALE_AOC, "PCI DSS ATTESTATION OF COMPLIANCE\nassessment_date: 2026-03-01\n"):
+        for text in (DATED_AOC, "PCI DSS ATTESTATION OF COMPLIANCE\nassessment_date: 2026-03-01\n"):
             with self.subTest(text=text.splitlines()[1]):
                 failures = validate_evidence(
                     evidence_type="pci", fields=self.fields(text, "pci"), today=TODAY
@@ -229,14 +250,18 @@ class IntakeValidationTests(unittest.TestCase):
         self.backend.set_trust_center_url(self.token, "https://trust.vendor.example/security")
 
     def add_document(self, filename: str, text: str) -> None:
-        body = text.encode("utf-8")
+        self.add_document_bytes(filename, text.encode("utf-8"), content_type="text/plain")
+
+    def add_document_bytes(
+        self, filename: str, body: bytes, *, content_type: str = "application/octet-stream"
+    ) -> None:
         digest = hashlib.sha256(body).hexdigest()
         self.storage.put_object(key=f"evidence/{digest}", body=body)
         self.backend.add_evidence(
             self.token,
             {
                 "filename": filename,
-                "content_type": "text/plain",
+                "content_type": content_type,
                 "size_bytes": len(body),
                 "sha256": digest,
             },
@@ -245,17 +270,35 @@ class IntakeValidationTests(unittest.TestCase):
     def test_failing_documents_produce_findings_and_stay_unresolved(self) -> None:
         self.add_document("coi-acme.txt", EXPIRED_COI)
         self.add_document("penetration-test-report.txt", STALE_PENTEST)
-        self.add_document("pci-aoc.txt", STALE_AOC)
+        self.add_document("pci-aoc.txt", DATED_AOC)
         self.backend.run_intake_analysis(self.token)
 
         findings = self.backend.submission_findings(self.token)
         checks = sorted(item["check"] for item in findings)
         self.assertEqual(checks, ["coi.expired", "pci.currency_unverified", "pentest.stale"])
+        expected_lines = {
+            "coi.expired": 3,
+            "pentest.stale": 2,
+            "pci.currency_unverified": 2,
+        }
         for finding in findings:
-            self.assertEqual(finding["source_citation"]["source_id"], "issue:36")
+            self.assertEqual(
+                finding["source_citation"]["source_id"], finding["artifact_id"]
+            )
+            self.assertEqual(finding["source_citation"]["rule_source_id"], "issue:36")
+            self.assertEqual(
+                finding["source_citation"]["line"], expected_lines[finding["check"]]
+            )
+            self.assertEqual(len(finding["source_citation"]["sha256"]), 64)
             self.assertTrue(finding["reason"])
             self.assertTrue(finding["filename"])
             self.assertIn(finding["disposition"], {"failed", "manual_review"})
+            self.assertIs(
+                validate_definition(
+                    finding, "vendor-intake", "EvidenceValidationFinding"
+                ),
+                finding,
+            )
 
         # None of the failing documents count as received: every requirement
         # stays unresolved, feeding the reminder flow and vendor checklist.
@@ -364,9 +407,7 @@ class IntakeValidationTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "invalid_content")
 
-    def test_document_without_stored_bytes_keeps_current_behavior(self) -> None:
-        # Bytes never reached the evidence store (browser-only upload): there is
-        # nothing to validate, so filename matching still covers the requirement.
+    def test_metadata_only_coi_fails_closed_and_stays_unresolved(self) -> None:
         self.backend.add_evidence(
             self.token,
             {
@@ -377,11 +418,74 @@ class IntakeValidationTests(unittest.TestCase):
             },
         )
         self.backend.run_intake_analysis(self.token)
-        self.assertEqual(self.backend.submission_findings(self.token), [])
+
+        findings = self.backend.submission_findings(self.token)
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings],
+            [("evidence.content_unavailable", "manual_review")],
+        )
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
         unresolved = {
             item["requirement_id"] for item in self.backend.unresolved_questions(self.token)
         }
-        self.assertNotIn("INS.COI.001", unresolved)
+        self.assertIn("INS.COI.001", unresolved)
+
+    def test_large_metadata_only_document_cannot_cover_by_filename(self) -> None:
+        self.backend.add_evidence(
+            self.token,
+            {
+                "filename": "penetration-test-report.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 700_001,
+                "sha256": "e" * 64,
+            },
+        )
+        self.backend.run_intake_analysis(self.token)
+
+        findings = self.backend.submission_findings(self.token)
+        self.assertEqual([item["check"] for item in findings], ["evidence.content_unavailable"])
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        unresolved = {
+            item["requirement_id"] for item in self.backend.unresolved_questions(self.token)
+        }
+        self.assertIn("SEC.PENTEST.001", unresolved)
+
+    def test_unknown_artifact_is_retained_for_manual_review_and_cannot_cover(self) -> None:
+        self.add_document(
+            "penetration-summary.txt",
+            "UNCLASSIFIED SECURITY SUMMARY\nreview_status: available\n",
+        )
+        self.backend.run_intake_analysis(self.token)
+
+        findings = self.backend.submission_findings(self.token)
+        self.assertEqual(
+            [(item["check"], item["evidence_type"], item["disposition"]) for item in findings],
+            [("evidence.type_unknown", "unknown", "manual_review")],
+        )
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        submission = self.backend.resolve_invite(self.token)["submission"]
+        self.assertEqual(len(submission["evidence_artifact_ids"]), 1)
+        unresolved = {
+            item["requirement_id"] for item in self.backend.unresolved_questions(self.token)
+        }
+        self.assertIn("SEC.PENTEST.001", unresolved)
+
+    def test_unreadable_artifact_is_retained_for_manual_review_and_cannot_cover(self) -> None:
+        self.add_document_bytes("coi-acme.pdf", b"\xff\xfe\x00\x01", content_type="application/pdf")
+        self.backend.run_intake_analysis(self.token)
+
+        findings = self.backend.submission_findings(self.token)
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings],
+            [("evidence.content_unreadable", "manual_review")],
+        )
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        submission = self.backend.resolve_invite(self.token)["submission"]
+        self.assertEqual(len(submission["evidence_artifact_ids"]), 1)
+        unresolved = {
+            item["requirement_id"] for item in self.backend.unresolved_questions(self.token)
+        }
+        self.assertIn("INS.COI.001", unresolved)
 
     def test_intake_event_records_validation_findings(self) -> None:
         self.add_document("coi-acme.txt", EXPIRED_COI)

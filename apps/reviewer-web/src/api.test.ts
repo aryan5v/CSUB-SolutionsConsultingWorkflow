@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  INLINE_EVIDENCE_MAX_BYTES,
   ReviewApiError,
   consumeInviteTokenFromFragment,
   createReviewApiClient,
@@ -260,6 +261,27 @@ describe("vendor invitation security", () => {
     expect(body.content_base64).toBe(btoa("evidence"));
     expect(result.transfer).toBe("uploaded");
     expect(result.notice).toBeUndefined();
+  });
+
+  it("registers files above 700 KB as manual-review metadata without inline bytes", async () => {
+    const size = INLINE_EVIDENCE_MAX_BYTES + 1;
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      workspace_id: "csub-demo", artifact_id: "artifact-large", submission_id: "submission-1",
+      filename: "coi-large.pdf", content_type: "application/pdf", size_bytes: size, sha256: "hash", untrusted: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.uploadEvidence(
+      "vendor-invite-token",
+      new File([new Uint8Array(size)], "coi-large.pdf", { type: "application/pdf" }),
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.size_bytes).toBe(size);
+    expect(body).not.toHaveProperty("content_base64");
+    expect(result.transfer).toBe("simulated");
+    expect(result.notice).toContain("requires manual review");
+    expect(result.notice).toContain("cannot automatically cover");
   });
 
   it("never attaches the reviewer JWT to a presigned evidence upload", async () => {

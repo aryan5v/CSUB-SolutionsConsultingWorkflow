@@ -183,14 +183,14 @@ class EvidenceArtifact:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceValidationFinding:
-    """One failed or manual-review content check on a vendor evidence artifact (issue #36).
+    """One failed or manual-review check on a retained evidence artifact (issue #36).
 
-    Only failures are persisted; a validated document simply covers its
-    requirement. Findings keep the affected requirement unresolved so the
-    reminder flow and the vendor checklist treat the document as not received.
-    ``disposition`` distinguishes a violated confirmed rule (``failed``) from a
-    document a human must decide on (``manual_review``: unreadable dates,
-    vendor/product mismatch, or a TBD rule such as PCI currency — issue #52).
+    Findings keep the affected requirement unresolved so the reminder flow and
+    vendor checklist do not treat a filename as evidence. ``manual_review``
+    includes unavailable bytes, unreadable or unknown documents, identity
+    mismatches, unreadable dates, and a TBD rule such as PCI currency. Every
+    source citation identifies the artifact bytes and a one-based line; line 1
+    is the deterministic document coordinate for document-level findings.
     """
 
     finding_id: str

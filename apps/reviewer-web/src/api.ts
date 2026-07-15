@@ -25,6 +25,7 @@ export type SourceCoordinates = {
   sheet?: string | null;
   row?: number | null;
   page?: number | null;
+  line?: number | null;
   cell?: string | null;
   section?: string | null;
 };
@@ -605,7 +606,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       const registration = await this.registerEvidence(token, metadata);
       if (!registration.upload?.url) {
         if (inlined) return { ...registration, transfer: "uploaded" };
-        return { ...registration, transfer: "simulated", notice: "Evidence metadata was saved, but this API did not provide a presigned upload. The file bytes stayed in this browser." };
+        return { ...registration, transfer: "simulated", notice: "Evidence metadata was saved, but this API did not provide a presigned upload. The file bytes stayed in this browser, so the artifact requires manual review and cannot automatically cover a requirement." };
       }
       const uploadUrl = new URL(registration.upload.url, globalThis.location?.origin);
       if (uploadUrl.protocol !== "https:" && uploadUrl.hostname !== "127.0.0.1" && uploadUrl.hostname !== "localhost") {

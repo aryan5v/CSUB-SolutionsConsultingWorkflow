@@ -14,7 +14,11 @@ from difflib import SequenceMatcher
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from ..adapters.extraction import DeterministicEvidenceExtractor, EvidenceExtractor
+from ..adapters.extraction import (
+    EXTRACTION_COORDINATES_FIELD,
+    DeterministicEvidenceExtractor,
+    EvidenceExtractor,
+)
 from ..adapters.storage import StorageClient
 from ..contracts.vendor import (
     DEFAULT_WORKSPACE_ID,
@@ -81,10 +85,11 @@ class VendorBackend:
         self._clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
-        # Evidence bytes are optional: small files arrive inline with the
-        # metadata (content_base64) and are stored for content validation;
-        # files above the inline cap still register metadata only and skip
-        # content validation (documented limitation until presigned uploads).
+        # Evidence bytes are optional at registration: small files arrive inline
+        # with the metadata (content_base64), while larger browser uploads may
+        # temporarily register metadata only until presigned uploads are wired.
+        # Analysis always fails closed when bytes are unavailable: it records a
+        # manual-review finding and excludes the artifact from auto-coverage.
         self._evidence_storage = evidence_storage
         self._extractor = extractor or DeterministicEvidenceExtractor()
 
@@ -514,9 +519,10 @@ class VendorBackend:
             for item in self._list("coverage", CoverageItem)
             if item.submission_id == submission.submission_id
         }
-        # Content validation (issue #36): a COI/pentest/PCI document that fails
-        # its deterministic checks produces cited findings and must not count
-        # as received, so its artifact is excluded from auto-coverage below.
+        # Content validation (issue #36): a document with any failed or
+        # manual-review finding (including PCI currency TBD or unavailable
+        # bytes) must not count as received, so its artifact is excluded from
+        # auto-coverage below.
         findings = self._validate_evidence_contents(submission, evidence)
         failed_artifact_ids = {finding.artifact_id for finding in findings}
         auto_covered: list[str] = []
@@ -580,12 +586,12 @@ class VendorBackend:
     def _validate_evidence_contents(
         self, submission: Submission, evidence: list[EvidenceArtifact]
     ) -> list[EvidenceValidationFinding]:
-        """Extract and check COI/pentest/PCI fields; persist and return failures.
+        """Extract and check evidence fields; persist every failure or warning.
 
-        Extraction is a swappable adapter (deterministic locally, model on AWS)
-        but every pass/fail decision is made by ``evidence.validation``'s pure
-        rules. Artifacts whose bytes never reached the evidence store are
-        skipped: with nothing to read there is nothing to validate.
+        Extraction is a swappable adapter (deterministic locally, model on AWS),
+        but every disposition is deterministic. Missing bytes, unreadable bytes,
+        and unknown document types fail closed with a manual-review finding so a
+        filename can never auto-cover a requirement without inspectable content.
         """
         # Re-analysis replaces this submission's findings instead of appending
         # duplicates: prior findings are removed and finding IDs are derived
@@ -601,25 +607,55 @@ class VendorBackend:
         findings: list[EvidenceValidationFinding] = []
         for artifact in evidence:
             evidence_type = classify_evidence_type(artifact.filename, artifact.content_type)
-            text = self._evidence_text(artifact)
-            if text is None:
-                continue
-            fields = self._extractor.extract_fields(
-                filename=artifact.filename,
-                content_type=artifact.content_type,
-                evidence_type=evidence_type or "unknown",
-                text=text,
-            )
-            # A document naming another vendor/product is rejected from
-            # automatic coverage regardless of its type (issue #36).
-            failures = validate_identity(
-                fields=fields, vendor_name=vendor.name, product_name=product.name
-            )
-            if evidence_type is not None:
-                failures.extend(
-                    validate_evidence(evidence_type=evidence_type, fields=fields, today=today)
+            text, content_status = self._evidence_text(artifact)
+            fields: dict[str, Any] = {}
+            if content_status == "unavailable":
+                failures = [
+                    {
+                        "check": "evidence.content_unavailable",
+                        "reason": "Evidence bytes are unavailable, so the document cannot be "
+                        "validated or used for automatic coverage; a human must review it.",
+                        "disposition": "manual_review",
+                    }
+                ]
+            elif content_status == "unreadable":
+                failures = [
+                    {
+                        "check": "evidence.content_unreadable",
+                        "reason": "Evidence bytes could not be read as supported text, so the "
+                        "document cannot be validated or used for automatic coverage; a human "
+                        "must review it.",
+                        "disposition": "manual_review",
+                    }
+                ]
+            else:
+                assert text is not None
+                fields = self._extractor.extract_fields(
+                    filename=artifact.filename,
+                    content_type=artifact.content_type,
+                    evidence_type=evidence_type or "unknown",
+                    text=text,
                 )
+                # A document naming another vendor/product is rejected from
+                # automatic coverage regardless of its type (issue #36).
+                failures = validate_identity(
+                    fields=fields, vendor_name=vendor.name, product_name=product.name
+                )
+                if evidence_type is None:
+                    failures.append(
+                        {
+                            "check": "evidence.type_unknown",
+                            "reason": "Evidence type could not be determined safely; a human must "
+                            "classify the retained artifact before it can cover a requirement.",
+                            "disposition": "manual_review",
+                        }
+                    )
+                else:
+                    failures.extend(
+                        validate_evidence(evidence_type=evidence_type, fields=fields, today=today)
+                    )
             for failure in failures:
+                line = self._finding_line(fields, failure["check"])
                 finding = EvidenceValidationFinding(
                     finding_id=f"finding-{artifact.artifact_id}-{failure['check']}",
                     submission_id=submission.submission_id,
@@ -630,15 +666,40 @@ class VendorBackend:
                     reason=failure["reason"],
                     disposition=failure["disposition"],
                     source_citation={
-                        **RULE_SOURCE,
+                        "source_id": artifact.artifact_id,
                         "filename": artifact.filename,
                         "sha256": artifact.sha256,
+                        "line": line,
+                        "rule_source_id": RULE_SOURCE["source_id"],
+                        "rule_section": RULE_SOURCE["section"],
                     },
                     workspace_id=self.workspace_id,
                 )
                 self._put("finding", finding.finding_id, finding)
                 findings.append(finding)
         return findings
+
+    @staticmethod
+    def _finding_line(fields: dict[str, Any], check: str) -> int:
+        """Resolve the exact extracted-field line, or line 1 for document-level results."""
+        fields_by_check = {
+            "coi.expired": ("expires_date",),
+            "coi.expiry_unknown": ("expires_date",),
+            "pentest.stale": ("report_date", "issued_date"),
+            "pentest.date_unknown": ("report_date", "issued_date"),
+            "pci.currency_unverified": ("assessment_date", "issued_date"),
+            "evidence.vendor_mismatch": ("vendor",),
+            "evidence.product_mismatch": ("product",),
+        }
+        coordinates = fields.get(EXTRACTION_COORDINATES_FIELD)
+        if isinstance(coordinates, dict):
+            for field_name in fields_by_check.get(check, ()):
+                coordinate = coordinates.get(field_name)
+                if isinstance(coordinate, dict):
+                    line = coordinate.get("line")
+                    if isinstance(line, int) and not isinstance(line, bool) and line >= 1:
+                        return line
+        return 1
 
     def _store_evidence_bytes(self, content: object, digest: str, size: int) -> None:
         if self._evidence_storage is None:
@@ -659,13 +720,26 @@ class VendorBackend:
             )
         self._evidence_storage.put_object(key=f"evidence/{digest}", body=body)
 
-    def _evidence_text(self, artifact: EvidenceArtifact) -> str | None:
+    def _evidence_text(self, artifact: EvidenceArtifact) -> tuple[str | None, str | None]:
+        """Return supported text or a fail-closed ``unavailable``/``unreadable`` status."""
         if self._evidence_storage is None:
-            return None
+            return None, "unavailable"
         key = f"evidence/{artifact.sha256}"
-        if not self._evidence_storage.exists(key=key):
-            return None
-        return self._evidence_storage.get_object(key=key).decode("utf-8", errors="replace")
+        try:
+            if not self._evidence_storage.exists(key=key):
+                return None, "unavailable"
+            body = self._evidence_storage.get_object(key=key)
+        except Exception:  # Storage/provider failures are reviewable, never automatic coverage.
+            return None, "unavailable"
+        try:
+            text = body.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return None, "unreadable"
+        if not text.strip() or any(
+            ord(character) < 32 and character not in "\t\n\r" for character in text
+        ):
+            return None, "unreadable"
+        return text, None
 
     def submission_findings(self, token: str) -> list[dict[str, Any]]:
         """Vendor-visible content-validation findings for the invite's submission."""

@@ -299,7 +299,7 @@ paths:
       tags: [vendor-intake]
       summary: Content-validation findings for this submission's evidence (issue 36).
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
-      responses: {"200": {description: Failed deterministic checks (expired COI, stale pen test, stale PCI AoC) with cited reasons.}}
+      responses: {"200": {description: Failed or manual-review deterministic checks (expired COI, stale pen test, PCI currency TBD) with cited evidence coordinates.}}
   /cases/{id}/evidence-findings:
     get:
       tags: [cases]
