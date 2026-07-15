@@ -183,6 +183,8 @@ export type ReviewDecisionInput = {
   action: "approve" | "reject" | "request_info";
   decided_at: string;
   comments?: string;
+  vendor_visible_comment?: string;
+  vendor_next_actions?: string[];
   edits?: Array<{ section_key: string; body: string }>;
 };
 
@@ -258,6 +260,8 @@ export type VendorReviewStatus = {
   intake_analysis_complete: boolean;
   review_stage: VendorReviewStage;
   outcome: "approved" | "declined" | null;
+  vendor_visible_comment: string | null;
+  next_actions: string[];
   checklist: VendorChecklistItem[];
 };
 export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string };
@@ -673,6 +677,8 @@ export function createReviewApiClient(options: ClientOptions = {}) {
           intake_analysis_complete: true,
           review_stage: fixture.submission.status === "finalized" ? "under_review" as const : "collecting_evidence" as const,
           outcome: null,
+          vendor_visible_comment: null,
+          next_actions: [],
           checklist,
         });
       }

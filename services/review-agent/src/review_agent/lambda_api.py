@@ -485,7 +485,13 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "vendor": lambda value: Vendor(**value),
     "product": lambda value: VendorProduct(**value),
     "contact": lambda value: VendorContact(**value),
-    "case": lambda value: VendorCase(**{**value, "lifecycle": CaseLifecycle(value["lifecycle"])}),
+    "case": lambda value: VendorCase(
+        **{
+            **value,
+            "lifecycle": CaseLifecycle(value["lifecycle"]),
+            "vendor_next_actions": tuple(value.get("vendor_next_actions", [])),
+        }
+    ),
     "invite": lambda value: VendorInvite(**{**value, "status": InviteStatus(value["status"])}),
     "evidence": lambda value: EvidenceArtifact(**value),
     "coverage": lambda value: CoverageItem(

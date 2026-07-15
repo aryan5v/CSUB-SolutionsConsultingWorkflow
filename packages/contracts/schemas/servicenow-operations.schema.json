@@ -72,6 +72,11 @@
         "action": { "type": "string", "enum": ["approve", "reject", "request_info"] },
         "approved_fields": { "type": "object", "additionalProperties": true },
         "comments": { "type": "string" },
+        "vendor_visible_comment": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "vendor_next_actions": {
+          "type": "array", "maxItems": 10,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
         "edits": {
           "type": "array",
           "items": {

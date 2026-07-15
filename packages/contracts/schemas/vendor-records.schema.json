@@ -36,14 +36,19 @@
     },
     "VendorCase": {
       "type": "object", "additionalProperties": false,
-      "required": ["workspace_id", "case_id", "product_id", "use_case", "scope", "lifecycle"],
+      "required": ["workspace_id", "case_id", "product_id", "use_case", "scope", "lifecycle", "vendor_visible_comment", "vendor_next_actions"],
       "properties": {
         "workspace_id": {"type": "string", "minLength": 1},
         "case_id": {"type": "string", "minLength": 1},
         "product_id": {"type": "string", "minLength": 1},
         "use_case": {"type": "string", "minLength": 1},
         "scope": {"type": "string", "minLength": 1},
-        "lifecycle": {"enum": ["draft", "invited", "opened", "in_progress", "submitted", "analyzing", "needs_review", "approved", "changes_requested", "declined", "writeback_complete"]}
+        "lifecycle": {"enum": ["draft", "invited", "opened", "in_progress", "submitted", "analyzing", "needs_review", "approved", "changes_requested", "declined", "writeback_complete"]},
+        "vendor_visible_comment": {"type": ["string", "null"], "minLength": 1, "maxLength": 2000},
+        "vendor_next_actions": {
+          "type": "array", "maxItems": 10,
+          "items": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
       }
     },
     "CreateVendor": {

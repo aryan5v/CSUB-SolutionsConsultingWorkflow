@@ -120,6 +120,8 @@ describe("review API client", () => {
       reviewer_id: "alex.reviewer@example.edu",
       action: "approve",
       decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal reviewer note",
+      vendor_visible_comment: "Vendor-safe completion message",
       edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
     });
     await client.previewWriteback("TR-260714-014");
@@ -132,6 +134,8 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
       case_id: "TR-260714-014",
       action: "approve",
+      comments: "Internal reviewer note",
+      vendor_visible_comment: "Vendor-safe completion message",
       edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
     });
     expect(fetchMock.mock.calls[2][0]).toBe(
@@ -140,6 +144,34 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({
       second_confirmation: true,
       expected_version: 3,
+    });
+  });
+
+  it("sends vendor-visible next actions only as explicit decision fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      state: state(), queue_item: {}, audit_events: [], simulated: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await client.recordDecision("TR-260714-014", {
+      decision_version: 1,
+      reviewer_id: "alex.reviewer@example.edu",
+      action: "request_info",
+      decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal note",
+      vendor_visible_comment: "Please provide the requested update.",
+      vendor_next_actions: ["Upload the current product-specific ACR."],
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      case_id: "TR-260714-014",
+      decision_version: 1,
+      reviewer_id: "alex.reviewer@example.edu",
+      action: "request_info",
+      decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal note",
+      vendor_visible_comment: "Please provide the requested update.",
+      vendor_next_actions: ["Upload the current product-specific ACR."],
     });
   });
 
@@ -257,8 +289,10 @@ describe("vendor invitation security", () => {
       product: { product_id: "product-1", name: "Product" },
       submission_status: "finalized",
       intake_analysis_complete: true,
-      review_stage: "under_review",
+      review_stage: "changes_requested",
       outcome: null,
+      vendor_visible_comment: "Please update the accessibility evidence.",
+      next_actions: ["Upload the current product-specific ACR."],
       checklist: [
         { requirement_id: "A11Y.VPAT.001", question: "Provide a current VPAT.", expected_evidence: ["VPAT"], status: "received" },
         { requirement_id: "SEC.DATA.001", question: "Describe encryption controls.", expected_evidence: ["SOC 2"], status: "processing" },
@@ -290,7 +324,10 @@ describe("vendor invitation security", () => {
     expect(checklistStatusSettled("stale")).toBe(false);
     expect(checklistStatusLabel("invalid")).toBe("Needs attention");
     expect(checklistStatusLabel("stale")).toBe("Out of date");
-    expect(reviewStageLabel(resolved)).toBe("Under campus review");
+    expect(resolved.vendor_visible_comment).toBe("Please update the accessibility evidence.");
+    expect(resolved.next_actions).toEqual(["Upload the current product-specific ACR."]);
+    expect(reviewStageLabel(resolved)).toBe("Changes requested");
+    expect(reviewStageLabel({ review_stage: "under_review", outcome: null })).toBe("Under campus review");
     expect(reviewStageLabel({ review_stage: "decided", outcome: "approved" })).toBe("Review passed");
     expect(reviewStageLabel({ review_stage: "decided", outcome: "declined" })).toBe("Review did not pass");
     expect(reviewStageLabel({ review_stage: "changes_requested", outcome: null })).toBe("Changes requested");

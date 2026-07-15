@@ -362,6 +362,74 @@ class LambdaApiTests(unittest.TestCase):
         self.assertFalse(run_two["decision_valid"])
         self.assertFalse(run_two["write_preview_valid"])
 
+    def test_vendor_public_status_survives_lambda_cold_start(self) -> None:
+        issued = self._issue_invite()
+        token = issued["token"]
+        _, queue = self.call("GET", "/review-queue")
+        case = next(
+            item for item in queue["items"] if item["case_id"] == "TR-260714-014"
+        )
+        candidate = case["state"]["software_candidates"][0]
+        analyzed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/analyze",
+            body={"confirmed_match_id": candidate["record_id"]},
+        )
+        self.assertEqual(analyzed["statusCode"], 202)
+        reviewed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/review",
+            body={
+                "case_id": "TR-260714-014",
+                "decision_version": 1,
+                "action": "request_info",
+                "decided_at": "2026-07-15T08:00:00+00:00",
+                "comments": "Internal finding that must stay private.",
+                "vendor_visible_comment": "Please provide the requested updates.",
+                "vendor_next_actions": ["Upload the current product-specific ACR."],
+            },
+        )
+        self.assertEqual(reviewed["statusCode"], 200)
+
+        snapshot = self.store.load_snapshot("csub-demo")
+        vendor_case = next(
+            item
+            for item in snapshot["repository"]["records"]["case"]
+            if item["case_id"] == "TR-260714-014"
+        )
+        self.assertEqual(
+            vendor_case["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            vendor_case["vendor_next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/status",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        status = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(
+            status["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            status["next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+        self.assertNotIn("comments", status)
+        self.assertNotIn("Internal finding", json.dumps(status))
+
     def test_review_fuzzy_confirmation_and_two_step_idempotent_writeback_survive_cold_start(self) -> None:
         _, queue = self.call("GET", "/review-queue")
         case = next(item for item in queue["items"] if item["case_id"] == "TR-260714-014")

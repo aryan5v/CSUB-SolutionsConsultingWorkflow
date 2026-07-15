@@ -39,7 +39,7 @@ function messageFor(error: unknown): string {
   return "The intake service could not complete this request.";
 }
 
-function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
+export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
   return (
     <section className="vp-intake-result vp-case-summary" aria-labelledby="review-status-heading">
       <p className="vp-eyebrow">REVIEW STATUS</p>
@@ -50,6 +50,22 @@ function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
             ? "This review passed. The campus team will follow up with any remaining steps."
             : "This review did not pass. Contact your campus reviewer for details about the decision."}
         </p>
+      )}
+      {status.vendor_visible_comment && (
+        <div className="vp-intake-result" role="note">
+          <strong>Message from your campus reviewer</strong>
+          <p>{status.vendor_visible_comment}</p>
+        </div>
+      )}
+      {status.next_actions.length > 0 && (
+        <div>
+          <h3>What to do next</h3>
+          <ul className="vp-file-list">
+            {status.next_actions.map((action, index) => (
+              <li key={`${index}-${action}`}><span><strong>{action}</strong></span></li>
+            ))}
+          </ul>
+        </div>
       )}
       {status.checklist.length > 0 ? (
         <ul className="vp-file-list">

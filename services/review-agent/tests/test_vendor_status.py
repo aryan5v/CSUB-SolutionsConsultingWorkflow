@@ -11,7 +11,7 @@ import _bootstrap  # noqa: F401
 
 from review_agent.adapters.email import SimulatedEmailSender
 from review_agent.api import LocalReviewApi
-from review_agent.contracts.vendor import InviteStatus
+from review_agent.contracts.vendor import CaseLifecycle, InviteStatus
 from review_agent.profiles.service import ReviewProfileService
 from review_agent.vendor.repository import InMemoryVendorRepository
 from review_agent.vendor.service import VendorBackend, VendorBackendError
@@ -130,14 +130,60 @@ class VendorReviewStatusTests(unittest.TestCase):
                 "intake_analysis_complete",
                 "review_stage",
                 "outcome",
+                "vendor_visible_comment",
+                "next_actions",
                 "checklist",
             },
         )
+        self.assertIsNone(status["vendor_visible_comment"])
+        self.assertEqual(status["next_actions"], [])
+        self.assertNotIn("comments", status)
         self.assertNotIn("token_hash", status["invite"])
         self.assertIn(
             status["review_stage"],
             {"collecting_evidence", "under_review", "changes_requested", "decided"},
         )
+
+    def test_changes_requested_derives_safe_actions_and_stays_case_scoped(self) -> None:
+        self.analyze_with_soc2()
+        self.backend.finalize_submission(self.token)
+        self.backend.transition_case("CASE-1", CaseLifecycle.NEEDS_REVIEW)
+        self.backend.transition_case(
+            "CASE-1",
+            CaseLifecycle.CHANGES_REQUESTED,
+            vendor_visible_comment="Please update the requested accessibility evidence.",
+            vendor_next_actions=(),
+        )
+
+        status = self.backend.review_status(self.token)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertIsNone(status["outcome"])
+        self.assertEqual(
+            status["vendor_visible_comment"],
+            "Please update the requested accessibility evidence.",
+        )
+        self.assertEqual(
+            status["next_actions"],
+            ["Provide information or evidence for requirement A11Y.VPAT.001."],
+        )
+        serialized = json.dumps(status)
+        self.assertNotIn("comments", serialized)
+        self.assertNotIn("policy", serialized)
+        self.assertNotIn("risk", serialized)
+
+        other_product = self.backend.create_product(
+            self.product.vendor_id, "Other Product"
+        )
+        self.backend.register_case(
+            "CASE-2", other_product.product_id, "Other use", "other scope"
+        )
+        other_token = self.backend.issue_invite(
+            "CASE-2", self.contact.contact_id
+        )["token"]
+        other_status = self.backend.review_status(other_token)
+        self.assertIsNone(other_status["vendor_visible_comment"])
+        self.assertEqual(other_status["next_actions"], [])
+        self.assertNotIn("CASE-1", json.dumps(other_status))
 
     def test_revoked_and_expired_invites_cannot_read_status(self) -> None:
         invite_id = self.backend.list_invites("CASE-1")[0].invite_id
@@ -163,6 +209,12 @@ class VendorReviewStatusTests(unittest.TestCase):
         # The submitted audit marker is preserved; only the read is rejected.
         invite = self.backend.list_invites("CASE-1")[0]
         self.assertIs(invite.status, InviteStatus.SUBMITTED)
+
+
+class _ThrowingEmailSender:
+    def send(self, *, to: str, subject: str, body: str) -> dict:
+        del to, subject, body
+        raise RuntimeError("email transport unavailable")
 
 
 class VendorOutcomeEmailTests(unittest.TestCase):
@@ -198,7 +250,14 @@ class VendorOutcomeEmailTests(unittest.TestCase):
     def test_approval_emails_invited_contact_and_updates_vendor_status(self) -> None:
         token = self.invite_for("TR-260714-018", "approve@vendor.example")
         self.api.analyze_case("TR-260714-018")
-        self.api.review_case("TR-260714-018", self.approve_payload("TR-260714-018"))
+        self.api.review_case(
+            "TR-260714-018",
+            {
+                **self.approve_payload("TR-260714-018"),
+                "comments": "Internal approval note; never vendor visible.",
+                "vendor_visible_comment": "Thank you. The review is complete.",
+            },
+        )
         self.assertEqual(len(self.email.sent), 1)
         message = self.email.sent[0]
         self.assertEqual(message["to"], "approve@vendor.example")
@@ -217,12 +276,32 @@ class VendorOutcomeEmailTests(unittest.TestCase):
         status = self.api.vendor_review_status(token)
         self.assertEqual(status["review_stage"], "decided")
         self.assertEqual(status["outcome"], "approved")
+        self.assertEqual(
+            status["vendor_visible_comment"], "Thank you. The review is complete."
+        )
+        self.assertEqual(status["next_actions"], [])
+        self.assertNotIn("Internal approval note", json.dumps(status))
 
     def test_reject_and_request_info_send_distinct_outcomes(self) -> None:
-        self.invite_for("TR-260714-011", "reject@vendor.example")
+        reject_token = self.invite_for("TR-260714-011", "reject@vendor.example")
         self.api.analyze_case("TR-260714-011")
-        self.api.review_case("TR-260714-011", self.approve_payload("TR-260714-011", "reject"))
+        self.api.review_case(
+            "TR-260714-011",
+            {
+                **self.approve_payload("TR-260714-011", "reject"),
+                "comments": "Internal rejection rationale.",
+                "vendor_visible_comment": "The campus review is complete.",
+            },
+        )
         self.assertIn("did not pass", self.email.sent[-1]["subject"])
+        rejected_status = self.api.vendor_review_status(reject_token)
+        self.assertEqual(rejected_status["outcome"], "declined")
+        self.assertEqual(
+            rejected_status["vendor_visible_comment"],
+            "The campus review is complete.",
+        )
+        self.assertEqual(rejected_status["next_actions"], [])
+        self.assertNotIn("Internal rejection rationale", json.dumps(rejected_status))
 
         email_two = SimulatedEmailSender()
         api_two = LocalReviewApi(email_sender=email_two)
@@ -240,12 +319,33 @@ class VendorOutcomeEmailTests(unittest.TestCase):
         )
         api_two.analyze_case("TR-260714-018")
         api_two.review_case(
-            "TR-260714-018", self.approve_payload("TR-260714-018", "request_info")
+            "TR-260714-018",
+            {
+                **self.approve_payload("TR-260714-018", "request_info"),
+                "comments": "Internal finding: do not disclose.",
+                "vendor_visible_comment": "Please provide the two requested updates.",
+                "vendor_next_actions": [
+                    "Upload the current product-specific ACR.",
+                    "Confirm the encryption documentation version.",
+                ],
+            },
         )
         self.assertIn("needs changes", email_two.sent[-1]["subject"])
         status = api_two.vendor_review_status(issued["token"])
         self.assertEqual(status["review_stage"], "changes_requested")
         self.assertIsNone(status["outcome"])
+        self.assertEqual(
+            status["vendor_visible_comment"],
+            "Please provide the two requested updates.",
+        )
+        self.assertEqual(
+            status["next_actions"],
+            [
+                "Upload the current product-specific ACR.",
+                "Confirm the encryption documentation version.",
+            ],
+        )
+        self.assertNotIn("Internal finding", json.dumps(status))
 
     def test_outcome_email_targets_submitted_contact_not_newest_invite(self) -> None:
         # Regression: the notification goes to the contact whose invitation
@@ -273,6 +373,38 @@ class VendorOutcomeEmailTests(unittest.TestCase):
         email_events = [item for item in events if item["event_type"] == "email.notification"]
         self.assertEqual(len(email_events), 1)
         self.assertEqual(email_events[0]["detail"]["dedupe_key"], "TR-260714-018:approved")
+
+    def test_email_exception_records_hashed_intended_recipient(self) -> None:
+        api = LocalReviewApi(email_sender=_ThrowingEmailSender())
+        state = api._cases["TR-260714-018"].state
+        vendor = next(
+            item
+            for item in api.list_vendors()["items"]
+            if item["name"].casefold() == state.case_input.vendor_name.casefold()
+        )
+        contact = api.create_vendor_contact(
+            {
+                "vendor_id": vendor["vendor_id"],
+                "name": "Failure Contact",
+                "email": "failure@vendor.example",
+            }
+        )
+        api.issue_vendor_invite(
+            "TR-260714-018", {"contact_id": contact["contact_id"]}
+        )
+        api.analyze_case("TR-260714-018")
+        api.review_case("TR-260714-018", self.approve_payload("TR-260714-018"))
+
+        events = api.integration_events()["items"]
+        email_event = next(
+            item for item in events if item["event_type"] == "email.notification"
+        )
+        self.assertEqual(email_event["detail"]["delivery"], "failed")
+        self.assertEqual(
+            email_event["detail"]["recipient_sha256"],
+            hashlib.sha256(b"failure@vendor.example").hexdigest(),
+        )
+        self.assertNotIn("failure@vendor.example", json.dumps(events))
 
     def test_decision_without_invite_sends_nothing_and_never_blocks(self) -> None:
         self.api.analyze_case("TR-260714-018")
