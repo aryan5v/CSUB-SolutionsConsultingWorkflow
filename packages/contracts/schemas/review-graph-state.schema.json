@@ -10,7 +10,7 @@
     "case_id": { "type": "string" },
     "status": {
       "type": "string",
-      "enum": ["intake", "lookup", "awaiting_match_confirmation", "policy", "analysis", "packet", "awaiting_review", "writeback", "closed", "escalated"]
+      "enum": ["intake", "lookup", "awaiting_match_confirmation", "policy", "awaiting_vendor_evidence", "analysis", "packet", "awaiting_review", "writeback", "closed", "escalated"]
     },
     "case_input": { "$ref": "https://csub.example/contracts/case-intake.schema.json" },
     "document_ids": { "type": "array", "items": { "type": "string" } },
@@ -34,6 +34,10 @@
       }
     },
     "evidence_gaps": { "type": "array", "items": { "type": "string" } },
+    "vendor_invite": { "type": ["object", "null"], "additionalProperties": true },
+    "vendor_research": { "type": ["object", "null"], "additionalProperties": true },
+    "evidence_records": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "gap_report": { "type": ["object", "null"], "additionalProperties": true },
     "citations": { "type": "array", "items": { "$ref": "https://csub.example/contracts/citation.schema.json" } },
     "conflicts": { "type": "array", "items": { "$ref": "https://csub.example/contracts/conflict.schema.json" } },
     "draft_packet": {

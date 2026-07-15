@@ -23,6 +23,7 @@ class WorkflowStatus(str, Enum):
     LOOKUP = "lookup"
     AWAITING_MATCH_CONFIRMATION = "awaiting_match_confirmation"
     POLICY = "policy"
+    AWAITING_VENDOR_EVIDENCE = "awaiting_vendor_evidence"
     ANALYSIS = "analysis"
     PACKET = "packet"
     AWAITING_REVIEW = "awaiting_review"
@@ -45,6 +46,11 @@ class ReviewGraphState:
         default_factory=lambda: {"security": None, "accessibility": None}
     )
     evidence_gaps: list[str] = field(default_factory=list)
+    # Vendor evidence portal (populated when a case requires vendor documents).
+    vendor_invite: dict | None = None
+    vendor_research: dict | None = None
+    evidence_records: list[dict] = field(default_factory=list)
+    gap_report: dict | None = None
     citations: list[Citation] = field(default_factory=list)
     conflicts: list[Conflict] = field(default_factory=list)
     draft_packet: Packet | None = None
@@ -68,6 +74,10 @@ class ReviewGraphState:
             "policy_result": self.policy_result.to_dict() if self.policy_result else None,
             "specialist_results": self.specialist_results,
             "evidence_gaps": list(self.evidence_gaps),
+            "vendor_invite": self.vendor_invite,
+            "vendor_research": self.vendor_research,
+            "evidence_records": list(self.evidence_records),
+            "gap_report": self.gap_report,
             "citations": [c.to_dict() for c in self.citations],
             "conflicts": [c.to_dict() for c in self.conflicts],
             "draft_packet": self.draft_packet.to_dict() if self.draft_packet else None,

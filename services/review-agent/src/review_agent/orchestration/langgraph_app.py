@@ -41,6 +41,21 @@ _INTERRUPT = "interrupt"
 _CONTINUE = "continue"
 
 
+def _route_after_policy(workflow: ReviewWorkflow):
+    """Route out of the policy node: escalate, request vendor evidence, or
+    proceed to analysis. Mirrors ``ReviewWorkflow._analyze_and_compose``."""
+
+    def route(gs: GraphState) -> str:
+        state = gs["state"]
+        if state.status is WorkflowStatus.ESCALATED:
+            return "escalate"
+        if workflow.needs_vendor_evidence(state):
+            return "await_vendor"
+        return "analyze"
+
+    return route
+
+
 def build_review_graph(workflow: ReviewWorkflow, *, checkpointer: Any | None = None) -> Any:
     """Compile a LangGraph graph whose nodes are ``workflow``'s methods.
 
@@ -58,6 +73,8 @@ def build_review_graph(workflow: ReviewWorkflow, *, checkpointer: Any | None = N
     builder.add_node("validate_intake", _node(workflow.validate_intake))
     builder.add_node("lookup_software", _node(workflow.lookup_software))
     builder.add_node("evaluate_policy", _node(workflow.evaluate_policy))
+    builder.add_node("request_vendor_evidence", _node(workflow.request_vendor_evidence))
+    builder.add_node("evaluate_evidence_gaps", _node(workflow.evaluate_evidence_gaps))
     builder.add_node("run_specialists", _node(workflow.run_specialists))
     builder.add_node("check_and_repair", _node(workflow.check_and_repair))
     builder.add_node("compose", _node(workflow.compose))
@@ -73,14 +90,19 @@ def build_review_graph(workflow: ReviewWorkflow, *, checkpointer: Any | None = N
         else _CONTINUE,
         {_INTERRUPT: END, _CONTINUE: "evaluate_policy"},
     )
-    # Human interrupt: deterministic policy escalated the case.
+    # Policy escalates (interrupt), needs vendor evidence (interrupt), or proceeds.
     builder.add_conditional_edges(
         "evaluate_policy",
-        lambda gs: _INTERRUPT
-        if gs["state"].status is WorkflowStatus.ESCALATED
-        else _CONTINUE,
-        {_INTERRUPT: END, _CONTINUE: "run_specialists"},
+        _route_after_policy(workflow),
+        {
+            "escalate": END,
+            "await_vendor": "request_vendor_evidence",
+            "analyze": "evaluate_evidence_gaps",
+        },
     )
+    # Vendor-evidence request is a human/vendor interrupt: pause until upload.
+    builder.add_edge("request_vendor_evidence", END)
+    builder.add_edge("evaluate_evidence_gaps", "run_specialists")
     builder.add_edge("run_specialists", "check_and_repair")
     builder.add_edge("check_and_repair", "compose")
     # compose sets AWAITING_REVIEW and checkpoints; that is the final interrupt.

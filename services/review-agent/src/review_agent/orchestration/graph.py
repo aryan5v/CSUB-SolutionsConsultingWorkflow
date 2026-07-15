@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from ..adapters.model import ModelClient
 from ..adapters.servicenow import ServiceNowConnector
 from ..audit.log import AuditLog
 from ..contracts.audit import ActorType
+from ..contracts.evidence import EvidenceRecord, EvidenceType
 from ..contracts.graph_state import ReviewGraphState, WorkflowStatus
 from ..contracts.policy import PolicyRuleSet
 from ..contracts.servicenow import HumanDecision, ReviewAction
@@ -28,6 +30,11 @@ from ..specialists.accessibility import run_accessibility
 from ..specialists.citations import check_citations
 from ..specialists.security import run_security
 from .state import Checkpointer
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..vendor.portal import VendorEvidencePortal
+
+DEFAULT_COMMITTEE_RECIPIENTS = ("solutions-consulting@csub.edu",)
 
 
 def _utc_now() -> str:
@@ -44,6 +51,8 @@ class ReviewWorkflow:
         registry: ConflictRegistry,
         audit: AuditLog,
         checkpointer: Checkpointer | None = None,
+        portal: VendorEvidencePortal | None = None,
+        committee_recipients: tuple[str, ...] = DEFAULT_COMMITTEE_RECIPIENTS,
         clock: Callable[[], str] = _utc_now,
     ) -> None:
         self._model = model
@@ -52,6 +61,8 @@ class ReviewWorkflow:
         self._registry = registry
         self._audit = audit
         self._checkpointer = checkpointer
+        self._portal = portal
+        self._committee_recipients = list(committee_recipients)
         self._clock = clock
         self._seq = 0
 
@@ -108,6 +119,98 @@ class ReviewWorkflow:
             policy_version=result.policy_version,
         )
         return state
+
+    # -- vendor evidence (official-vendor research + evidence specialist) ------
+
+    def needs_vendor_evidence(self, state: ReviewGraphState) -> bool:
+        """True when policy requires vendor documents we have not yet gathered.
+
+        Only fires when a portal is wired; otherwise the flow is unchanged.
+        """
+        return (
+            self._portal is not None
+            and state.policy_result is not None
+            and bool(state.policy_result.required_evidence)
+            and state.vendor_invite is None
+            and not state.evidence_records
+        )
+
+    def request_vendor_evidence(self, state: ReviewGraphState) -> ReviewGraphState:
+        """Send the case-scoped link (notify vendor + committee), deploy research,
+        and pause until the vendor drops their evidence."""
+        assert self._portal is not None
+        case = state.case_input
+        domain = case.official_domain
+        vendor_recipient = f"security@{domain}" if domain else "vendor-contact@example.invalid"
+        result = self._portal.send_invite(
+            case_id=state.case_id,
+            vendor=case.vendor_name,
+            product=case.product_name,
+            vendor_recipient=vendor_recipient,
+            committee_recipients=self._committee_recipients,
+            official_domain=domain,
+            nonce=state.case_id,
+        )
+        state.vendor_invite = result["invite"].to_dict()
+        state.vendor_research = result["research"].to_dict()
+        state.status = WorkflowStatus.AWAITING_VENDOR_EVIDENCE
+        self._emit(
+            state,
+            "vendor.evidence_requested",
+            ActorType.SYSTEM,
+            required=list(state.policy_result.required_evidence) if state.policy_result else [],
+        )
+        self._checkpoint(state)
+        return state
+
+    def evaluate_evidence_gaps(self, state: ReviewGraphState) -> ReviewGraphState:
+        """Deterministic gap: what the vendor provided vs. what policy requires."""
+        if self._portal is None or not state.evidence_records or state.policy_result is None:
+            return state
+        provided = [self._to_evidence_record(state.case_id, r) for r in state.evidence_records]
+        report = self._portal.evaluate_gaps(
+            case_id=state.case_id, policy_result=state.policy_result, evidence=provided
+        )
+        state.gap_report = report.to_dict()
+        state.evidence_gaps = list(report.missing)
+        return state
+
+    def submit_vendor_evidence(
+        self, state: ReviewGraphState, evidence: list[EvidenceRecord]
+    ) -> ReviewGraphState:
+        """Resume after the vendor drops evidence: record it, then continue
+        into gap analysis, specialists, and packet composition."""
+        state.evidence_records = [self._evidence_to_dict(r) for r in evidence]
+        state.status = WorkflowStatus.ANALYSIS
+        self._emit(
+            state,
+            "vendor.evidence_submitted",
+            ActorType.SYSTEM,
+            count=len(evidence),
+        )
+        return self._finish_analysis(state)
+
+    @staticmethod
+    def _evidence_to_dict(record: EvidenceRecord) -> dict:
+        return {
+            "evidence_id": record.evidence_id,
+            "case_id": record.case_id,
+            "evidence_type": record.evidence_type.value,
+            "source_sha256": record.source_sha256,
+            "vendor": record.vendor,
+            "product": record.product,
+        }
+
+    @staticmethod
+    def _to_evidence_record(case_id: str, data: dict) -> EvidenceRecord:
+        return EvidenceRecord(
+            evidence_id=data["evidence_id"],
+            case_id=data.get("case_id", case_id),
+            evidence_type=EvidenceType(data["evidence_type"]),
+            source_sha256=data.get("source_sha256", ""),
+            vendor=data.get("vendor"),
+            product=data.get("product"),
+        )
 
     def run_specialists(self, state: ReviewGraphState) -> ReviewGraphState:
         # Security and accessibility run in parallel conceptually; deterministic
@@ -182,6 +285,13 @@ class ReviewWorkflow:
         if state.status is WorkflowStatus.ESCALATED:
             self._checkpoint(state)
             return state
+        # Vendor-evidence interrupt: gather documents before final analysis.
+        if self.needs_vendor_evidence(state):
+            return self.request_vendor_evidence(state)
+        return self._finish_analysis(state)
+
+    def _finish_analysis(self, state: ReviewGraphState) -> ReviewGraphState:
+        self.evaluate_evidence_gaps(state)
         self.run_specialists(state)
         self.check_and_repair(state)
         return self.compose(state)
