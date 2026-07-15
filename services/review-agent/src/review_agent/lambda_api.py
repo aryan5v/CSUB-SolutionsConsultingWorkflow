@@ -72,6 +72,7 @@ from .contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
 from .ingestion.software_workbook import XlsxWorkbookReader, normalize_workbook
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
@@ -92,6 +93,7 @@ _PUBLIC_ROUTES = {
     ("GET", "/vendor/invites/current"),
     ("POST", "/vendor/invites/current/open"),
     ("GET", "/vendor/invites/current/questions"),
+    ("GET", "/vendor/invites/current/evidence"),
     ("POST", "/vendor/invites/current/evidence"),
     ("POST", "/vendor/invites/current/trust-center"),
     ("POST", "/vendor/invites/current/answers"),
@@ -101,6 +103,7 @@ _PUBLIC_ROUTES = {
     ("GET", "/intake"),
     ("POST", "/intake"),
     ("POST", "/intake/evidence"),
+    ("GET", "/intake/evidence"),
     ("POST", "/intake/trust-center"),
     ("POST", "/intake/answers"),
     ("POST", "/intake/coverage"),
@@ -609,13 +612,17 @@ def snapshot_api(api: LocalReviewApi, *, workspace_id: str) -> dict[str, Any]:
 
 
 def restore_api(
-    snapshot: dict[str, Any], catalog_values: list[dict[str, Any]], *, workspace_id: str
+    snapshot: dict[str, Any],
+    catalog_values: list[dict[str, Any]],
+    *,
+    workspace_id: str,
+    evidence_uploads: EvidenceUploadIssuer | None = None,
 ) -> LocalReviewApi:
     if snapshot.get("schema_version") != _SCHEMA_VERSION:
         raise RuntimeError("unsupported workspace snapshot version")
     if snapshot.get("workspace_id") != workspace_id:
         raise RuntimeError("workspace snapshot isolation check failed")
-    api = LocalReviewApi(seed_demo=False)
+    api = LocalReviewApi(seed_demo=False, evidence_uploads=evidence_uploads)
     repository = InMemoryVendorRepository()
     repository_data = snapshot.get("repository")
     if not isinstance(repository_data, dict):
@@ -684,6 +691,7 @@ def create_handler(
     *,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     allowed_origins: Iterable[str] = (),
+    evidence_uploads: EvidenceUploadIssuer | None = None,
 ) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
     origins = frozenset(origin for origin in allowed_origins if origin)
 
@@ -712,7 +720,12 @@ def create_handler(
             snapshot = store.load_snapshot(workspace_id)
             if snapshot is None:
                 raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
-            api = restore_api(snapshot, store.load_catalog(workspace_id), workspace_id=workspace_id)
+            api = restore_api(
+                snapshot,
+                store.load_catalog(workspace_id),
+                workspace_id=workspace_id,
+                evidence_uploads=evidence_uploads,
+            )
             result, status, mutated = _dispatch(
                 api,
                 method,
@@ -882,6 +895,8 @@ def _dispatch_case(
         return api.get_state(case_id), 200, False
     if method == "POST" and suffix == "documents":
         return api.add_document(case_id, body), 201, True
+    if method == "GET" and suffix == "documents":
+        return api.case_evidence_status(case_id), 200, False
     if method == "POST" and suffix == "analyze":
         confirmed = body.get("confirmed_match_id")
         if confirmed is not None and not isinstance(confirmed, str):
@@ -940,6 +955,7 @@ def _dispatch_intake(
         return api.resolve_vendor_invite(token, mark_open=True), 200, True
     operations: dict[tuple[str, str], Callable[[], dict[str, Any]]] = {
         ("POST", "/intake/evidence"): lambda: api.vendor_add_evidence(token, body),
+        ("GET", "/intake/evidence"): lambda: api.vendor_evidence_status(token),
         ("POST", "/intake/trust-center"): lambda: api.vendor_set_trust_center(token, body),
         ("POST", "/intake/answers"): lambda: api.vendor_save_answers(token, body),
         ("POST", "/intake/coverage"): lambda: api.vendor_add_coverage(token, body),
@@ -1612,17 +1628,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _store: WorkspaceStore | None = None
+_evidence_uploads: EvidenceUploadIssuer | None = None
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    global _store
+    global _store, _evidence_uploads
     if _store is None:
         _store = DynamoWorkspaceStore.from_environment()
+    if _evidence_uploads is None:
+        _evidence_uploads = build_evidence_upload_issuer()
     origins = [item.strip() for item in os.environ.get("ALLOWED_ORIGINS", "").split(",") if item.strip()]
     application = create_handler(
         _store,
         workspace_id=os.environ.get("WORKSPACE_ID", DEFAULT_WORKSPACE_ID),
         allowed_origins=origins,
+        evidence_uploads=_evidence_uploads,
     )
     return application(event, context)
 

@@ -247,6 +247,21 @@ describe("vendor invitation security", () => {
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
   });
 
+  it("polls current vendor evidence with the invite bearer and reviewer evidence with Cognito", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ items: [] })));
+    const reviewer = authProvider("reviewer-jwt");
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
+
+    await client.listEvidence("vendor-invite-token");
+    await client.listCaseEvidence("case/one");
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/vendor/invites/current/evidence");
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer vendor-invite-token");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/cases/case%2Fone/documents");
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("Authorization")).toBe("Bearer reviewer-jwt");
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("claim_token");
+  });
+
   it("never attaches the reviewer JWT to a presigned evidence upload", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({

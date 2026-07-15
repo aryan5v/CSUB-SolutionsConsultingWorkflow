@@ -239,16 +239,24 @@ export type VendorInviteView = {
   submission: VendorSubmission;
   questions: VendorQuestion[];
 };
+export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
 export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string };
 export type EvidenceArtifact = EvidenceMetadata & {
-  workspace_id: string;
+  workspace_id?: string;
   artifact_id: string;
-  submission_id: string;
+  submission_id?: string;
   untrusted: true;
+  processing_state?: EvidenceProcessingState;
+  source_version_id?: string | null;
+  detected_content_type?: string | null;
+  source_location?: string | null;
+  warnings?: string[];
+  failure_code?: string | null;
+  model_use_allowed?: false;
 };
 export type PresignedUpload = { url: string; method?: "PUT" | "POST"; headers?: Record<string, string>; fields?: Record<string, string> };
 export type EvidenceRegistration = EvidenceArtifact & { upload?: PresignedUpload | null };
-export type EvidenceUploadResult = EvidenceArtifact & { transfer: "uploaded" | "simulated"; notice?: string };
+export type EvidenceUploadResult = EvidenceRegistration & { transfer: "uploaded" | "simulated"; notice?: string };
 export type ReviewProfileVersion = {
   workspace_id: string;
   profile_version_id: string;
@@ -574,7 +582,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     },
     registerEvidence(token: string, metadata: EvidenceMetadata): Promise<EvidenceRegistration> {
       if (mode === "fixture") {
-        const artifact: EvidenceArtifact = { ...metadata, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true };
+        const artifact: EvidenceArtifact = { ...metadata, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true, processing_state: "queued", warnings: [], model_use_allowed: false };
         fixture.artifacts.push(artifact);
         fixture.submission.evidence_artifact_ids.push(artifact.artifact_id);
         fixture.submission.updated_at = new Date().toISOString();
@@ -604,6 +612,14 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       const uploadResponse = await runFetch(uploadUrl, { method, headers: uploadHeaders, body });
       if (!uploadResponse.ok) throw new ReviewApiError(uploadResponse.status, "upload_failed", "The presigned evidence upload failed.");
       return { ...registration, transfer: "uploaded" };
+    },
+    async listEvidence(token: string): Promise<EvidenceArtifact[]> {
+      if (mode === "fixture") return fixture.artifacts.map((artifact) => ({ ...artifact }));
+      return (await request<{ items: EvidenceArtifact[] }>("/vendor/invites/current/evidence", { headers: authorization(token) }, "vendor")).items;
+    },
+    async listCaseEvidence(caseId: string): Promise<EvidenceArtifact[]> {
+      if (mode === "fixture") return fixture.artifacts.map((artifact) => ({ ...artifact }));
+      return (await request<{ items: EvidenceArtifact[] }>(`/cases/${encodeURIComponent(caseId)}/documents`)).items;
     },
     saveTrustCenter(token: string, trustCenterUrl: string): Promise<VendorSubmission> {
       if (mode === "fixture") {
