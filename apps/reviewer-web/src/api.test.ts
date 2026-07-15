@@ -8,6 +8,7 @@ import {
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
+  secureCorrelationId,
   suppressResolvedQuestions,
   vendorInviteUrl,
   type QueueItem,
@@ -69,6 +70,21 @@ function state(overrides: Partial<ReviewState> = {}): ReviewState {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("secure correlation identifiers", () => {
+  it("uses getRandomValues to create a valid UUID when randomUUID is unavailable", () => {
+    const getRandomValues = vi.fn((target: Uint8Array) => {
+      target.set(Array.from({ length: 16 }, (_, index) => index));
+      return target;
+    });
+
+    const identifier = secureCorrelationId({ getRandomValues });
+
+    expect(identifier).toBe("00010203-0405-4607-8809-0a0b0c0d0e0f");
+    expect(identifier).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("review API client", () => {

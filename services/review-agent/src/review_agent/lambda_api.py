@@ -365,13 +365,18 @@ class DynamoWorkspaceStore:
             }
         else:
             condition = (
-                "attribute_not_exists(#revision) OR #revision = :expected_revision"
+                "attribute_exists(#case_id) AND "
+                "(attribute_not_exists(#revision) OR #revision = :expected_revision)"
                 if expected_revision == 0
                 else "#revision = :expected_revision"
             )
             options = {
                 "ConditionExpression": condition,
-                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeNames": (
+                    {"#case_id": "case_id", "#revision": "revision"}
+                    if expected_revision == 0
+                    else {"#revision": "revision"}
+                ),
                 "ExpressionAttributeValues": {
                     ":expected_revision": expected_revision,
                 },

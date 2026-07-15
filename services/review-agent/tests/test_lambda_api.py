@@ -718,9 +718,13 @@ class LambdaApiTests(unittest.TestCase):
             options(cases.put_calls[-1]),
             {
                 "ConditionExpression": (
-                    "attribute_not_exists(#revision) OR #revision = :expected_revision"
+                    "attribute_exists(#case_id) AND "
+                    "(attribute_not_exists(#revision) OR #revision = :expected_revision)"
                 ),
-                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeNames": {
+                    "#case_id": "case_id",
+                    "#revision": "revision",
+                },
                 "ExpressionAttributeValues": {":expected_revision": 0},
             },
         )

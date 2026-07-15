@@ -344,8 +344,22 @@ async function sha256(file: File): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+type SecureRandomSource = {
+  randomUUID?: () => string;
+  getRandomValues: (array: Uint8Array) => Uint8Array;
+};
+
+export function secureCorrelationId(source: SecureRandomSource = globalThis.crypto): string {
+  if (typeof source.randomUUID === "function") return source.randomUUID.call(source);
+  const bytes = source.getRandomValues.call(source, new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function fixtureId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${secureCorrelationId()}`;
 }
 
 function fixtureReviewState(input: CaseIntakeInput, caseId: string): ReviewState {
@@ -433,7 +447,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     });
-    if (!headers.has("X-Correlation-Id")) headers.set("X-Correlation-Id", crypto.randomUUID());
+    if (!headers.has("X-Correlation-Id")) headers.set("X-Correlation-Id", secureCorrelationId());
     if (audience === "reviewer") {
       const accessToken = authProvider.getAccessToken();
       if (!accessToken) {

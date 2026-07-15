@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -18,6 +19,30 @@ from typing import Any
 
 class CanaryFailure(RuntimeError):
     pass
+
+
+_MAX_RESPONSE_BYTES = 65_536
+_SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _safe_label(value: object, fallback: str) -> str:
+    return value if isinstance(value, str) and _SAFE_LABEL.fullmatch(value) else fallback
+
+
+def _decode_response(raw: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    if not raw:
+        return None, "empty response"
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        return None, "oversized response"
+    try:
+        text = raw.decode("utf-8")
+        payload = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        kind = "non-JSON response" if raw.lstrip().startswith(b"<") else "malformed JSON response"
+        return None, kind
+    if not isinstance(payload, dict):
+        return None, "JSON response was not an object"
+    return payload, None
 
 
 def request_json(
@@ -45,18 +70,41 @@ def request_json(
     )
     try:
         response = urllib.request.urlopen(request, timeout=20)
-        status = response.status
-        payload = json.loads(response.read().decode("utf-8"))
+        try:
+            status = response.status
+            response_headers = response.headers
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        finally:
+            response.close()
     except urllib.error.HTTPError as error:
-        status = error.code
-        payload = json.loads(error.read().decode("utf-8"))
+        try:
+            status = error.code
+            response_headers = error.headers
+            raw = error.read(_MAX_RESPONSE_BYTES + 1)
+        finally:
+            error.close()
+    payload, decode_error = _decode_response(raw)
+    header_reference = response_headers.get("X-Correlation-Id") if response_headers else None
+    reference = _safe_label(header_reference, correlation_id)
     if status != expected_status:
-        error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        code = error.get("code", "unexpected_response")
-        reference = error.get("correlation_id", correlation_id)
-        raise CanaryFailure(f"{method} {path} returned {status} ({code}); reference {reference}")
-    if not isinstance(payload, dict):
-        raise CanaryFailure(f"{method} {path} returned a malformed payload; reference {correlation_id}")
+        error_payload = payload.get("error") if payload is not None else None
+        if isinstance(error_payload, dict):
+            code = _safe_label(error_payload.get("code"), "unexpected_response")
+            reference = _safe_label(error_payload.get("correlation_id"), reference)
+            detail = code
+        else:
+            detail = decode_error or "unexpected_response"
+        raise CanaryFailure(
+            f"{method} {path} returned HTTP {status} ({detail}); reference {reference}"
+        )
+    if decode_error is not None:
+        raise CanaryFailure(
+            f"{method} {path} returned HTTP {status} ({decode_error}); reference {reference}"
+        )
+    if payload is None:
+        raise CanaryFailure(
+            f"{method} {path} returned HTTP {status} (malformed response); reference {reference}"
+        )
     return payload
 
 
@@ -166,7 +214,7 @@ def run() -> dict[str, str]:
 def main() -> int:
     try:
         result = run()
-    except (CanaryFailure, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
+    except (CanaryFailure, urllib.error.URLError, KeyError) as error:
         print(f"Invitation canary failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))
