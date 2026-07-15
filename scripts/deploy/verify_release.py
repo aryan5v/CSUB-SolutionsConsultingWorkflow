@@ -25,9 +25,12 @@ def safe_extract(archive: Path, destination: Path) -> None:
             resolved = (root / member.name).resolve()
             if root != resolved and root not in resolved.parents:
                 raise ValueError(f"unsafe archive member: {member.name}")
-            if member.isdev() or member.isfifo():
+            # Release inputs contain only directories and regular files. By
+            # rejecting links and special files before extraction, the fallback
+            # is safe on Python versions that predate tarfile's data filter.
+            if not (member.isdir() or member.isfile()):
                 raise ValueError(f"unsupported archive member: {member.name}")
-        bundle.extractall(destination, filter="data")
+        bundle.extractall(destination)
 
 
 def verify(bundle: Path, sha: str, extract_to: Path | None = None) -> None:

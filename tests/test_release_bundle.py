@@ -52,6 +52,18 @@ class ReleaseBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsafe archive member"):
                 safe_extract(archive_path, root / "output")
 
+    def test_safe_extract_rejects_symbolic_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "unsafe-link.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as bundle:
+                member = tarfile.TarInfo("linked-config")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "/etc/passwd"
+                bundle.addfile(member)
+            with self.assertRaisesRegex(ValueError, "unsupported archive member"):
+                safe_extract(archive_path, root / "output")
+
 
 if __name__ == "__main__":
     unittest.main()

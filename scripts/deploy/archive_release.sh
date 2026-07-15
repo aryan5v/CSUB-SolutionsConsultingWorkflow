@@ -30,7 +30,11 @@ fi
 
 for artifact in cloud-assembly.tar.gz frontend.tar.gz; do
   digest="$(jq -r --arg name "$artifact" '.artifacts[$name].sha256' "$BUNDLE/manifest.json")"
-  [[ "$(sha256sum "$BUNDLE/$artifact" | awk '{print $1}')" == "$digest" ]]
+  actual_digest="$(sha256sum "$BUNDLE/$artifact" | awk '{print $1}')"
+  if [[ "$actual_digest" != "$digest" ]]; then
+    echo "Release artifact checksum mismatch for $artifact: expected $digest, got $actual_digest" >&2
+    exit 3
+  fi
   if existing="$(aws s3api head-object --bucket "$bucket" --key "$prefix/$artifact" \
     --query 'Metadata.sha256' --output text 2>/dev/null)"; then
     [[ "$existing" == "$digest" ]] || {

@@ -101,7 +101,19 @@ def invoke_lambda(function_name: str, event: dict[str, Any], region: str) -> Any
             raise RuntimeError(f"Lambda invoke failed: {error}")
         metadata = json.loads(result.stdout)
         if metadata.get("FunctionError"):
-            raise RuntimeError("Lambda reported FunctionError")
+            error_type = "unknown"
+            try:
+                error_payload = json.loads(response.read_text(encoding="utf-8"))
+                candidate = error_payload.get("errorType")
+                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", candidate):
+                    error_type = candidate
+            except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+                pass
+            payload_size = response.stat().st_size if response.exists() else 0
+            raise RuntimeError(
+                f"Lambda reported FunctionError ({metadata['FunctionError']}, "
+                f"type={error_type}, payload_bytes={payload_size})"
+            )
         envelope = json.loads(response.read_text(encoding="utf-8"))
         if envelope.get("statusCode") != 200:
             raise RuntimeError(f"Lambda API returned {envelope.get('statusCode')}")

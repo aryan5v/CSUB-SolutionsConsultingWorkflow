@@ -57,15 +57,22 @@ preflight() {
   # prevents a safe Foundation update from partially landing when Platform is
   # later rejected.
   for stack in "$FOUNDATION_STACK" "$PLATFORM_STACK"; do
-    local normalized change_set details log status
+    local normalized change_set details log status cdk_status
     normalized="$(tr '[:upper:]' '[:lower:]' <<<"$stack" | tr -cd 'a-z0-9-')"
     change_set="vetted-${RELEASE_SHA:0:10}-${run_suffix}-${normalized:0:30}"
     details="$ROOT/artifacts/deploy/${stack}-${RELEASE_SHA:0:12}.json"
     log="$ROOT/artifacts/deploy/${stack}-${RELEASE_SHA:0:12}.log"
 
-    "${CDK[@]}" deploy "$stack" --exclusively --method prepare-change-set \
+    if "${CDK[@]}" deploy "$stack" --exclusively --method prepare-change-set \
       --change-set-name "$change_set" --require-approval never --rollback \
-      "${CONTEXT[@]}" 2>&1 | tee "$log"
+      "${CONTEXT[@]}" 2>&1 | tee "$log"; then
+      cdk_status=0
+    else
+      # Capture the CDK side of the pipeline without letting `set -e` skip the
+      # inspectable "no changes" path below. Never convert a real CDK failure
+      # into success merely because tee completed.
+      cdk_status="${PIPESTATUS[0]}"
+    fi
 
     if ! aws cloudformation describe-change-set --stack-name "$stack" \
       --change-set-name "$change_set" --region "$AWS_REGION" >"$details" 2>/dev/null; then
@@ -73,8 +80,18 @@ preflight() {
         printf '%s\t%s\t%s\n' "$stack" "$change_set" "nochanges" >>"$PLAN"
         continue
       fi
-      echo "CloudFormation did not return an inspectable change set for $stack" >&2
+      echo "CloudFormation did not return an inspectable change set for $stack (CDK exit $cdk_status)" >&2
+      if [[ $cdk_status -ne 0 ]]; then
+        return "$cdk_status"
+      fi
       return 2
+    fi
+
+    if [[ $cdk_status -ne 0 ]]; then
+      echo "CDK failed while preparing the inspectable change set for $stack (exit $cdk_status)" >&2
+      aws cloudformation delete-change-set --stack-name "$stack" \
+        --change-set-name "$change_set" --region "$AWS_REGION" >/dev/null 2>&1 || true
+      return "$cdk_status"
     fi
 
     if python3 "$ROOT/scripts/deploy/guard_change_set.py" "$details"; then
