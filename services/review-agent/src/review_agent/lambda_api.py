@@ -28,7 +28,7 @@ from urllib.parse import parse_qs
 
 from .adapters.model import DeterministicModelClient
 from .adapters.servicenow import MockServiceNowConnector, _Record
-from .api import LocalApiError, LocalReviewApi, _CaseRecord
+from .api import LocalApiError, LocalReviewApi, _CaseRecord, vendor_link_settings
 from .audit.log import AuditLog, InMemoryAuditSink
 from .contracts.audit import ActorType, AuditEvent
 from .contracts.case import CaseIntake, DataClassification, Requester
@@ -60,6 +60,7 @@ from .contracts.vendor import (
     IntegrationEvent,
     InviteStatus,
     ProfileStatus,
+    ReminderClaim,
     ReviewCriterion,
     ReviewProfileVersion,
     ReviewRun,
@@ -519,6 +520,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
         }
     ),
     "event": lambda value: IntegrationEvent(**value),
+    "reminder_claim": lambda value: ReminderClaim(**value),
 }
 
 
@@ -643,7 +645,7 @@ def restore_api(
         repository.set_current_run(key, value, workspace_id=workspace_id)
     api._vendor_repository = repository
     api._profiles = ReviewProfileService(repository)
-    api._vendor = VendorBackend(repository, api._profiles)
+    api._vendor = VendorBackend(repository, api._profiles, **vendor_link_settings())
     api._software_index = ApprovedSoftwareIndex([_approved_record(entry) for entry in catalog])
     api._connector = _restore_connector(snapshot.get("connector"))
     api._cases = {}
@@ -911,6 +913,12 @@ def _dispatch_case(
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
         return api.list_case_invites(case_id), 200, False
+    if method == "GET" and suffix == "reminders":
+        return api.reminder_history(case_id), 200, False
+    if method == "POST" and suffix == "reminders/pause":
+        return api.set_reminders_paused(case_id, True), 200, True
+    if method == "POST" and suffix == "reminders/resume":
+        return api.set_reminders_paused(case_id, False), 200, True
     if method == "POST" and suffix == "review-runs":
         return api.create_review_run(case_id, body), 201, True
     if method == "GET" and suffix == "review-runs":
@@ -1437,6 +1445,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "profile": "profile_version_id",
         "run": "run_id",
         "event": "event_id",
+        "reminder_claim": "dedupe_key",
     }
     key = keys.get(kind)
     if key is None:

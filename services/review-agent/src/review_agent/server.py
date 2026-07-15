@@ -303,6 +303,12 @@ def create_server(
                 self._json(HTTPStatus.CREATED, application.issue_vendor_invite(case_id, self._body()))
             elif method == "GET" and suffix == "invites":
                 self._json(HTTPStatus.OK, application.list_case_invites(case_id))
+            elif method == "GET" and suffix == "reminders":
+                self._json(HTTPStatus.OK, application.reminder_history(case_id))
+            elif method == "POST" and suffix == "reminders/pause":
+                self._json(HTTPStatus.OK, application.set_reminders_paused(case_id, True))
+            elif method == "POST" and suffix == "reminders/resume":
+                self._json(HTTPStatus.OK, application.set_reminders_paused(case_id, False))
             elif method == "POST" and suffix == "review-runs":
                 self._json(HTTPStatus.CREATED, application.create_review_run(case_id, self._body()))
             elif method == "GET" and suffix == "review-runs":

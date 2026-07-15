@@ -125,6 +125,9 @@ class VendorCase:
     use_case: str
     scope: str
     lifecycle: CaseLifecycle = CaseLifecycle.DRAFT
+    # Reviewer control (issue #37): pauses automated evidence reminders for
+    # this case without touching the invitation or submission state.
+    reminders_paused: bool = False
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,6 +150,11 @@ class VendorInvite:
     revoked_at: str | None = None
     submitted_at: str | None = None
     replaced_invite_id: str | None = None
+    # Sealed (keyed-keystream) form of the invite token so automated reminders
+    # can repeat the vendor's working intake link (issue #37). The raw token is
+    # never persisted: unsealing requires the backend's link secret and is
+    # verified against ``token_hash``. Absent from every serializer.
+    token_seal: str | None = None
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_reviewer_dict(self) -> dict[str, Any]:
@@ -164,6 +172,28 @@ class VendorInvite:
             "submitted_at": self.submitted_at,
             "replaced_invite_id": self.replaced_invite_id,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ReminderClaim:
+    """Durable idempotency claim for one reminder period of one case (issue #37).
+
+    The claim is persisted keyed by its deterministic ``dedupe_key``
+    (``reminder:{case_id}:{period}``) *before* an email is sent, so a
+    concurrent or retried sweep that finds the key already claimed never
+    duplicates a send. A DynamoDB adapter maps this to a conditional put.
+    """
+
+    dedupe_key: str
+    case_id: str
+    invite_id: str
+    status: str  # pending | sent | failed
+    attempts: int
+    claimed_at: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
