@@ -701,31 +701,39 @@ class LambdaApiTests(unittest.TestCase):
             "connector": {},
         }
 
+        def options(call: dict) -> dict:
+            return {key: value for key, value in call.items() if key != "Item"}
+
         store.save_snapshot("csub-demo", snapshot, expected_revision=None)
-        create_call = cases.put_calls[-1]
-        self.assertEqual(create_call["ConditionExpression"], "attribute_not_exists(#case_id)")
         self.assertEqual(
-            create_call["ExpressionAttributeNames"],
-            {"#case_id": "case_id", "#revision": "revision"},
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "attribute_not_exists(#case_id)",
+                "ExpressionAttributeNames": {"#case_id": "case_id"},
+            },
         )
-        self.assertNotIn("ExpressionAttributeValues", create_call)
 
         store.save_snapshot("csub-demo", snapshot, expected_revision=0)
-        migration_call = cases.put_calls[-1]
         self.assertEqual(
-            migration_call["ConditionExpression"],
-            "attribute_not_exists(#revision) OR #revision = :expected_revision",
-        )
-        self.assertEqual(
-            migration_call["ExpressionAttributeValues"], {":expected_revision": 0}
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": (
+                    "attribute_not_exists(#revision) OR #revision = :expected_revision"
+                ),
+                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeValues": {":expected_revision": 0},
+            },
         )
 
         snapshot["persistence_revision"] = 8
         store.save_snapshot("csub-demo", snapshot, expected_revision=7)
-        update_call = cases.put_calls[-1]
-        self.assertEqual(update_call["ConditionExpression"], "#revision = :expected_revision")
         self.assertEqual(
-            update_call["ExpressionAttributeValues"], {":expected_revision": 7}
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "#revision = :expected_revision",
+                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeValues": {":expected_revision": 7},
+            },
         )
 
         cases.next_put_error_code = "ConditionalCheckFailedException"

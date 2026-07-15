@@ -359,21 +359,22 @@ class DynamoWorkspaceStore:
             "updated_at": _utc_now(),
         }
         if expected_revision is None:
-            condition = "attribute_not_exists(#case_id)"
-        elif expected_revision == 0:
-            condition = "attribute_not_exists(#revision) OR #revision = :expected_revision"
+            options: dict[str, Any] = {
+                "ConditionExpression": "attribute_not_exists(#case_id)",
+                "ExpressionAttributeNames": {"#case_id": "case_id"},
+            }
         else:
-            condition = "#revision = :expected_revision"
-        options: dict[str, Any] = {
-            "ConditionExpression": condition,
-            "ExpressionAttributeNames": {
-                "#case_id": "case_id",
-                "#revision": "revision",
-            },
-        }
-        if expected_revision is not None:
-            options["ExpressionAttributeValues"] = {
-                ":expected_revision": expected_revision,
+            condition = (
+                "attribute_not_exists(#revision) OR #revision = :expected_revision"
+                if expected_revision == 0
+                else "#revision = :expected_revision"
+            )
+            options = {
+                "ConditionExpression": condition,
+                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeValues": {
+                    ":expected_revision": expected_revision,
+                },
             }
         table = self._tables["cases"]
         try:
