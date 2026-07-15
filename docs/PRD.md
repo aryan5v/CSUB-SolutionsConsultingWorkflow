@@ -11,7 +11,7 @@
 | Status | Approved prototype specification |
 | Primary users | CSUB technology-review requesters and reviewers |
 | Data boundary | Supplied Box dataset plus sanitized case uploads |
-| System of record | ServiceNow-compatible mock for the prototype |
+| System of record | ServiceNow (target); contract-compatible mock for the prototype |
 | Last updated | July 15, 2026 |
 
 ## 1. Product summary
@@ -31,6 +31,36 @@ The product will:
 - Demonstrate contract-faithful, clearly labeled simulated ServiceNow write-back.
 
 The supplied discovery transcript, challenge overview, Box files, and the decisions recorded in this PRD are the planning basis. Any statement not verified in those materials remains labeled as an assumption or open question.
+
+### July 15 CSUB end-user validation
+
+CSUB validated the end-to-end vendor-to-approval direction and identified vendor
+follow-up as the largest current operational burden. The desired operating model
+starts with a ServiceNow request, gives the vendor a resumable evidence
+workspace, validates the contents and currency of submitted documents, runs
+equal security and accessibility tracks, and returns status and the final human
+decision to the appropriate surfaces. The weekly review committee remains the
+human decision maker.
+
+The call also established these product constraints:
+
+- A document is not credited merely because its filename or vendor-provided
+  label resembles a requested artifact.
+- A COI must be inspected for the configured cyber-liability requirement and
+  expiration; a penetration test older than the configured maximum age must be
+  flagged; PCI evidence must be checked against the configured currency rule.
+- The exact insurance amount, PCI currency rule, authoritative policy source,
+  and any exception path are `TBD` pending CSUB confirmation. Models cannot
+  invent these values.
+- Vendors must be able to return later, see received and unresolved items,
+  replace or supplement evidence, and ask a case-scoped question.
+- Reminder messages should enumerate unresolved items, request an expected
+  delivery date, and provide a path for questions. Cadence, recipients, and
+  escalation wording remain administrator-controlled.
+- Slack is useful for immediate reviewer notification and grounded Q&A, but
+  approval and other workflow mutations stay in the application.
+- Research must identify the official vendor domain/trust center and retain
+  provenance for every captured claim.
 
 ### Known prototype source inventory
 
@@ -194,6 +224,49 @@ LLMs may extract, summarize, compare, research, explain, and draft. They may not
 - Record reviewer, values, packet hash, timestamps, and connector response.
 - Label every prototype write as simulated.
 
+### FR-8: Resumable vendor collaboration
+
+- Preserve a vendor draft across sessions until the invitation is revoked,
+  expires, or the case is closed.
+- Let the vendor add, replace, and supplement evidence without exposing prior
+  reviewer-only analysis or notes.
+- Recompute evidence coverage after every accepted document version and retain
+  the superseded version in the audit history.
+- Display a vendor-safe projection of received, processing, invalid, and
+  unresolved requirements plus a collapsed review stage and final human
+  decision.
+- Provide a case-scoped clarification thread with explicit reviewer/vendor
+  authorship, timestamps, notification status, and no cross-case visibility.
+
+### FR-9: Evidence content and currency validation
+
+- Validate MIME type and parse the actual evidence bytes before classifying an
+  artifact; vendor metadata is an untrusted hint.
+- Extract the vendor/product identity, document type, issuer, reporting or test
+  period, expiration date, relevant coverage, and stable source coordinates.
+- Evaluate COI cyber-liability coverage, penetration-test age, PCI attestation
+  currency, and other criteria only against a cited active policy/profile
+  version.
+- Mark uncertain, unreadable, mismatched, stale, or contradictory artifacts for
+  human review and prevent them from satisfying the requirement automatically.
+- Preserve raw files, hashes, extraction warnings, parser/model versions, and
+  immutable evidence versions in encrypted case-scoped storage.
+
+### FR-10: Follow-up, status, and notifications
+
+- Run a scheduled, idempotent reminder evaluation for active submissions with
+  unresolved or invalid evidence.
+- Build reminder content deterministically from current requirement IDs and
+  vendor-safe remediation text; include an expected-date request and invitation
+  deep link.
+- Record delivery attempts and results without blocking the case when an email
+  provider is unavailable.
+- Notify the vendor only after a recorded human decision and expose no internal
+  risk deliberation, reviewer notes, or unrelated cases.
+- Send signed, authorized Slack notifications and answer only case-grounded,
+  read-only questions with application deep links when the CSUB sandbox is
+  configured.
+
 ## 5. Data and system requirements
 
 ### Source storage
@@ -298,6 +371,17 @@ Acceptance also requires:
 - Correct pause, restart, resume, edit, reject, retry, and checkpoint-expiry behavior.
 - Authorization and adversarial tests for uploads, retrieved pages, and write-back.
 - A visible `Simulated ServiceNow` label in the demo and generated audit entries.
+- Live tokenized vendor invitations open from a separate browser context and
+  remain scoped to exactly one case/submission.
+- Resumable vendor drafts, evidence replacement, status projection, reminder
+  idempotency, and clarification authorization pass interruption and isolation
+  tests.
+- COI, penetration-test, and PCI acceptance decisions cite both the evidence
+  location and the active human-authored criterion version.
+- Three live scenarios complete through deployed APIs without fixture
+  substitution: complete catalog evidence, a fuzzy match requiring confirmation,
+  and a new/incomplete product that goes through changes, rerun, decision, packet,
+  notification, and simulated write-back.
 
 ## 9. Delivery milestones
 
@@ -332,5 +416,12 @@ Detailed workstreams, gates, and agent ownership are defined in [`../PLAN.md`](.
 - Who is authorized to act as the prototype reviewer?
 - What retention period should apply to raw sources, case evidence, checkpoints, and generated packets?
 - Who owns evaluation and teardown after Thursday?
+- What cyber-liability amount, allowed evidence wording, expiration rule, and
+  exception path should the COI validator enforce?
+- What is the authoritative PCI attestation currency rule and source?
+- Which recipient(s), send day/time, escalation cadence, and opt-out rules apply
+  to vendor reminder emails?
+- Which ServiceNow fields own request status, vendor contact, evidence gaps,
+  committee decision, and packet attachment when a sandbox becomes available?
 
 Unanswered questions must be represented in configuration or the conflict registry and must not be silently resolved by an agent.
