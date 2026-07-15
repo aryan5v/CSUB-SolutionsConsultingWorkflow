@@ -295,6 +295,22 @@ describe('API authorization boundaries', () => {
     expect(byKey.has('GET /intake/{token}')).toBe(false);
   });
 
+  test('uses one API-scoped Lambda invoke permission for all routes', () => {
+    const { platform } = build(baseConfig);
+    const permissions = Object.values(
+      platform.findResources('AWS::Lambda::Permission'),
+    ) as any[];
+    const apiLogicalIds = Object.keys(platform.findResources('AWS::ApiGatewayV2::Api'));
+
+    expect(permissions).toHaveLength(1);
+    expect(apiLogicalIds).toHaveLength(1);
+    expect(permissions[0].Properties.Action).toBe('lambda:InvokeFunction');
+    expect(permissions[0].Properties.Principal).toBe('apigateway.amazonaws.com');
+    const sourceArn = JSON.stringify(permissions[0].Properties.SourceArn);
+    expect(sourceArn).toContain(JSON.stringify({ Ref: apiLogicalIds[0] }));
+    expect(sourceArn).toContain('/*/*/*');
+  });
+
   test('CORS permits bearer intake from only the UI and local development origins', () => {
     const { platform } = build(baseConfig);
     platform.hasResourceProperties('AWS::ApiGatewayV2::Api', {

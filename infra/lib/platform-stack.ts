@@ -817,7 +817,9 @@ export class PlatformStack extends cdk.Stack {
       }),
     };
 
-    const integration = new HttpLambdaIntegration('CaseProxyIntegration', this.proxyFunction);
+    const integration = new HttpLambdaIntegration('CaseProxyIntegration', this.proxyFunction, {
+      scopePermissionToRoute: false,
+    });
 
     // --- Reviewer/admin routes: Cognito JWT required ---
     const protectedRoutes: Array<[string, apigwv2.HttpMethod[]]> = [
