@@ -312,11 +312,18 @@ class VendorBackend:
         return revoked.to_reviewer_dict()
 
     def list_invites(self, case_id: str | None = None) -> list[VendorInvite]:
-        invites = [
-            self._expire_invite_if_needed(invite)
-            for invite in self._list("invite", VendorInvite)
-            if case_id is None or invite.case_id == case_id
-        ]
+        invites = []
+        for invite in self._list("invite", VendorInvite):
+            if case_id is not None and invite.case_id != case_id:
+                continue
+            expires = datetime.datetime.fromisoformat(invite.expires_at)
+            if invite.status not in {
+                InviteStatus.EXPIRED,
+                InviteStatus.REVOKED,
+                InviteStatus.SUBMITTED,
+            } and self._now_datetime() >= expires:
+                invite = replace(invite, status=InviteStatus.EXPIRED)
+            invites.append(invite)
         return sorted(invites, key=lambda invite: (invite.issued_at, invite.invite_id))
 
     def resolve_invite(self, token: str, *, mark_open: bool = False) -> dict[str, Any]:

@@ -358,29 +358,31 @@ class DynamoWorkspaceStore:
             "snapshot": encoded,
             "updated_at": _utc_now(),
         }
-        options: dict[str, Any] = {}
-        try:
-            from boto3.dynamodb.conditions import Attr
-        except ModuleNotFoundError:
-            pass
+        if expected_revision is None:
+            condition = "attribute_not_exists(#case_id)"
+        elif expected_revision == 0:
+            condition = "attribute_not_exists(#revision) OR #revision = :expected_revision"
         else:
-            if expected_revision is None:
-                options["ConditionExpression"] = Attr("case_id").not_exists()
-            elif expected_revision == 0:
-                options["ConditionExpression"] = Attr("revision").not_exists() | Attr(
-                    "revision"
-                ).eq(0)
-            else:
-                options["ConditionExpression"] = Attr("revision").eq(expected_revision)
+            condition = "#revision = :expected_revision"
+        options: dict[str, Any] = {
+            "ConditionExpression": condition,
+            "ExpressionAttributeNames": {
+                "#case_id": "case_id",
+                "#revision": "revision",
+            },
+        }
+        if expected_revision is not None:
+            options["ExpressionAttributeValues"] = {
+                ":expected_revision": expected_revision,
+            }
         table = self._tables["cases"]
         try:
             table.put_item(Item=item, **options)
         except Exception as error:
-            meta = getattr(table, "meta", None)
-            client = getattr(meta, "client", None)
-            exceptions = getattr(client, "exceptions", None)
-            conflict_type = getattr(exceptions, "ConditionalCheckFailedException", None)
-            if conflict_type is not None and isinstance(error, conflict_type):
+            response = getattr(error, "response", None)
+            error_detail = response.get("Error") if isinstance(response, dict) else None
+            error_code = error_detail.get("Code") if isinstance(error_detail, dict) else None
+            if error_code == "ConditionalCheckFailedException":
                 raise SnapshotConflictError() from error
             raise
         self._write_projections(workspace_id, snapshot)
@@ -1010,7 +1012,7 @@ def _dispatch_case(
     if method == "POST" and suffix == "invites":
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
-        return api.list_case_invites(case_id), 200, True
+        return api.list_case_invites(case_id), 200, False
     if method == "POST" and suffix == "review-runs":
         return api.create_review_run(case_id, body), 201, True
     if method == "GET" and suffix == "review-runs":

@@ -13,15 +13,24 @@ import _bootstrap  # noqa: F401
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
     InMemoryWorkspaceStore,
+    SnapshotConflictError,
     create_handler,
     seed_workspace,
 )
+
+
+class FakeAwsError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code, "Message": "synthetic failure"}}
 
 
 class FakeTable:
     def __init__(self, *key_fields: str) -> None:
         self.key_fields = key_fields
         self.items: dict[tuple[object, ...], dict] = {}
+        self.put_calls: list[dict] = []
+        self.next_put_error_code: str | None = None
 
     def _key(self, value: dict) -> tuple[object, ...]:
         return tuple(value[field] for field in self.key_fields)
@@ -30,7 +39,12 @@ class FakeTable:
         item = self.items.get(self._key(Key))
         return {"Item": json.loads(json.dumps(item))} if item is not None else {}
 
-    def put_item(self, *, Item: dict, **_kwargs) -> None:
+    def put_item(self, *, Item: dict, **kwargs) -> None:
+        self.put_calls.append({"Item": json.loads(json.dumps(Item)), **kwargs})
+        if self.next_put_error_code is not None:
+            code = self.next_put_error_code
+            self.next_put_error_code = None
+            raise FakeAwsError(code)
         self.items[self._key(Item)] = json.loads(json.dumps(Item))
 
     def delete_item(self, *, Key: dict) -> None:
@@ -637,6 +651,86 @@ class LambdaApiTests(unittest.TestCase):
         self.assertNotIn(token, logged)
         record = json.loads(logged.strip())
         self.assertEqual(set(record), {"correlation_id", "event_type", "status"})
+
+    def test_invite_listing_projects_expiry_without_bumping_revision(self) -> None:
+        issued = self._issue_invite()
+        snapshot = self.store.load_snapshot("csub-demo")
+        revision = snapshot["persistence_revision"]
+        invite = next(
+            item
+            for item in snapshot["repository"]["records"]["invite"]
+            if item["invite_id"] == issued["invite"]["invite_id"]
+        )
+        invite["status"] = "issued"
+        invite["expires_at"] = "2000-01-01T00:00:00+00:00"
+        snapshot["persistence_revision"] = revision + 1
+        self.store.save_snapshot(
+            "csub-demo",
+            snapshot,
+            expected_revision=revision,
+        )
+        expected_revision = revision + 1
+
+        first, payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(first["statusCode"], 200)
+        projected = next(
+            item for item in payload["items"] if item["invite_id"] == invite["invite_id"]
+        )
+        self.assertEqual(projected["status"], "expired")
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+        second, second_payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(second["statusCode"], 200)
+        self.assertEqual(second_payload, payload)
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+    def test_dynamo_snapshot_write_always_sends_condition_and_maps_conflict(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        cases = tables["cases"]
+        snapshot = {
+            "persistence_revision": 1,
+            "repository": {"records": {}},
+            "cases": {},
+            "connector": {},
+        }
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=None)
+        create_call = cases.put_calls[-1]
+        self.assertEqual(create_call["ConditionExpression"], "attribute_not_exists(#case_id)")
+        self.assertEqual(
+            create_call["ExpressionAttributeNames"],
+            {"#case_id": "case_id", "#revision": "revision"},
+        )
+        self.assertNotIn("ExpressionAttributeValues", create_call)
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=0)
+        migration_call = cases.put_calls[-1]
+        self.assertEqual(
+            migration_call["ConditionExpression"],
+            "attribute_not_exists(#revision) OR #revision = :expected_revision",
+        )
+        self.assertEqual(
+            migration_call["ExpressionAttributeValues"], {":expected_revision": 0}
+        )
+
+        snapshot["persistence_revision"] = 8
+        store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+        update_call = cases.put_calls[-1]
+        self.assertEqual(update_call["ConditionExpression"], "#revision = :expected_revision")
+        self.assertEqual(
+            update_call["ExpressionAttributeValues"], {":expected_revision": 7}
+        )
+
+        cases.next_put_error_code = "ConditionalCheckFailedException"
+        with self.assertRaises(SnapshotConflictError):
+            store.save_snapshot("csub-demo", snapshot, expected_revision=7)
 
     def test_dynamo_store_projects_scoped_state_and_restores_with_a_fresh_instance(self) -> None:
         tables = fake_dynamo_tables()
