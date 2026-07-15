@@ -1,4 +1,4 @@
-# 0008 - Official-domain vendor research with SSRF and provenance controls
+# 0009 - Official-domain vendor research with SSRF and provenance controls
 
 - Status: Accepted
 - Date: 2026-07-15 (revised after independent review)
@@ -77,27 +77,31 @@ that fetches only official-domain evidence and captures full provenance.
    into findings; every other block or transport/DNS/HTTP error becomes a gap for
    manual review. Retrieved text is scanned for prompt-injection / tracking
    markers and flagged, never obeyed.
-8. **Deterministic integration seam.** `VendorBackend` accepts an optional
-   `research_provider` (the structural `VendorResearchProvider` interface, which
-   `VendorResearchService` satisfies). During `run_intake_analysis`, when a
-   provider is configured, the confirmed trust-center URL is researched and the
-   provenance / gaps / quarantined links are recorded on the `intake.analyzed`
-   integration event and retrievable via `intake_research(token)`. Research
-   **annotates only**: deterministic coverage, unresolved questions, policy, and
-   approval are unchanged, and with no provider configured research is honestly
-   reported as not performed rather than fabricated.
+8. **Fail-closed application wiring and reviewer retrieval.** `VendorBackend`
+   accepts the structural `VendorResearchProvider` interface. Fixture mode wires
+   `None` and reports research as not performed; live `LocalReviewApi` startup
+   always constructs `VendorResearchService` with `GuardedHttpTransport`,
+   `SystemResolver`, and `ResearchPolicy.from_env`, rejects an explicit `None`,
+   and propagates construction failures. Lambda restoration preserves the same
+   provider while rebuilding the workspace-scoped backend. During
+   `run_intake_analysis`, provenance / gaps / quarantined links are recorded on
+   `intake.analyzed` with `simulated=false` when guarded research ran. Vendors do
+   not receive those findings; authenticated reviewers use the case-scoped
+   `GET /cases/{id}/research` route, which takes no invitation token and is
+   isolated by workspace and case. Research **annotates only**: deterministic
+   coverage, unresolved questions, policy, and approval are unchanged.
 
-Shared contracts are unchanged (the `Submission` schema is untouched; provenance
-rides on the existing integration-event detail). The module reuses
+The persisted `Submission` schema remains untouched; provenance rides on the
+existing integration-event detail, while OpenAPI adds only the authenticated,
+read-only case research response. The module reuses
 `CitationScope` (`official_vendor` / `standards`) and the institutional
 untrusted scanner read-only.
 
 ## Consequences
 
-- The SSRF/DNS/redirect/HTTP-status controls, provenance/citation projection,
-  and the vendor-intake integration are covered by 46 unit tests (adversarial,
-  provenance, and integration) using synthetic hosts and a fake
-  resolver/transport; no real network I/O runs in CI.
+- Focused adversarial, provenance, factory, restoration, authentication, and
+  integration tests use synthetic hosts and fake resolver/transport seams; no
+  real network I/O runs in CI.
 - Issue #44 acceptance is met on the review path: same-domain trust-center
   evidence enters intake analysis with resolvable provenance, and research
   failures (off-domain, private/metadata IP, DNS rebinding, redirect escape,

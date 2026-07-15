@@ -140,11 +140,15 @@ control flow lives outside any model prompt:
 
 `VendorBackend` accepts an optional `research_provider`; when configured,
 `run_intake_analysis` researches the confirmed trust-center URL and records
-provenance / gaps / quarantined links on the `intake.analyzed` event (retrievable
-via `intake_research(token)`). Research annotates only -- coverage, unresolved
-questions, policy, and approval are unchanged, and with no provider configured
-research is honestly reported as not performed. See
-[ADR 0008](../../docs/decisions/0008-official-domain-vendor-research.md).
+provenance / gaps / quarantined links on the `intake.analyzed` event. Vendors
+never receive research findings. Authenticated reviewers retrieve the latest
+case-scoped result at `GET /cases/{id}/research`; that route uses no invitation
+token and Lambda logs contain only correlation id, event type, and status.
+Research annotates only -- coverage, unresolved questions, policy, and approval
+are unchanged, and fixture mode honestly reports research as not performed. Live
+`LocalReviewApi` startup always builds the guarded provider and rejects an
+explicit `None`; restored Lambda workspaces preserve that provider. See
+[ADR 0009](../../docs/decisions/0009-official-domain-vendor-research.md).
 
 ## Trust boundaries
 

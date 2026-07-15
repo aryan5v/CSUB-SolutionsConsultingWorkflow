@@ -1,8 +1,12 @@
-# CSUB Solutions Consulting Workflow
+# VETTED
 
 [![CI](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml/badge.svg)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml)
+[![Deploy VETTED](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml)
 
-An AWS-first, human-reviewed technology-review prototype for CSU AI Summer Camp 2026. It uses the supplied CSUB Box dataset to check approved software, apply source-linked review rules, draft low- and medium-risk outcomes, and demonstrate simulated ServiceNow write-back.
+An AWS-first, human-reviewed technology-review platform for CSU AI Summer Camp
+2026. VETTED uses the supplied CSUB Box dataset to check software records, apply
+source-linked review rules, draft low- and medium-risk outcomes, and demonstrate
+simulated ServiceNow write-back.
 
 ## Context
 
@@ -57,8 +61,13 @@ the phased Twenty-to-vendor adaptation plan.
 - [x] AWS and bounded-agent architecture selected
 - [ ] Ingest and validate the supplied Box dataset
 - [x] Complete connected local low-, medium-, and safe-escalation vertical slices
-- [ ] Deploy the approved AWS environment
+- [x] Deploy the approved AWS environment
 - [ ] Evaluate, harden, and demo the prototype
+
+Merges to `main` automatically create a verified, immutable AWS release. The
+delivery workflow preflights both CloudFormation stacks before mutation, runs
+live canaries, and restores the last-known-good cloud assembly and frontend on
+failure. See [`docs/decisions/0008-guarded-main-to-aws-delivery.md`](docs/decisions/0008-guarded-main-to-aws-delivery.md).
 
 ## Local setup
 

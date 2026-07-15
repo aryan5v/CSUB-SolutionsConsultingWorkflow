@@ -80,6 +80,17 @@ class VendorBackend:
         # sets coverage, policy, approval, or requirements.
         self._research = research_provider
 
+    @property
+    def research_provider(self) -> VendorResearchProvider | None:
+        """The configured official-domain research provider, if any.
+
+        Exposed read-only so composition roots (``LocalReviewApi`` and the Lambda
+        ``restore_api`` path) can preserve the same provider when they rebuild the
+        backend, instead of dropping it and silently reverting to "not performed".
+        """
+
+        return self._research
+
     # Reviewer-owned vendor/product/contact records ---------------------------
 
     def create_vendor(self, name: str, official_domain: str | None = None) -> Vendor:
@@ -552,7 +563,11 @@ class VendorBackend:
                 "trust_center_host": host,
                 "research_performed": research_dict is not None,
                 "research": research_dict,
-                "simulated": True,
+                # Honest provenance: the deterministic coverage/extraction step is
+                # a stand-in, but when a live provider performed a real guarded
+                # HTTPS fetch the research portion is genuine, not simulated. Only
+                # label the analysis simulated when no live research ran.
+                "simulated": research_dict is None,
             },
         )
         return finished
@@ -602,6 +617,30 @@ class VendorBackend:
             for event in self._list("event", IntegrationEvent)
             if event.resource_id == submission.submission_id
             and event.event_type == "intake.analyzed"
+        ]
+        if not events:
+            return None
+        latest = max(events, key=lambda event: event.occurred_at)
+        return latest.detail.get("research")
+
+    def case_intake_research(self, case_id: str) -> dict | None:
+        """Reviewer-facing, case-scoped official-domain research provenance.
+
+        Returns the provenance/gaps/quarantined payload from the latest intake
+        analysis for ``case_id`` (workspace-isolated via :meth:`_require`), or
+        ``None`` if analysis has not run or no provider was configured. Unlike
+        :meth:`intake_research`, this is keyed by the reviewer-supplied case id --
+        no invite token is required, accepted, or logged -- so a reviewer (not
+        only a bearer-token vendor caller) can inspect full provenance, gaps, and
+        quarantined links. Read-only; it never alters approval, policy, criteria,
+        or requirements.
+        """
+
+        self._require("case", case_id, VendorCase)
+        events = [
+            event
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == "intake.analyzed" and event.case_id == case_id
         ]
         if not events:
             return None

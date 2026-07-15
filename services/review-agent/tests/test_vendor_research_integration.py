@@ -17,7 +17,7 @@ import _bootstrap  # noqa: F401
 from review_agent.profiles.service import ReviewProfileService
 from review_agent.research import RawResponse, ResearchPolicy, VendorResearchService
 from review_agent.vendor.repository import InMemoryVendorRepository
-from review_agent.vendor.service import VendorBackend
+from review_agent.vendor.service import VendorBackend, VendorBackendError
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -131,6 +131,14 @@ class VendorResearchIntegrationTests(unittest.TestCase):
 
         research = backend.intake_research(token)
         self.assertIsNotNone(research)
+        self.assertEqual(backend.case_intake_research("CASE-1"), research)
+        event = next(
+            item
+            for item in backend.repository.list("event", workspace_id=backend.workspace_id)
+            if item.event_type == "intake.analyzed"
+        )
+        self.assertFalse(event.detail["simulated"])
+        self.assertTrue(event.detail["research_performed"])
         self.assertEqual(research["confirmed_host"], "trust.acme.example")
         self.assertEqual(len(research["findings"]), 1)
         prov = research["findings"][0]["provenance"]
@@ -193,6 +201,19 @@ class VendorResearchIntegrationTests(unittest.TestCase):
         # No provider -> research honestly reported as not performed, no findings.
         self.assertIsNone(without_provider.intake_research(token_b))
         self.assertIn("not performed", analyzed_b.research_summary)
+
+    def test_case_research_is_workspace_and_case_isolated(self) -> None:
+        repository = InMemoryVendorRepository()
+        other_profiles = ReviewProfileService(repository, workspace_id="other-workspace")
+        other = VendorBackend(repository, other_profiles, workspace_id="other-workspace")
+        vendor = other.create_vendor("Other Vendor", "other.example")
+        product = other.create_product(vendor.vendor_id, "Other Product")
+        other.register_case("OTHER-CASE", product.product_id, "Other use", "Other scope")
+
+        local_profiles = ReviewProfileService(repository)
+        local = VendorBackend(repository, local_profiles)
+        with self.assertRaisesRegex(VendorBackendError, "case not found"):
+            local.case_intake_research("OTHER-CASE")
 
 
 if __name__ == "__main__":
