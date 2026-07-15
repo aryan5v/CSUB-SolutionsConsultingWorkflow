@@ -90,6 +90,12 @@ class VendorHttpRouteTests(unittest.TestCase):
         )
         # Staged intake: analysis must run before questions/answers are exposed.
         self.assertEqual(self.request(f"/vendor/invites/{token}/analyze", "POST", {})[0], 200)
+        status, research = self.request(f"/cases/{self.case_id}/research")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            research,
+            {"case_id": self.case_id, "research_performed": False, "research": None},
+        )
         _, questions = self.request(f"/vendor/invites/{token}/questions")
         self.assertTrue(questions["intake_analysis_complete"])
         answers = {item["requirement_id"]: "Sanitized answer" for item in questions["items"]}

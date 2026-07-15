@@ -42,6 +42,7 @@ src/review_agent/
   policy/          Deterministic engine, versioned rules, conflict registry (FR-3)
   lookup/          Approved-software lookup with disclosed match method (FR-2)
   specialists/     Parallel security/accessibility nodes + citation checker (FR-5)
+  research/        Official-domain vendor research: SSRF/DNS/redirect + provenance (FR-4/5)
   packet/          Low- and medium-risk packet composition (FR-6)
   orchestration/   Workflow runner, node functions, checkpointer (sec 5)
   vendor/          Workspace-scoped repository interfaces, invite/intake service, immutable runs
@@ -92,6 +93,63 @@ PYTHONPATH=src python3 -m review_agent.institutional "/path/to/Solutions Consult
 
 See [ADR 0007](../../docs/decisions/0007-institutional-source-normalization.md).
 
+## Official-domain vendor research (SSRF and provenance)
+
+`review_agent.research` fetches public evidence only from the vendor's confirmed
+official host (and configured standards authorities) and captures resolvable
+provenance for every accepted source (issue #44, FR-4/FR-5). The deterministic
+control flow lives outside any model prompt:
+
+- `DomainAllowlist.derive` uses the **exact** confirmed host from the
+  trust-center URL; only that host, its subdomains, and explicitly configured
+  standards authorities (empty by default) are fetchable. There is no
+  registrable-domain / public-suffix guessing (which would be unsafe for
+  multi-tenant suffixes such as `github.io`): sibling hosts and the parent apex
+  require explicit human confirmation and are quarantined, and unrecognized
+  hosts are refused (fail-closed).
+- Every URL and redirect hop is validated (`ssrf.py`): HTTPS only, no
+  credentialed URLs, allow-listed ports, DNS-name hosts (no dotted/decimal/hex/
+  octal/IPv6 IP literals), and on-allowlist. Every resolved DNS answer must be
+  globally routable; loopback, link-local (including `169.254.169.254`),
+  private, CGNAT, reserved, multicast, unspecified, and IPv4-mapped IPv6
+  addresses are refused. All answers are validated and one is pinned, and the
+  transport must connect to that pinned IP, closing DNS-rebinding / drift.
+- Redirects are resolved with `urljoin` against the current URL and fully
+  re-validated: same-host relative redirects are followed; protocol-relative or
+  absolute off-domain redirects are quarantined. Only 2xx responses become
+  evidence; 4xx/5xx bodies are gaps.
+- `ResearchPolicy` (`policy.py`) holds env-overridable redirect / size /
+  download-count / timeout / deadline / content-type limits. The download-count
+  and total-deadline budgets are enforced before every hop and the per-request
+  timeout is clamped to the remaining budget. These are tool safety limits, not
+  campus policy.
+- `ProvenanceRecord` stores final URL, redirect chain, retrieval time, content
+  hash, MIME type, vendor/product scope, resolved IP, and source locator.
+  `provenance_to_citation` feeds findings through the existing citation checker
+  so cross-vendor/product research is rejected like any other claim.
+- Provider calls sit behind `Resolver` / `HttpTransport` interfaces with local
+  fakes; `GuardedHttpTransport` injects an IP-pinned TLS socket (never
+  reconnects/re-resolves) and closes exactly once. An AgentCore Browser provider
+  would implement the same interface and is used only when
+  `allow_agentcore_browser` is enabled for an approved account.
+- Off-domain targets and redirect escapes are quarantined for human
+  confirmation and never promoted; all other blocks/errors become gaps for
+  manual review, so research never silently produces a compliant finding.
+  Retrieved text is scanned for prompt-injection markers and flagged, never
+  obeyed.
+
+`VendorBackend` accepts an optional `research_provider`; when configured,
+`run_intake_analysis` researches the confirmed trust-center URL and records
+provenance / gaps / quarantined links on the `intake.analyzed` event. Vendors
+never receive research findings. Authenticated reviewers retrieve the latest
+case-scoped result at `GET /cases/{id}/research`; that route uses no invitation
+token and Lambda logs contain only correlation id, event type, and status.
+Research annotates only -- coverage, unresolved questions, policy, and approval
+are unchanged, and fixture mode honestly reports research as not performed. Live
+`LocalReviewApi` startup always builds the guarded provider and rejects an
+explicit `None`; restored Lambda workspaces preserve that provider. See
+[ADR 0009](../../docs/decisions/0009-official-domain-vendor-research.md).
+
 ## Trust boundaries
 
 The model may extract, summarize, compare, and draft. It must not establish
@@ -105,8 +163,11 @@ confirmation, matching record version, and is idempotent on
 The standard-library HTTP server is a local adapter, not an authentication
 boundary. Production API Gateway wiring must derive reviewer/admin identity from
 Cognito and move invitation bearer tokens out of access-logged URL paths (or
-redact those paths) before deployment. No local route browses a submitted trust
-center URL; only validated HTTPS public-host metadata is stored.
+redact those paths) before deployment. By default no local route browses a
+submitted trust-center URL; browsing happens only through the guarded,
+opt-in `research_provider` (see the official-domain research section), which
+enforces the SSRF/DNS/redirect/provenance boundary and stores only validated
+metadata and content hashes.
 
 ## Demo assumptions
 
