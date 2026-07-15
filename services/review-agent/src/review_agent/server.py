@@ -70,6 +70,9 @@ def create_server(
                 if method == "GET" and path == "/integration-events":
                     self._json(HTTPStatus.OK, application.integration_events())
                     return
+                if method == "POST" and path == "/reminders/run":
+                    self._json(HTTPStatus.OK, application.run_reminder_sweep())
+                    return
                 if method == "GET" and path == "/catalog":
                     self._json(
                         HTTPStatus.OK,

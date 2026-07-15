@@ -65,6 +65,11 @@ class VendorHttpRouteTests(unittest.TestCase):
         self.assertEqual(status, 201)
         token = quote(invite["token"], safe="")
         self.assertNotIn("token_hash", invite["invite"])
+        # An invite with nothing submitted is due exactly one weekly reminder.
+        sweep_status, sweep = self.request("/reminders/run", "POST", {})
+        self.assertEqual(sweep_status, 200)
+        self.assertEqual(sweep["count"], 1)
+        self.assertEqual(self.request("/reminders/run", "POST", {})[1]["count"], 0)
         self.assertEqual(self.request(f"/vendor/invites/{token}")[0], 200)
         self.assertEqual(self.request(f"/vendor/invites/{token}/open", "POST", {})[0], 200)
         self.assertEqual(

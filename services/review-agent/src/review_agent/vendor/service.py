@@ -59,15 +59,19 @@ class VendorBackend:
         clock: Callable[[], datetime.datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
         invite_ttl: datetime.timedelta = datetime.timedelta(days=7),
+        reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
+        if reminder_interval <= datetime.timedelta(0):
+            raise ValueError("reminder_interval must be positive")
         self.repository = repository
         self.profiles = profiles
         self.workspace_id = workspace_id
         self._clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
+        self.reminder_interval = reminder_interval
 
     # Reviewer-owned vendor/product/contact records ---------------------------
 
@@ -770,6 +774,154 @@ class VendorBackend:
             case_id=case_id,
             detail=detail,
         )
+
+    # Weekly vendor reminders (issue #37) -------------------------------------
+
+    _REMINDER_EVENT = "email.reminder"
+    # Reminders run only while the vendor still owes evidence; once the case
+    # moves to reviewer-owned states the nagging stops.
+    _REMINDER_LIFECYCLES = frozenset(
+        {
+            CaseLifecycle.DRAFT,
+            CaseLifecycle.INVITED,
+            CaseLifecycle.OPENED,
+            CaseLifecycle.IN_PROGRESS,
+        }
+    )
+
+    def reminder_candidates(self) -> list[dict[str, Any]]:
+        """Invites with missing/incomplete evidence that are due a reminder.
+
+        An invite qualifies when it is still actionable (issued/opened/in
+        progress and unexpired), its case has not moved past the vendor's part,
+        its submission is an incomplete draft, and no reminder was recorded
+        within ``reminder_interval``. Each candidate names the specific missing
+        items so the reminder email can cite them (issue #37).
+        """
+        now = self._now_datetime()
+        candidates: list[dict[str, Any]] = []
+        for invite in self._list("invite", VendorInvite):
+            if invite.status not in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                continue
+            if now >= datetime.datetime.fromisoformat(invite.expires_at):
+                continue
+            case = self.repository.get("case", invite.case_id, workspace_id=self.workspace_id)
+            if not isinstance(case, VendorCase) or case.lifecycle not in self._REMINDER_LIFECYCLES:
+                continue
+            try:
+                submission = self._submission_for_invite(invite.invite_id)
+            except VendorBackendError:
+                continue
+            if submission.status is not SubmissionStatus.DRAFT:
+                continue
+            stage, missing = self._missing_items(submission)
+            if not missing:
+                continue
+            last_sent = self._last_reminder_at(invite.invite_id)
+            if last_sent is not None and now - last_sent < self.reminder_interval:
+                continue
+            contact = self._require("contact", invite.contact_id, VendorContact)
+            product = self._require("product", invite.product_id, VendorProduct)
+            candidates.append(
+                {
+                    "invite_id": invite.invite_id,
+                    "case_id": invite.case_id,
+                    "contact_name": contact.name,
+                    "contact_email": contact.email,
+                    "product_name": product.name,
+                    "stage": stage,
+                    "missing": missing,
+                }
+            )
+        return sorted(candidates, key=lambda item: item["invite_id"])
+
+    def record_reminder(
+        self, *, invite_id: str, case_id: str, summary: str, delivery: dict[str, Any]
+    ) -> IntegrationEvent:
+        """Persist one reminder send; the sweep uses this for weekly pacing."""
+        detail = {
+            "summary": summary,
+            "delivery": delivery.get("delivery"),
+            "simulated": delivery.get("simulated", True),
+            "channel": delivery.get("channel"),
+        }
+        if delivery.get("to"):
+            detail["recipient"] = delivery["to"]
+        return self._event(
+            self._REMINDER_EVENT,
+            "invite",
+            invite_id,
+            case_id=case_id,
+            detail=detail,
+        )
+
+    def _missing_items(self, submission: Submission) -> tuple[str, list[dict[str, Any]]]:
+        """Name what is still owed: submission gaps first, then open requirements."""
+        if not submission.intake_analysis_complete:
+            items: list[dict[str, Any]] = []
+            if not submission.evidence_artifact_ids:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Evidence files",
+                        "detail": "No evidence documents have been received yet.",
+                    }
+                )
+            if submission.trust_center_url is None:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Trust-center URL",
+                        "detail": "A public HTTPS trust-center link has not been provided.",
+                    }
+                )
+            if not items:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Intake analysis",
+                        "detail": (
+                            "Evidence was received but intake analysis has not run, so "
+                            "remaining questions are not yet visible. Open your "
+                            "invitation link to continue."
+                        ),
+                    }
+                )
+            return "awaiting_submission", items
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in covered or criterion.requirement_id in answered:
+                    continue
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "label": ", ".join(criterion.expected_evidence) or criterion.requirement_id,
+                        "detail": criterion.remediation_guidance or criterion.question,
+                    }
+                )
+        items.sort(key=lambda item: item["requirement_id"] or "")
+        return "questions_open", items
+
+    def _last_reminder_at(self, invite_id: str) -> datetime.datetime | None:
+        stamps = [
+            event.occurred_at
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == self._REMINDER_EVENT and event.resource_id == invite_id
+        ]
+        if not stamps:
+            return None
+        return datetime.datetime.fromisoformat(max(stamps))
 
     # Immutable run versions --------------------------------------------------
 

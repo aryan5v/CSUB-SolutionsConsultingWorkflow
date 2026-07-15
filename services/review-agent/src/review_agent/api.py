@@ -698,6 +698,67 @@ class LocalReviewApi:
     def vendor_review_status(self, token: str) -> dict[str, Any]:
         return self._vendor_call(lambda: self._vendor.review_status(token))
 
+    def run_reminder_sweep(self) -> dict[str, Any]:
+        """Email weekly reminders for missing or incomplete evidence (issue #37).
+
+        Idempotent within the reminder interval: the backend excludes invites
+        that were reminded less than ``reminder_interval`` ago, so the sweep is
+        safe to trigger from a scheduler, an operator, or a test at any time.
+        Every send is persisted as an auditable ``email.reminder`` event with
+        its truthful delivery mode.
+        """
+        sent: list[dict[str, Any]] = []
+        for candidate in self._vendor_call(self._vendor.reminder_candidates):
+            subject, body = self._reminder_email(candidate)
+            try:
+                delivery = self._email_sender.send(
+                    to=candidate["contact_email"], subject=subject, body=body
+                )
+            except Exception:  # noqa: BLE001 - a failed send must not stop the sweep
+                delivery = {"delivery": "failed", "simulated": False, "channel": "email"}
+            self._vendor.record_reminder(
+                invite_id=candidate["invite_id"],
+                case_id=candidate["case_id"],
+                summary=subject,
+                delivery=delivery,
+            )
+            sent.append(
+                {
+                    "invite_id": candidate["invite_id"],
+                    "case_id": candidate["case_id"],
+                    "stage": candidate["stage"],
+                    "missing_count": len(candidate["missing"]),
+                    "delivery": delivery.get("delivery"),
+                }
+            )
+        return {"sent": sent, "count": len(sent), "simulated": True}
+
+    @staticmethod
+    def _reminder_email(candidate: dict[str, Any]) -> tuple[str, str]:
+        """Deterministic reminder copy naming each missing item (issue #37)."""
+        lines = [
+            f"Hello {candidate['contact_name']},",
+            "",
+            f"The campus technology review for {candidate['product_name']} "
+            f"(case {candidate['case_id']}) is still waiting on the following:",
+            "",
+        ]
+        lines.extend(f"- {item['label']}: {item['detail']}" for item in candidate["missing"])
+        lines.extend(
+            [
+                "",
+                "If you are having trouble producing an item, reply to this email "
+                "with a status or an estimated date.",
+                "If you are not sure what we are looking for, reply and the campus "
+                "team will help.",
+                "",
+                "This reminder repeats weekly until the submission is complete. "
+                "Your invitation link continues to work until it expires.",
+            ]
+        )
+        subject = f"Reminder: evidence still needed for {candidate['product_name']}"
+        return subject, "\n".join(lines)
+
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
 

@@ -772,6 +772,9 @@ def _dispatch(
         return api.create_case(body), 201, True
     if method == "GET" and path == "/integration-events":
         return api.integration_events(), 200, False
+    if method == "POST" and path == "/reminders/run":
+        # Reviewer/scheduler-triggered sweep; requires reviewer auth (not public).
+        return api.run_reminder_sweep(), 200, True
     if method == "GET" and path == "/catalog":
         query = _query(event)
         return (
