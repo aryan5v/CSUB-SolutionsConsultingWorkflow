@@ -24,16 +24,20 @@ class CanaryVendorInvitationTests(unittest.TestCase):
         )
         vendor_token = "opaque-vendor-token-must-not-be-logged"
 
+        correlation_id = "invite-canary-test-id"
         for status, response_body, expected_detail in scenarios:
             with self.subTest(status=status, detail=expected_detail):
                 error = urllib.error.HTTPError(
                     "https://api.example/vendor/invites/current",
                     status,
                     "synthetic error",
-                    {"X-Correlation-Id": "server-reference"},
+                    {"X-Correlation-Id": correlation_id},
                     io.BytesIO(response_body),
                 )
-                with patch.object(canary.urllib.request, "urlopen", side_effect=error):
+                with (
+                    patch.object(canary.uuid, "uuid4", return_value="test-id"),
+                    patch.object(canary.urllib.request, "urlopen", side_effect=error),
+                ):
                     with self.assertRaises(canary.CanaryFailure) as raised:
                         canary.request_json(
                             "https://api.example",
@@ -47,7 +51,7 @@ class CanaryVendorInvitationTests(unittest.TestCase):
                 message = str(raised.exception)
                 self.assertIn(f"HTTP {status}", message)
                 self.assertIn(expected_detail, message)
-                self.assertIn("reference server-reference", message)
+                self.assertIn(f"reference {correlation_id}", message)
                 self.assertNotIn(vendor_token, message)
                 self.assertNotIn("private upstream details", message)
                 if response_body:
@@ -56,7 +60,7 @@ class CanaryVendorInvitationTests(unittest.TestCase):
     def test_expected_status_with_malformed_json_reports_status_and_bounded_detail(self) -> None:
         class Response:
             status = 200
-            headers = {"X-Correlation-Id": "server-reference"}
+            headers = {"X-Correlation-Id": "invite-canary-test-id"}
 
             @staticmethod
             def read(_limit: int) -> bytes:
@@ -66,7 +70,10 @@ class CanaryVendorInvitationTests(unittest.TestCase):
             def close() -> None:
                 return None
 
-        with patch.object(canary.urllib.request, "urlopen", return_value=Response()):
+        with (
+            patch.object(canary.uuid, "uuid4", return_value="test-id"),
+            patch.object(canary.urllib.request, "urlopen", return_value=Response()),
+        ):
             with self.assertRaises(canary.CanaryFailure) as raised:
                 canary.request_json(
                     "https://api.example",
@@ -81,6 +88,54 @@ class CanaryVendorInvitationTests(unittest.TestCase):
         self.assertIn("malformed JSON response", message)
         self.assertNotIn("not-json-and-not-for-logs", message)
 
+
+    def test_rejects_mismatched_header_and_error_payload_correlations(self) -> None:
+        class Response:
+            status = 200
+            headers = {"X-Correlation-Id": "wrong-header"}
+
+            @staticmethod
+            def read(_limit: int) -> bytes:
+                return b"{}"
+
+            @staticmethod
+            def close() -> None:
+                return None
+
+        with (
+            patch.object(canary.uuid, "uuid4", return_value="test-id"),
+            patch.object(canary.urllib.request, "urlopen", return_value=Response()),
+        ):
+            with self.assertRaisesRegex(canary.CanaryFailure, "correlation header mismatch"):
+                canary.request_json(
+                    "https://api.example",
+                    "reviewer-token",
+                    "GET",
+                    "/health",
+                    expected_status=200,
+                )
+
+        error = urllib.error.HTTPError(
+            "https://api.example/vendor/invites/current",
+            401,
+            "synthetic error",
+            {"X-Correlation-Id": "invite-canary-test-id"},
+            io.BytesIO(
+                b'{"error":{"code":"invite_revoked","correlation_id":"wrong-payload"}}'
+            ),
+        )
+        with (
+            patch.object(canary.uuid, "uuid4", return_value="test-id"),
+            patch.object(canary.urllib.request, "urlopen", side_effect=error),
+        ):
+            with self.assertRaisesRegex(canary.CanaryFailure, "error correlation mismatch"):
+                canary.request_json(
+                    "https://api.example",
+                    "reviewer-token",
+                    "GET",
+                    "/vendor/invites/current",
+                    expected_status=401,
+                )
 
 if __name__ == "__main__":
     unittest.main()

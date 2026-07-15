@@ -25,12 +25,19 @@ class FakeAwsError(Exception):
         self.response = {"Error": {"Code": code, "Message": "synthetic failure"}}
 
 
+class FakeTableMeta:
+    def __init__(self, client: FakeTransactionClient) -> None:
+        self.client = client
+
+
 class FakeTable:
-    def __init__(self, *key_fields: str) -> None:
+    def __init__(self, name: str, *key_fields: str) -> None:
+        self.name = name
         self.key_fields = key_fields
         self.items: dict[tuple[object, ...], dict] = {}
         self.put_calls: list[dict] = []
         self.next_put_error_code: str | None = None
+        self.meta: FakeTableMeta
 
     def _key(self, value: dict) -> tuple[object, ...]:
         return tuple(value[field] for field in self.key_fields)
@@ -63,20 +70,85 @@ class FakeTable:
         return None
 
 
+class FakeTransactionClient:
+    def __init__(self, tables: dict[str, FakeTable]) -> None:
+        self.tables = {table.name: table for table in tables.values()}
+        self.next_error_code: str | None = None
+        self.calls: list[list[dict]] = []
+
+    @staticmethod
+    def _value(value: dict) -> object:
+        if "S" in value:
+            return value["S"]
+        if "N" in value:
+            return int(value["N"])
+        if "BOOL" in value:
+            return value["BOOL"]
+        raise AssertionError(f"unsupported synthetic DynamoDB value: {value}")
+
+    @classmethod
+    def _item(cls, item: dict) -> dict:
+        return {key: cls._value(value) for key, value in item.items()}
+
+    def transact_write_items(self, *, TransactItems: list[dict]) -> None:
+        self.calls.append(json.loads(json.dumps(TransactItems)))
+        if self.next_error_code is not None:
+            code = self.next_error_code
+            self.next_error_code = None
+            raise FakeAwsError(code)
+
+        check = TransactItems[0]["ConditionCheck"]
+        check_table = self.tables[check["TableName"]]
+        check_key = self._item(check["Key"])
+        expected_revision = self._value(check["ExpressionAttributeValues"][":revision"])
+        snapshot = check_table.items.get(check_table._key(check_key))
+        if snapshot is None or snapshot.get("revision") != expected_revision:
+            raise FakeAwsError("TransactionCanceledException")
+
+        mutations: list[tuple[str, FakeTable, dict]] = []
+        for entry in TransactItems[1:]:
+            action = "Put" if "Put" in entry else "Delete"
+            mutation = entry[action]
+            table = self.tables[mutation["TableName"]]
+            value = self._item(mutation["Item"] if action == "Put" else mutation["Key"])
+            existing = table.items.get(table._key(value))
+            incoming_revision = self._value(
+                mutation["ExpressionAttributeValues"][":projection_revision"]
+            )
+            if (
+                existing is not None
+                and "projection_revision" in existing
+                and existing["projection_revision"] > incoming_revision
+            ):
+                raise FakeAwsError("TransactionCanceledException")
+            mutations.append((action, table, value))
+
+        for action, table, value in mutations:
+            if action == "Put":
+                table.items[table._key(value)] = json.loads(json.dumps(value))
+            else:
+                table.items.pop(table._key(value), None)
+
+
 def fake_dynamo_tables() -> dict[str, FakeTable]:
-    return {
-        "cases": FakeTable("case_id"),
-        "vendor": FakeTable("vendor_id"),
-        "product": FakeTable("product_id", "version"),
-        "contact": FakeTable("contact_id"),
-        "invite": FakeTable("token_hash"),
-        "submission": FakeTable("submission_id", "case_id"),
-        "review": FakeTable("case_id", "decision_version"),
-        "profile": FakeTable("user_id", "version"),
-        "integration": FakeTable("event_id", "occurred_at"),
-        "audit": FakeTable("case_id", "sequence"),
-        "idempotency": FakeTable("idempotency_key"),
+    keys = {
+        "cases": ("case_id",),
+        "vendor": ("vendor_id",),
+        "product": ("product_id", "version"),
+        "contact": ("contact_id",),
+        "invite": ("token_hash",),
+        "submission": ("submission_id", "case_id"),
+        "review": ("case_id", "decision_version"),
+        "profile": ("user_id", "version"),
+        "integration": ("event_id", "occurred_at"),
+        "audit": ("case_id", "sequence"),
+        "idempotency": ("idempotency_key",),
     }
+    tables = {name: FakeTable(name, *key_fields) for name, key_fields in keys.items()}
+    client = FakeTransactionClient(tables)
+    for table in tables.values():
+        table.meta = FakeTableMeta(client)
+    return tables
 
 
 class LambdaApiTests(unittest.TestCase):
@@ -743,6 +815,87 @@ class LambdaApiTests(unittest.TestCase):
         cases.next_put_error_code = "ConditionalCheckFailedException"
         with self.assertRaises(SnapshotConflictError):
             store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+
+    def test_dynamo_projection_transactions_reject_stale_order_and_are_idempotent(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        older = {
+            "persistence_revision": 1,
+            "repository": {
+                "records": {
+                    "vendor": [
+                        {"vendor_id": "vendor-kept", "name": "Old name"},
+                        {"vendor_id": "vendor-removed", "name": "Removed later"},
+                    ]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+        newer = {
+            "persistence_revision": 2,
+            "repository": {
+                "records": {
+                    "vendor": [{"vendor_id": "vendor-kept", "name": "New name"}]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+
+        store.save_snapshot("csub-demo", older, expected_revision=None)
+        store.save_snapshot("csub-demo", newer, expected_revision=1)
+        projected = {
+            key: json.loads(json.dumps(value)) for key, value in tables["vendor"].items.items()
+        }
+
+        with self.assertRaises(FakeAwsError):
+            store._write_projections("csub-demo", older)
+        self.assertEqual(tables["vendor"].items, projected)
+        self.assertNotIn(("csub-demo#vendor#vendor-removed",), tables["vendor"].items)
+        kept = tables["vendor"].items[("csub-demo#vendor#vendor-kept",)]
+        self.assertEqual(json.loads(kept["payload"])["name"], "New name")
+        self.assertEqual(kept["projection_revision"], 2)
+
+        store._write_projections("csub-demo", newer)
+        self.assertEqual(tables["vendor"].items, projected)
+
+    def test_dynamo_projection_failure_does_not_fail_committed_http_mutation(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        seed_workspace(store)
+        handler = create_handler(store, allowed_origins=[self.origin])
+        tables["cases"].meta.client.next_error_code = "InternalServerError"
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            response = handler(
+                self.event(
+                    "POST",
+                    "/vendors",
+                    body={"name": "Committed Vendor", "official_domain": "vendor.example"},
+                ),
+                None,
+            )
+
+        payload = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 201)
+        snapshot = store.load_snapshot("csub-demo")
+        vendors = snapshot["repository"]["records"]["vendor"]
+        self.assertTrue(any(item["vendor_id"] == payload["vendor_id"] for item in vendors))
+        projected_ids = {
+            json.loads(item["payload"])["vendor_id"] for item in tables["vendor"].items.values()
+        }
+        self.assertNotIn(payload["vendor_id"], projected_ids)
+        logs = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn(
+            {
+                "event_type": "projection_write_failed",
+                "revision": snapshot["persistence_revision"],
+                "status": 202,
+            },
+            logs,
+        )
 
     def test_dynamo_store_projects_scoped_state_and_restores_with_a_fresh_instance(self) -> None:
         tables = fake_dynamo_tables()

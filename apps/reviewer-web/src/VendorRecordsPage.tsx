@@ -14,6 +14,7 @@ import {
   type VendorProduct,
   type VendorRecord,
 } from "./api";
+import { applyRotatedInvite } from "./inviteState";
 import "./workspace.css";
 
 type Notify = (message: string) => void;
@@ -181,8 +182,7 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
     setBusy(true); setError("");
     try {
       const rotated = await reviewApi.rotateInvite(inviteId);
-      const nextInvites = await reviewApi.listInvites(rotated.invite.case_id);
-      setInvites([...nextInvites].reverse());
+      setInvites((current) => applyRotatedInvite(current, inviteId, rotated.invite));
       setInviteUrl(vendorInviteUrl(window.location.origin, rotated.token));
       notify("Invitation rotated. The old link is terminal and the new opaque link is shown once.");
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }

@@ -391,7 +391,18 @@ class DynamoWorkspaceStore:
             if error_code == "ConditionalCheckFailedException":
                 raise SnapshotConflictError() from error
             raise
-        self._write_projections(workspace_id, snapshot)
+        try:
+            self._write_projections(workspace_id, snapshot)
+        except Exception:
+            print(
+                _json_dumps(
+                    {
+                        "event_type": "projection_write_failed",
+                        "revision": revision,
+                        "status": 202,
+                    }
+                )
+            )
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         items = self._scan_workspace(self._tables["product"], workspace_id, "catalog")
@@ -416,6 +427,7 @@ class DynamoWorkspaceStore:
                 )
 
     def _write_projections(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+        revision = int(snapshot.get("persistence_revision", 0))
         repository = snapshot.get("repository", {})
         records = repository.get("records", {}) if isinstance(repository, dict) else {}
         mapping = {
@@ -431,62 +443,87 @@ class DynamoWorkspaceStore:
             "event": "integration",
             "case": "cases",
         }
+        current: dict[tuple[object, ...], tuple[str, dict[str, Any]]] = {}
+        desired: dict[tuple[object, ...], tuple[str, dict[str, Any]]] = {}
+
+        def remember_current(table_name: str, item: dict[str, Any]) -> None:
+            current[self._projection_identity(table_name, item)] = (table_name, item)
+
+        def remember_desired(table_name: str, item: dict[str, Any]) -> None:
+            item["projection_revision"] = revision
+            desired[self._projection_identity(table_name, item)] = (table_name, item)
+
         for kind, table_name in mapping.items():
             table = self._tables[table_name]
             for item in self._scan_workspace(table, workspace_id, kind):
-                self._delete_projection(table_name, item)
+                remember_current(table_name, item)
             values = records.get(kind, []) if isinstance(records, dict) else []
             for value in values:
                 if isinstance(value, dict):
-                    self._put_projection(table_name, workspace_id, kind, value)
+                    remember_desired(
+                        table_name,
+                        self._projection_item(table_name, workspace_id, kind, value),
+                    )
+
         cases = snapshot.get("cases", {})
         for item in self._scan_workspace(self._tables["cases"], workspace_id, "review_case"):
-            self._delete_projection("cases", item)
+            remember_current("cases", item)
         for item in self._scan_workspace(self._tables["audit"], workspace_id, "audit"):
-            self._delete_projection("audit", item)
+            remember_current("audit", item)
         for item in self._scan_workspace(
             self._tables["idempotency"], workspace_id, "simulated_servicenow_commit"
         ):
-            self._delete_projection("idempotency", item)
+            remember_current("idempotency", item)
         if isinstance(cases, dict):
             for case_id, value in cases.items():
                 if not isinstance(value, dict):
                     continue
-                self._tables["cases"].put_item(
-                    Item={
+                remember_desired(
+                    "cases",
+                    {
                         "case_id": _physical(workspace_id, f"review#{case_id}"),
                         "workspace_id": workspace_id,
                         "record_type": "review_case",
                         "payload": _json_dumps(value),
-                    }
+                    },
                 )
                 for sequence, event in enumerate(value.get("audit_events", []), start=1):
-                    self._tables["audit"].put_item(
-                        Item={
+                    remember_desired(
+                        "audit",
+                        {
                             "case_id": _physical(workspace_id, case_id),
                             "sequence": sequence,
                             "workspace_id": workspace_id,
                             "record_type": "audit",
                             "payload": _json_dumps(event),
-                        }
+                        },
                     )
         connector = snapshot.get("connector", {})
         committed = connector.get("committed", {}) if isinstance(connector, dict) else {}
         if isinstance(committed, dict):
+            ttl = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000
             for key, value in committed.items():
-                self._tables["idempotency"].put_item(
-                    Item={
+                remember_desired(
+                    "idempotency",
+                    {
                         "idempotency_key": _physical(workspace_id, key),
                         "workspace_id": workspace_id,
                         "record_type": "simulated_servicenow_commit",
                         "payload": _json_dumps(value),
-                        "ttl": int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000,
-                    }
+                        "ttl": ttl,
+                    },
                 )
 
-    def _put_projection(
+        operations: list[tuple[str, str, dict[str, Any]]] = []
+        for identity, (table_name, item) in current.items():
+            if identity not in desired:
+                operations.append(("delete", table_name, self._projection_key(table_name, item)))
+        operations.extend(("put", table_name, item) for table_name, item in desired.values())
+        self._transact_projection_operations(workspace_id, revision, operations)
+
+    def _projection_item(
         self, table_name: str, workspace_id: str, kind: str, value: dict[str, Any]
-    ) -> None:
+    ) -> dict[str, Any]:
         record_id = _record_id(kind, value)
         item = {
             "workspace_id": workspace_id,
@@ -520,10 +557,11 @@ class DynamoWorkspaceStore:
             item["ttl"] = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000
         elif table_name == "cases":
             item["case_id"] = _physical(workspace_id, f"vendor#{record_id}")
-        self._tables[table_name].put_item(Item=item)
+        return item
 
-    def _delete_projection(self, table_name: str, item: dict[str, Any]) -> None:
-        key_fields = {
+    @staticmethod
+    def _projection_key_fields(table_name: str) -> tuple[str, ...]:
+        return {
             "vendor": ("vendor_id",),
             "product": ("product_id", "version"),
             "contact": ("contact_id",),
@@ -536,18 +574,82 @@ class DynamoWorkspaceStore:
             "idempotency": ("idempotency_key",),
             "cases": ("case_id",),
         }[table_name]
-        if not all(field in item for field in key_fields):
+
+    @classmethod
+    def _projection_key(cls, table_name: str, item: dict[str, Any]) -> dict[str, Any]:
+        fields = cls._projection_key_fields(table_name)
+        if not all(field in item for field in fields):
             raise RuntimeError(f"persisted {table_name} projection has an invalid key")
-        self._tables[table_name].delete_item(
-            Key={field: item[field] for field in key_fields}
+        return {field: item[field] for field in fields}
+
+    @classmethod
+    def _projection_identity(cls, table_name: str, item: dict[str, Any]) -> tuple[object, ...]:
+        key = cls._projection_key(table_name, item)
+        return (table_name, *(key[field] for field in cls._projection_key_fields(table_name)))
+
+    @staticmethod
+    def _dynamo_value(value: object) -> dict[str, object]:
+        if isinstance(value, bool):
+            return {"BOOL": value}
+        if isinstance(value, str):
+            return {"S": value}
+        if isinstance(value, (int, decimal.Decimal)):
+            return {"N": str(value)}
+        raise TypeError(f"unsupported projection transaction value: {type(value).__name__}")
+
+    @classmethod
+    def _dynamo_item(cls, item: dict[str, Any]) -> dict[str, dict[str, object]]:
+        return {key: cls._dynamo_value(value) for key, value in item.items()}
+
+    def _transact_projection_operations(
+        self,
+        workspace_id: str,
+        revision: int,
+        operations: list[tuple[str, str, dict[str, Any]]],
+    ) -> None:
+        if not operations:
+            return
+        client = self._tables["cases"].meta.client
+        snapshot_check = {
+            "TableName": self._tables["cases"].name,
+            "Key": self._dynamo_item({"case_id": _physical(workspace_id, "snapshot")}),
+            "ConditionExpression": "#revision = :revision",
+            "ExpressionAttributeNames": {"#revision": "revision"},
+            "ExpressionAttributeValues": {":revision": self._dynamo_value(revision)},
+        }
+        projection_condition = (
+            "attribute_not_exists(#projection_revision) "
+            "OR #projection_revision <= :projection_revision"
         )
+        for offset in range(0, len(operations), 99):
+            transaction: list[dict[str, Any]] = [{"ConditionCheck": snapshot_check}]
+            for action, table_name, value in operations[offset : offset + 99]:
+                mutation = {
+                    "TableName": self._tables[table_name].name,
+                    "ConditionExpression": projection_condition,
+                    "ExpressionAttributeNames": {
+                        "#projection_revision": "projection_revision"
+                    },
+                    "ExpressionAttributeValues": {
+                        ":projection_revision": self._dynamo_value(revision)
+                    },
+                }
+                if action == "put":
+                    mutation["Item"] = self._dynamo_item(value)
+                    transaction.append({"Put": mutation})
+                else:
+                    mutation["Key"] = self._dynamo_item(value)
+                    transaction.append({"Delete": mutation})
+            client.transact_write_items(TransactItems=transaction)
 
     @staticmethod
     def _scan_workspace(table: Any, workspace_id: str, record_type: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         start_key = None
         while True:
-            kwargs = {"ExclusiveStartKey": start_key} if start_key else {}
+            kwargs: dict[str, Any] = {"ConsistentRead": True}
+            if start_key:
+                kwargs["ExclusiveStartKey"] = start_key
             response = table.scan(**kwargs)
             page = response.get("Items", [])
             if not isinstance(page, list):

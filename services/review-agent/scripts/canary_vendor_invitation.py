@@ -85,25 +85,34 @@ def request_json(
             error.close()
     payload, decode_error = _decode_response(raw)
     header_reference = response_headers.get("X-Correlation-Id") if response_headers else None
-    reference = _safe_label(header_reference, correlation_id)
+    if header_reference != correlation_id:
+        raise CanaryFailure(
+            f"{method} {path} returned HTTP {status} (correlation header mismatch); "
+            f"reference {correlation_id}"
+        )
+    error_payload = payload.get("error") if payload is not None else None
+    if isinstance(error_payload, dict) and error_payload.get("correlation_id") != correlation_id:
+        raise CanaryFailure(
+            f"{method} {path} returned HTTP {status} (error correlation mismatch); "
+            f"reference {correlation_id}"
+        )
     if status != expected_status:
-        error_payload = payload.get("error") if payload is not None else None
         if isinstance(error_payload, dict):
-            code = _safe_label(error_payload.get("code"), "unexpected_response")
-            reference = _safe_label(error_payload.get("correlation_id"), reference)
-            detail = code
+            detail = _safe_label(error_payload.get("code"), "unexpected_response")
         else:
             detail = decode_error or "unexpected_response"
         raise CanaryFailure(
-            f"{method} {path} returned HTTP {status} ({detail}); reference {reference}"
+            f"{method} {path} returned HTTP {status} ({detail}); reference {correlation_id}"
         )
     if decode_error is not None:
         raise CanaryFailure(
-            f"{method} {path} returned HTTP {status} ({decode_error}); reference {reference}"
+            f"{method} {path} returned HTTP {status} ({decode_error}); "
+            f"reference {correlation_id}"
         )
     if payload is None:
         raise CanaryFailure(
-            f"{method} {path} returned HTTP {status} (malformed response); reference {reference}"
+            f"{method} {path} returned HTTP {status} (malformed response); "
+            f"reference {correlation_id}"
         )
     return payload
 
