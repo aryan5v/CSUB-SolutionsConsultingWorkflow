@@ -36,6 +36,13 @@ Within `services/review-agent`, keep ingestion, deterministic policy, LangGraph 
 5. Integration: local AWS fakes, LangGraph pause/resume, retrieval isolation, ServiceNow mock, and gold cases.
 6. Deployment: CDK synth/diff, least-privilege review, budget/retention/teardown checks, then canary validation.
 
+Merges to `main` use the guarded AWS release workflow documented in
+[`../docs/decisions/0008-guarded-main-to-aws-delivery.md`](decisions/0008-guarded-main-to-aws-delivery.md).
+The build job must remain credential-free. The production job may consume only
+the checksum-verified bundle, must inspect every stack before executing any
+change set, and advances the last-known-good pointer only after canaries pass.
+Security-sensitive infrastructure changes remain a human SSO operation.
+
 No agent may weaken or skip a gate to make its own change pass. If a gate is incorrect, fix it in a separate, explained change with independent review.
 
 ## Contract discipline
