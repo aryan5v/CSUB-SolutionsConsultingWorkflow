@@ -70,8 +70,20 @@ class S3Storage:
     def _s3(self) -> Any:
         if self._client is None:
             import boto3  # lazy: only needed when talking to live AWS
+            from botocore.config import Config
 
-            self._client = boto3.client("s3", region_name=self._region)
+            # SigV4 (not legacy SigV2) so presigned SSE-KMS PUTs sign the exact
+            # headers the uploader sends, plus virtual-hosted regional addressing
+            # so the URL targets the bucket's region (bucket.s3.us-west-2...) and
+            # a vendor's upload does not bounce through a 307 redirect.
+            self._client = boto3.client(
+                "s3",
+                region_name=self._region,
+                config=Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "virtual"},
+                ),
+            )
         return self._client
 
     def put_object(self, *, key: str, body: bytes) -> str:
@@ -84,6 +96,28 @@ class S3Storage:
     def get_object(self, *, key: str) -> bytes:
         response = self._s3().get_object(Bucket=self._bucket, Key=key)
         return response["Body"].read()
+
+    def presigned_put_url(
+        self, *, key: str, expires_in: int = 3600, content_type: str | None = None
+    ) -> str:
+        """Presigned PUT URL for a direct vendor upload, SSE-KMS baked in.
+
+        The uploader must send the matching ``x-amz-server-side-encryption:
+        aws:kms`` header (and the key header when a CMK is set) or S3 rejects the
+        put, so every dropped object stays KMS-encrypted.
+        """
+        params: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "ServerSideEncryption": "aws:kms",
+        }
+        if self._kms_key_id:
+            params["SSEKMSKeyId"] = self._kms_key_id
+        if content_type:
+            params["ContentType"] = content_type
+        return self._s3().generate_presigned_url(
+            "put_object", Params=params, ExpiresIn=expires_in
+        )
 
     def exists(self, *, key: str) -> bool:
         try:

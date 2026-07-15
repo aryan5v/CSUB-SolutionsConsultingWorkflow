@@ -50,6 +50,8 @@ class AwsConfig:
 class AppConfig:
     app_env: str = "development"
     use_local_fakes: bool = True
+    # Base URL for the case-scoped vendor upload portal link.
+    portal_base_url: str = "https://portal.example.edu"
     aws: AwsConfig = AwsConfig()
     model: ModelConfig = ModelConfig()
 
@@ -62,6 +64,7 @@ class AppConfig:
         return cls(
             app_env=app_env,
             use_local_fakes=use_local_fakes,
+            portal_base_url=os.environ.get("PORTAL_BASE_URL", "https://portal.example.edu"),
             aws=AwsConfig(
                 region=os.environ.get("AWS_REGION", "us-west-2"),
                 profile=os.environ.get("AWS_PROFILE") or None,
@@ -71,11 +74,21 @@ class AppConfig:
                 audit_table=os.environ.get("AUDIT_TABLE") or None,
                 kms_key_arn=os.environ.get("DATA_KEY_ARN") or None,
             ),
+            # Env vars override the pinned ModelConfig defaults; an unset or empty
+            # var falls back to the pin rather than clobbering it with None.
             model=ModelConfig(
-                reasoning_model_id=os.environ.get("BEDROCK_REASONING_MODEL_ID") or None,
-                fallback_model_id=os.environ.get("BEDROCK_FALLBACK_MODEL_ID") or None,
-                extraction_model_id=os.environ.get("BEDROCK_EXTRACTION_MODEL_ID") or None,
-                embedding_model_id=os.environ.get("BEDROCK_EMBEDDING_MODEL_ID") or None,
-                guardrail_id=os.environ.get("BEDROCK_GUARDRAIL_ID") or None,
+                reasoning_model_id=os.environ.get("BEDROCK_REASONING_MODEL_ID")
+                or _MODEL_DEFAULTS.reasoning_model_id,
+                fallback_model_id=os.environ.get("BEDROCK_FALLBACK_MODEL_ID")
+                or _MODEL_DEFAULTS.fallback_model_id,
+                extraction_model_id=os.environ.get("BEDROCK_EXTRACTION_MODEL_ID")
+                or _MODEL_DEFAULTS.extraction_model_id,
+                embedding_model_id=os.environ.get("BEDROCK_EMBEDDING_MODEL_ID")
+                or _MODEL_DEFAULTS.embedding_model_id,
+                guardrail_id=os.environ.get("BEDROCK_GUARDRAIL_ID")
+                or _MODEL_DEFAULTS.guardrail_id,
             ),
         )
+
+
+_MODEL_DEFAULTS = ModelConfig()
