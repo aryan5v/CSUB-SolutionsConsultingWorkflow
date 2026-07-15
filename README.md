@@ -91,7 +91,9 @@ the phased Twenty-to-vendor adaptation plan.
    npm --prefix apps/reviewer-web run dev
    ```
 
-   Open `http://127.0.0.1:5173`. The application uses sanitized synthetic data
+   Open `http://127.0.0.1:5173`. One Vite application serves the public landing
+   page at `/`, the public vendor intake at `/intake`, and the authenticated
+   reviewer workspace at `/app`. The application uses sanitized synthetic data
    and clearly labeled simulated ServiceNow operations; it does not require AWS
    credentials for the local flow.
 

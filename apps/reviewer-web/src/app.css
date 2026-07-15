@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme inline {
@@ -63,37 +64,53 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --background: #11141b;
-  --sidebar: #151921;
-  --card: #1a1f29;
-  --popover: #202632;
-  --surface-raised: #202632;
-  --surface-subtle: #171b24;
-  --surface-active: #232b48;
-  --foreground: #f1f4fa;
-  --text-secondary: #b5bed0;
-  --text-muted: #9aa6ba;
-  --text-faint: #919caf;
-  --border: #2b3240;
-  --border-strong: #3a4353;
-  --accent: #83b6f2;
-  --accent-hover: #9ac4f5;
-  --accent-soft: #1d3249;
-  --accent-foreground: #101722;
+  /* Advent of Code terminal theme for the authenticated workspace.
+     Palette: #333 background/sidebar, #444 surfaces/inputs, #F2C464 primary/
+     accent/ring, #6688CC secondary, #555 borders, Geist Mono, zero radius.
+     Note: the brief lists #666 for "muted". #666 text on #333 fails WCAG AA,
+     so #666 is used for faint/decorative tone and body-muted text is lifted to
+     keep the workspace readable. Flagged in handoff. */
+  --background: #333333;
+  --sidebar: #333333;
+  --card: #444444;
+  --popover: #444444;
+  --surface-raised: #444444;
+  --surface-subtle: #3c3c3c;
+  --surface-active: #4d4d4d;
+  --foreground: #eeeeee;
+  --text-secondary: #cccccc;
+  --text-muted: #a0a0a0;
+  --text-faint: #808080;
+  --border: #555555;
+  --border-strong: #666666;
+  --accent: #f2c464;
+  --accent-hover: #f6d281;
+  --accent-soft: #4a4023;
+  --accent-foreground: #333333;
   --brand-yellow: #f2c464;
-  --positive: #73d3ad;
-  --positive-soft: #17392f;
-  --warning: #e6c766;
-  --warning-soft: #3a3119;
-  --critical: #f08b91;
-  --critical-soft: #3f2228;
-  --info: #83b6f2;
-  --info-soft: #1d3249;
-  --purple: #c3a4f6;
-  --purple-soft: #302746;
-  --focus: #aab5ff;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.22);
-  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.26);
+  --positive: #7fc8a0;
+  --positive-soft: #2f3f36;
+  --warning: #f2c464;
+  --warning-soft: #4a4023;
+  --critical: #e08a8a;
+  --critical-soft: #443030;
+  --info: #6688cc;
+  --info-soft: #2f3a4d;
+  --purple: #a892d8;
+  --purple-soft: #38334a;
+  --focus: #f2c464;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.35);
+  --mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --sans: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+/* Advent theme uses flat, zero-radius terminal surfaces. Scoped to the
+   authenticated shell in dark mode so the public landing keeps its own radii.
+   One deliberate override avoids editing dozens of literal radius rules. */
+:root[data-theme="dark"] .app-shell,
+:root[data-theme="dark"] .app-shell *:not(svg):not(svg *) {
+  border-radius: 0 !important;
 }
 
 * { box-sizing: border-box; }
@@ -193,7 +210,10 @@ h3 { margin: 0; font-size: 12px; font-weight: 680; }
 .trust-strip .simulation-label svg { color: var(--info); }
 
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
-.metric-card { display: flex; min-width: 0; min-height: 96px; align-items: center; gap: 13px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-sm); }
+.metric-card { display: flex; flex-direction: column; min-width: 0; min-height: 118px; gap: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-sm); }
+.metric-top { display: flex; min-width: 0; align-items: center; gap: 13px; }
+.metric-spark { height: 34px; margin-top: auto; }
+.metric-spark canvas { image-rendering: pixelated; }
 .metric-icon { display: grid; width: 35px; height: 35px; flex: 0 0 35px; place-items: center; border-radius: 7px; }
 .metric-yellow { background: var(--warning-soft); color: var(--warning); }
 .metric-blue { background: var(--info-soft); color: var(--info); }
@@ -528,7 +548,7 @@ dd { margin: 0; color: var(--text-secondary); font-size: 9px; font-weight: 620; 
   .page-intro { align-items: flex-start; flex-direction: column; }
   .page-actions { width: 100%; justify-content: flex-start; }
   .metric-grid { grid-template-columns: 1fr; }
-  .metric-card { min-height: 83px; }
+  .metric-card { min-height: 106px; }
   .trust-strip span { flex-basis: 100%; justify-content: flex-start; border-right: 0; border-bottom: 1px solid var(--border) !important; }
   .trust-strip span:last-child { border-bottom: 0 !important; }
   .chart-summary { flex-wrap: wrap; }

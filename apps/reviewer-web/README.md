@@ -1,9 +1,26 @@
 # Reviewer web application
 
-React/Vite TypeScript requester and reviewer workspace. It owns presentation,
-browser-side state, accessibility behavior, and the typed client in `src/api.ts`.
-It does not calculate risk tiers, embed AWS credentials, or call ServiceNow
-directly.
+React/Vite TypeScript application that owns every browser surface: the public
+landing page, the public vendor intake, and the authenticated reviewer
+workspace. It owns presentation, browser-side state, accessibility behavior, and
+the typed client in `src/api.ts`. It does not calculate risk tiers, embed AWS
+credentials, or call ServiceNow directly.
+
+## Routes
+
+One Vite build serves all surfaces. `src/main.tsx` selects the surface from the
+pathname without a router dependency:
+
+- `/` public landing (`src/Landing.tsx`), the Paper conveyor marketing page.
+- `/intake` public, file-first vendor intake (`src/PublicIntake.tsx`). Every
+  path is simulated; the typed boundary in that file is a local placeholder for
+  the backend intake contract owned by issue #19.
+- `/app` and `/app/*` the authenticated reviewer workspace (`src/App.tsx`),
+  themed with the Advent of Code dark terminal palette.
+
+Any host serving the production build must fall back to `index.html` for unknown
+paths. Vite's dev server does this by default; configure the CDN or static host
+the same way for deploys.
 
 ## Local development
 
@@ -20,9 +37,10 @@ npm --prefix apps/reviewer-web ci
 npm --prefix apps/reviewer-web run dev
 ```
 
-Vite serves the workspace at `http://127.0.0.1:5173` and proxies `/api` to the
-local backend. Set `VITE_API_BASE_URL` only when intentionally targeting another
-review API. Do not put credentials in frontend environment variables.
+Vite serves the app at `http://127.0.0.1:5173` (landing at `/`, workspace at
+`/app`, intake at `/intake`) and proxies `/api` to the local backend. Set
+`VITE_API_BASE_URL` only when intentionally targeting another review API. Do not
+put credentials in frontend environment variables.
 
 The connected core flow loads the review queue, creates sanitized cases, pauses
 for fuzzy/semantic match confirmation, resumes deterministic analysis, displays

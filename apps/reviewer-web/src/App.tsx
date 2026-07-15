@@ -47,6 +47,10 @@ import { PieChart } from "@/components/dither-kit/pie-chart";
 import { Pie } from "@/components/dither-kit/pie";
 import { DitherButton } from "@/components/dither-kit/button";
 import { DitherGradient } from "@/components/dither-kit/gradient";
+import { Sparkline } from "@/components/dither-kit/sparkline";
+import { RadarChart } from "@/components/dither-kit/radar-chart";
+import { Radar } from "@/components/dither-kit/radar";
+import type { DitherColor } from "@/components/dither-kit/palette";
 import {
   ReviewApiError,
   decisionVersion,
@@ -251,6 +255,41 @@ const evidenceChartConfig = {
   review: { label: "Needs review", color: "orange" },
 } as const;
 
+const radarCoverageData = [
+  { dimension: "Security", covered: 8, required: 9 },
+  { dimension: "Accessibility", covered: 6, required: 9 },
+  { dimension: "Evidence", covered: 7, required: 8 },
+  { dimension: "Policy", covered: 9, required: 9 },
+  { dimension: "Citations", covered: 8, required: 8 },
+];
+
+const radarCoverageConfig = {
+  required: { label: "Required", color: "orange" },
+  covered: { label: "Verified coverage", color: "blue" },
+} as const;
+
+const outcomeChartData = [
+  { day: "Wed", approved: 1, escalated: 1 },
+  { day: "Thu", approved: 2, escalated: 0 },
+  { day: "Fri", approved: 2, escalated: 1 },
+  { day: "Sat", approved: 1, escalated: 0 },
+  { day: "Sun", approved: 0, escalated: 0 },
+  { day: "Mon", approved: 3, escalated: 1 },
+  { day: "Tue", approved: 2, escalated: 1 },
+];
+
+const outcomeChartConfig = {
+  approved: { label: "Approved by reviewer", color: "green" },
+  escalated: { label: "Safely escalated", color: "red" },
+} as const;
+
+const metricTrends: Record<string, { data: number[]; color: DitherColor }> = {
+  attention: { data: [1, 2, 1, 3, 2, 2, 2], color: "orange" },
+  analysis: { data: [0, 1, 2, 1, 1, 1, 1], color: "blue" },
+  completed: { data: [0, 0, 1, 0, 1, 1, 1], color: "green" },
+  escalations: { data: [1, 0, 1, 0, 0, 1, 1], color: "red" },
+};
+
 type NavItem = { page: Page; label: string; icon: typeof LayoutDashboard; count?: number; queueMode?: QueueMode };
 const navGroups: Array<{ label: string; items: NavItem[] }> = [
   { label: "Workspace", items: [
@@ -336,10 +375,15 @@ function Button({ children, variant = "secondary", icon, className = "", ...prop
   return <button className={`button button-${variant} ${className}`} {...props}>{icon}{children}</button>;
 }
 
-function MetricCard({ label, value, detail, icon, tone }: { label: string; value: string; detail: string; icon: ReactNode; tone: string }) {
+function MetricCard({ label, value, detail, icon, tone, trend }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; trend: { data: number[]; color: DitherColor } }) {
   return <article className="metric-card">
-    <div className={`metric-icon metric-${tone}`}>{icon}</div>
-    <div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+    <div className="metric-top">
+      <div className={`metric-icon metric-${tone}`}>{icon}</div>
+      <div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+    </div>
+    <div className="metric-spark" aria-hidden="true">
+      <Sparkline data={trend.data} color={trend.color} variant="gradient" bloom="low" />
+    </div>
   </article>;
 }
 
@@ -377,10 +421,10 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
     </section>
 
     <section className="metric-grid" aria-label="Review queue summary">
-      <MetricCard label="Needs your attention" value="2" detail="1 decision · 1 evidence gap" icon={<Inbox size={18} />} tone="yellow" />
-      <MetricCard label="In analysis" value="1" detail="Specialists running in parallel" icon={<Activity size={18} />} tone="blue" />
-      <MetricCard label="Completed today" value="1" detail="Human-reviewed outcome" icon={<CheckCircle2 size={18} />} tone="green" />
-      <MetricCard label="Safe escalations" value="1" detail="No automatic fast-path" icon={<AlertTriangle size={18} />} tone="red" />
+      <MetricCard label="Needs your attention" value="2" detail="1 decision · 1 evidence gap" icon={<Inbox size={18} />} tone="yellow" trend={metricTrends.attention} />
+      <MetricCard label="In analysis" value="1" detail="Specialists running in parallel" icon={<Activity size={18} />} tone="blue" trend={metricTrends.analysis} />
+      <MetricCard label="Completed today" value="1" detail="Human-reviewed outcome" icon={<CheckCircle2 size={18} />} tone="green" trend={metricTrends.completed} />
+      <MetricCard label="Safe escalations" value="1" detail="No automatic fast-path" icon={<AlertTriangle size={18} />} tone="red" trend={metricTrends.escalations} />
     </section>
 
     <div className="dashboard-grid">
@@ -434,6 +478,33 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
             <Tooltip labelKey="scope" />
             <Bar dataKey="verified" variant="dotted" />
             <Bar dataKey="review" variant="hatched" />
+          </BarChart>
+        </div>
+      </section>
+    </div>
+
+    <div className="dashboard-insight-grid">
+      <section className="panel dither-insight-card">
+        <div className="panel-heading"><div><p className="eyebrow">Coverage</p><h2>Evidence dimensions</h2><p>Verified coverage against required documents across the sanitized local set.</p></div><span className="ascii-note">DEMO DATA</span></div>
+        <div className="dither-small-chart" aria-label="Radar chart comparing required evidence and verified coverage across security, accessibility, evidence, policy, and citations">
+          <RadarChart data={radarCoverageData} config={radarCoverageConfig} nameKey="dimension" bloom="low" animationDuration={700}>
+            <Legend isClickable align="right" />
+            <Tooltip />
+            <Radar dataKey="required" variant="dotted" />
+            <Radar dataKey="covered" variant="gradient" />
+          </RadarChart>
+        </div>
+      </section>
+      <section className="panel dither-insight-card">
+        <div className="panel-heading"><div><p className="eyebrow">Last 7 days</p><h2>Decision outcomes</h2><p>Local demo volume by outcome, not a performance score.</p></div><span className="ascii-note">DEMO DATA</span></div>
+        <div className="dither-small-chart" aria-label="Bar chart of approved, changes requested, and escalated outcomes over the last seven days">
+          <BarChart data={outcomeChartData} config={outcomeChartConfig} bloom="low" animationDuration={700}>
+            <XAxis dataKey="day" />
+            <YAxis />
+            <Legend isClickable />
+            <Tooltip labelKey="day" />
+            <Bar dataKey="approved" variant="dotted" />
+            <Bar dataKey="escalated" variant="hatched" />
           </BarChart>
         </div>
       </section>
@@ -526,9 +597,9 @@ function ReviewOverview({ state, onOpenEvidence, matchConfirmed, onConfirmMatch 
       </article>
       <article className="content-card">
         <div className="card-heading"><div><p className="eyebrow">02 / Approved software</p><h2>Candidate match</h2></div><StatusBadge>{matchConfirmed ? "Verified" : "Review needed"}</StatusBadge></div>
-        <div className="match-record"><Database size={19} /><span><strong>{candidate?.canonical_name ?? "No approved-software candidate"}</strong><small>{source ? `${source.filename ?? source.source_id}${source.row ? ` · Row ${source.row}` : ""}` : "Structured lookup completed"}</small></span><b>{candidate ? `${Math.round(candidate.score * 100)}%` : "—"}</b></div>
+        <div className="match-record"><Database size={19} /><span><strong>{candidate?.canonical_name ?? "No approved-software candidate"}</strong><small>{source ? `${source.filename ?? source.source_id}${source.row ? ` · Row ${source.row}` : ""}` : "Structured lookup completed"}</small></span><b>{candidate ? `${Math.round(candidate.score * 100)}%` : "-"}</b></div>
         <dl className="compact-details"><div><dt>Method</dt><dd>{matchMethod}</dd></div><div><dt>Why review?</dt><dd>{candidate?.requires_confirmation ? "Fuzzy or semantic candidates require a person" : "No non-exact confirmation required"}</dd></div></dl>
-        <div className="match-confirm-row"><div className="boundary-note"><UserCheck size={16} /><span>{matchConfirmed ? "Alex Reviewer confirmed this candidate for the current request." : "A reviewer—not a model—must confirm this candidate."}</span></div><Button variant={matchConfirmed ? "secondary" : "primary"} disabled={matchConfirmed} onClick={onConfirmMatch} icon={matchConfirmed ? <Check size={14} /> : <UserCheck size={14} />}>{matchConfirmed ? "Candidate confirmed" : "Confirm candidate"}</Button></div>
+        <div className="match-confirm-row"><div className="boundary-note"><UserCheck size={16} /><span>{matchConfirmed ? "Alex Reviewer confirmed this candidate for the current request." : "A reviewer, not a model, must confirm this candidate."}</span></div><Button variant={matchConfirmed ? "secondary" : "primary"} disabled={matchConfirmed} onClick={onConfirmMatch} icon={matchConfirmed ? <Check size={14} /> : <UserCheck size={14} />}>{matchConfirmed ? "Candidate confirmed" : "Confirm candidate"}</Button></div>
       </article>
     </section>
 
@@ -576,9 +647,9 @@ function PacketEditor({ draft, onDraftChange, onSave }: { draft: string; onDraft
 
 function WritebackPreview({ decision, written, preview, onWrite }: { decision: Decision; written: boolean; preview: WritePreview | null; onWrite: () => void }) {
   const unlocked = decision === "Approved";
-  const before = preview?.before ?? { state: "Under review", u_review_outcome: "—", work_notes: "Review in progress", attachment: "—" };
+  const before = preview?.before ?? { state: "Under review", u_review_outcome: "-", work_notes: "Review in progress", attachment: "-" };
   const after = preview?.after ?? { state: "Ready for committee", u_review_outcome: "Medium-risk packet drafted", work_notes: "Human-reviewed decision", attachment: "Pending confirmation" };
-  const rows = (values: Record<string, unknown>, changed: boolean) => Object.entries(values).slice(0, 5).map(([field, value]) => <div key={field}><dt>{field.replace(/^u_/, "").replace(/_/g, " ")}</dt><dd>{changed ? <span className="diff-value">{String(value || "—")}</span> : String(value || "—")}</dd></div>);
+  const rows = (values: Record<string, unknown>, changed: boolean) => Object.entries(values).slice(0, 5).map(([field, value]) => <div key={field}><dt>{field.replace(/^u_/, "").replace(/_/g, " ")}</dt><dd>{changed ? <span className="diff-value">{String(value || "-")}</span> : String(value || "-")}</dd></div>);
   return <section className="writeback-layout">
     <div className="simulation-banner"><CircleDashed size={18} /><span><strong>Simulated ServiceNow</strong>This preview never connects to a live campus system.</span></div>
     <div className="before-after-grid">
@@ -750,7 +821,7 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
           <label className="full-field"><span>Intended use</span><textarea name="use_case" required placeholder="What will the product be used for?" /></label>
           <label><span>Expected users</span><input name="expected_users" required type="number" min="0" defaultValue="1" /></label>
           <label><span>Estimated cost (USD)</span><input name="estimated_cost_usd" required type="number" min="0" step="0.01" defaultValue="0" /></label>
-          <label><span>Data classification</span><select name="data_classification" required defaultValue=""><option value="" disabled>Select classification</option><option value="public">Public</option><option value="internal">Internal</option><option value="confidential">Confidential</option><option value="level1">Level 1</option><option value="level2">Level 2</option><option value="unknown">Unknown — escalate</option></select></label>
+          <label><span>Data classification</span><select name="data_classification" required defaultValue=""><option value="" disabled>Select classification</option><option value="public">Public</option><option value="internal">Internal</option><option value="confidential">Confidential</option><option value="level1">Level 1</option><option value="level2">Level 2</option><option value="unknown">Unknown, escalate</option></select></label>
           <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" /></label>
           <label className="full-field"><span>Integrations (comma separated)</span><input name="integrations" placeholder="Canvas, Microsoft 365" /></label>
           <label className="full-field"><span>Accessibility context</span><textarea name="accessibility_context" placeholder="Classroom, public, assistive technology, or VPAT context" /></label>
@@ -768,7 +839,7 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [queueMode, setQueueMode] = useState<QueueMode>("inbox");
-  const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("review-theme") === "dark" ? "dark" : "light");
+  const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("review-theme") === "light" ? "light" : "dark");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [cases, setCases] = useState<ReviewCase[]>(reviewCases);
   const [caseStates, setCaseStates] = useState<Record<string, ReviewState>>({});
