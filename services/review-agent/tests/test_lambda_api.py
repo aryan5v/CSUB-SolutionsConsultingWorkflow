@@ -4,7 +4,9 @@ import contextlib
 import hashlib
 import io
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import _bootstrap  # noqa: F401
 
@@ -28,7 +30,7 @@ class FakeTable:
         item = self.items.get(self._key(Key))
         return {"Item": json.loads(json.dumps(item))} if item is not None else {}
 
-    def put_item(self, *, Item: dict) -> None:
+    def put_item(self, *, Item: dict, **_kwargs) -> None:
         self.items[self._key(Item)] = json.loads(json.dumps(Item))
 
     def delete_item(self, *, Key: dict) -> None:
@@ -195,6 +197,90 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(state["case_id"], case_id)
         self.assertEqual(state["case_input"]["product_name"], "Synthetic Calendar")
 
+    def test_fresh_authenticated_records_issue_open_and_revoke_across_cold_start(self) -> None:
+        _, vendor = self.call(
+            "POST",
+            "/vendors",
+            body={"name": "Disposable Canary Vendor", "official_domain": "canary.example"},
+        )
+        _, product = self.call(
+            "POST",
+            "/vendor-products",
+            body={"vendor_id": vendor["vendor_id"], "name": "Disposable Canary Product"},
+        )
+        _, contact = self.call(
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Sanitized Contact",
+                "email": "vendor@example.edu",
+            },
+        )
+        intake = {
+            "product_name": product["name"],
+            "vendor_name": vendor["name"],
+            "requester": {
+                "name": "Sanitized Requester",
+                "email": "requester@example.edu",
+                "department": "Library",
+            },
+            "use_case": "Disposable invitation reliability canary.",
+            "expected_users": 1,
+            "platform": ["web"],
+            "data_classification": "public",
+            "estimated_cost_usd": 0,
+            "integrations": [],
+            "uses_sso": False,
+            "uses_ai": False,
+            "classroom_or_public_use": False,
+        }
+        created_response, created = self.call("POST", "/cases", body=intake)
+        self.assertEqual(created_response["statusCode"], 201)
+        issue_response, issued = self.call(
+            "POST",
+            f"/cases/{created['case_id']}/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        self.assertEqual(issue_response["statusCode"], 201)
+        token = issued["token"]
+        self.assertNotIn(token, json.dumps(self.store.load_snapshot("csub-demo")))
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        opened = cold(
+            self.event(
+                "POST",
+                "/vendor/invites/current/open",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+                body={},
+            ),
+            None,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(json.loads(opened["body"])["invite"]["status"], "opened")
+
+        revoked_response, _ = self.call(
+            "POST", f"/invites/{issued['invite']['invite_id']}/revoke", body={}
+        )
+        self.assertEqual(revoked_response["statusCode"], 200)
+        terminal = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        terminal_payload = json.loads(terminal["body"])
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(terminal_payload["error"]["code"], "invite_revoked")
+        self.assertEqual(
+            terminal_payload["error"]["correlation_id"],
+            terminal["headers"]["X-Correlation-Id"],
+        )
+
     def _issue_invite(self):
         _, vendors = self.call("GET", "/vendors")
         vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
@@ -256,6 +342,104 @@ class LambdaApiTests(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertEqual(response["statusCode"], 410)
         self.assertEqual(payload["error"]["code"], "invite_revoked")
+
+    def test_concurrent_rotation_persists_exactly_one_replacement(self) -> None:
+        class RacingStore(InMemoryWorkspaceStore):
+            barrier: threading.Barrier | None = None
+
+            def load_snapshot(self, workspace_id: str):
+                value = super().load_snapshot(workspace_id)
+                barrier = self.barrier
+                if barrier is not None:
+                    barrier.wait(timeout=5)
+                return value
+
+        store = RacingStore()
+        seed_workspace(store)
+        handler_one = create_handler(store, allowed_origins=[self.origin])
+        handler_two = create_handler(store, allowed_origins=[self.origin])
+
+        def call(handler, method: str, path: str, *, body=None, headers=None, authenticated=True):
+            response = handler(
+                self.event(
+                    method,
+                    path,
+                    body=body,
+                    headers=headers,
+                    authenticated=authenticated,
+                ),
+                None,
+            )
+            return response, json.loads(response["body"]) if response["body"] else None
+
+        _, vendors = call(handler_one, "GET", "/vendors")
+        vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
+        _, contact = call(
+            handler_one,
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Concurrent Contact",
+                "email": "concurrent@example.edu",
+            },
+        )
+        _, issued = call(
+            handler_one,
+            "POST",
+            "/cases/TR-260714-014/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        source_token = issued["token"]
+        invite_id = issued["invite"]["invite_id"]
+        store.barrier = threading.Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    call,
+                    handler,
+                    "POST",
+                    f"/invites/{invite_id}/resend",
+                    body={},
+                )
+                for handler in (handler_one, handler_two)
+            ]
+            results = [future.result() for future in futures]
+        store.barrier = None
+
+        self.assertEqual(sorted(response[0]["statusCode"] for response in results), [200, 409])
+        conflict = next(payload for response, payload in results if response["statusCode"] == 409)
+        self.assertEqual(conflict["error"]["code"], "concurrent_update")
+        winner = next(payload for response, payload in results if response["statusCode"] == 200)
+        replacement_token = winner["token"]
+
+        terminal, payload = call(
+            handler_one,
+            "GET",
+            "/vendor/invites/current",
+            headers={"authorization": f"Bearer {source_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(payload["error"]["code"], "invite_revoked")
+        opened, payload = call(
+            handler_two,
+            "POST",
+            "/vendor/invites/current/open",
+            body={},
+            headers={"authorization": f"Bearer {replacement_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(payload["invite"]["status"], "opened")
+        snapshot = store.load_snapshot("csub-demo")
+        replacements = [
+            invite
+            for invite in snapshot["repository"]["records"]["invite"]
+            if invite.get("replaced_invite_id") == invite_id
+        ]
+        self.assertEqual(len(replacements), 1)
 
     def test_vendor_submission_and_review_runs_are_immutable_across_cold_starts(self) -> None:
         issued = self._issue_invite()

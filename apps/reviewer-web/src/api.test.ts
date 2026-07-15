@@ -9,6 +9,7 @@ import {
   queueItemToSummary,
   requiresReviewerConfirmation,
   suppressResolvedQuestions,
+  vendorInviteUrl,
   type QueueItem,
   type ReviewState,
   type VendorQuestion,
@@ -184,7 +185,7 @@ describe("review API client", () => {
       authProvider: authProvider(),
       fetchImpl: vi.fn().mockResolvedValue(
         jsonResponse(
-          { error: { code: "approval_required", message: "approval required" } },
+          { error: { code: "approval_required", message: "approval required", correlation_id: "request-43" } },
           403,
         ),
       ),
@@ -195,6 +196,7 @@ describe("review API client", () => {
         status: 403,
         code: "approval_required",
         message: "approval required",
+        correlationId: "request-43",
       }),
     );
   });
@@ -224,6 +226,33 @@ describe("vendor invitation security", () => {
         storage,
       ),
     ).toBe("opaque+value");
+  });
+
+  it("builds complete links with tokens only in the fragment", () => {
+    const url = vendorInviteUrl("https://demo.example/", "opaque+/value");
+    expect(url).toBe("https://demo.example/intake#token=opaque%2B%2Fvalue");
+    expect(new URL(url).search).toBe("");
+  });
+
+  it("collapses duplicate issue clicks and calls the authenticated rotation endpoint", async () => {
+    const issued = {
+      invite: { workspace_id: "csub-demo", invite_id: "invite-1", case_id: "case-1", product_id: "product-1", contact_id: "contact-1", issued_at: "2026-07-15T00:00:00Z", expires_at: "2026-07-22T00:00:00Z", status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null },
+      token: "opaque-token-value-with-at-least-32-characters",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(issued));
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const [first, duplicate] = await Promise.all([
+      client.issueInvite("case-1", "contact-1"),
+      client.issueInvite("case-1", "contact-1"),
+    ]);
+    expect(first).toEqual(duplicate);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await client.rotateInvite("invite-1");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/invites/invite-1/resend");
+    expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("Authorization")).toBe("Bearer reviewer-jwt");
   });
 
   it("uses a bearer header and never includes the raw token in the API path", async () => {

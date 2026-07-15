@@ -312,12 +312,14 @@ export type ReviewerRecordContext = {
 export class ReviewApiError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly correlationId: string | null;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, correlationId: string | null = null) {
     super(message);
     this.name = "ReviewApiError";
     this.status = status;
     this.code = code;
+    this.correlationId = correlationId;
   }
 }
 
@@ -330,6 +332,11 @@ function configuredMode(): ApiMode {
 
 function authorization(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}` };
+}
+
+export function vendorInviteUrl(origin: string, token: string): string {
+  const base = origin.replace(/\/$/, "");
+  return `${base}/intake#token=${encodeURIComponent(token)}`;
 }
 
 async function sha256(file: File): Promise<string> {
@@ -405,6 +412,18 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     };
   }
 
+  const inFlight = new Map<string, Promise<unknown>>();
+
+  function singleFlight<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const current = inFlight.get(key) as Promise<T> | undefined;
+    if (current) return current;
+    const started = operation().finally(() => {
+      if (inFlight.get(key) === started) inFlight.delete(key);
+    });
+    inFlight.set(key, started);
+    return started;
+  }
+
   async function request<T>(path: string, init?: RequestInit, audience: "reviewer" | "vendor" = "reviewer"): Promise<T> {
     if (mode === "fixture") {
       throw new ReviewApiError(400, "fixture_network_blocked", "Fixture mode cannot call the live API.");
@@ -414,10 +433,11 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     });
+    if (!headers.has("X-Correlation-Id")) headers.set("X-Correlation-Id", crypto.randomUUID());
     if (audience === "reviewer") {
       const accessToken = authProvider.getAccessToken();
       if (!accessToken) {
-        throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.");
+        throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.", headers.get("X-Correlation-Id"));
       }
       headers.set("Authorization", `Bearer ${accessToken}`);
     }
@@ -425,10 +445,11 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...init,
       headers,
     });
-    const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string } };
+    const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string; correlation_id?: string } };
     if (!response.ok) {
       if (audience === "reviewer" && response.status === 401) authProvider.handleUnauthorized();
-      throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`);
+      const correlationId = payload?.error?.correlation_id || response.headers.get("X-Correlation-Id") || headers.get("X-Correlation-Id");
+      throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`, correlationId);
     }
     return payload as T;
   }
@@ -501,14 +522,45 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/vendor-contacts", { method: "POST", body: JSON.stringify(input) });
     },
-    async issueInvite(caseId: string, contactId: string): Promise<{ invite: InviteProjection; token: string }> {
+    issueInvite(caseId: string, contactId: string): Promise<{ invite: InviteProjection; token: string }> {
+      return singleFlight(`issue:${caseId}:${contactId}`, async () => {
+        if (mode === "fixture") {
+          const now = new Date();
+          const invite: InviteProjection = { workspace_id: fixture.workspace_id, invite_id: fixtureId("invite"), case_id: caseId, product_id: fixture.products[0]?.product_id ?? "product-fixture", contact_id: contactId, issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null };
+          fixture.invites.push(invite);
+          return { invite, token: fixtureId("opaque") };
+        }
+        return request(`/cases/${encodeURIComponent(caseId)}/invites`, { method: "POST", body: JSON.stringify({ contact_id: contactId }) });
+      });
+    },
+    rotateInvite(inviteId: string): Promise<{ invite: InviteProjection; token: string }> {
+      return singleFlight(`rotate:${inviteId}`, async () => {
+        if (mode === "fixture") {
+          const source = fixture.invites.find((item) => item.invite_id === inviteId);
+          if (!source) throw new ReviewApiError(404, "invite_not_found", "Invitation was not found.");
+          const now = new Date();
+          if (source.status !== "submitted" && source.status !== "expired") {
+            source.status = "revoked";
+            source.revoked_at = now.toISOString();
+          }
+          const invite: InviteProjection = { ...source, invite_id: fixtureId("invite"), issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: source.invite_id };
+          fixture.invites.push(invite);
+          return { invite, token: fixtureId("opaque") };
+        }
+        return request(`/invites/${encodeURIComponent(inviteId)}/resend`, { method: "POST", body: "{}" });
+      });
+    },
+    async revokeInvite(inviteId: string): Promise<InviteProjection> {
       if (mode === "fixture") {
-        const now = new Date();
-        const invite: InviteProjection = { workspace_id: fixture.workspace_id, invite_id: fixtureId("invite"), case_id: caseId, product_id: fixture.products[0]?.product_id ?? "product-fixture", contact_id: contactId, issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null };
-        fixture.invites.push(invite);
-        return { invite, token: fixtureId("opaque") };
+        const invite = fixture.invites.find((item) => item.invite_id === inviteId);
+        if (!invite) throw new ReviewApiError(404, "invite_not_found", "Invitation was not found.");
+        if (invite.status !== "submitted" && invite.status !== "expired") {
+          invite.status = "revoked";
+          invite.revoked_at = new Date().toISOString();
+        }
+        return { ...invite };
       }
-      return request(`/cases/${encodeURIComponent(caseId)}/invites`, { method: "POST", body: JSON.stringify({ contact_id: contactId }) });
+      return request(`/invites/${encodeURIComponent(inviteId)}/revoke`, { method: "POST", body: "{}" });
     },
     async listInvites(caseId: string): Promise<InviteProjection[]> {
       if (mode === "fixture") return fixture.invites.filter((item) => item.case_id === caseId);

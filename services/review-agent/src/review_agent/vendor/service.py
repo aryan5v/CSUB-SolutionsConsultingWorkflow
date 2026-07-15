@@ -200,6 +200,20 @@ class VendorBackend:
         self._put("case", case.case_id, case)
         return case
 
+    def _expire_invite_if_needed(self, invite: VendorInvite) -> VendorInvite:
+        if invite.status in {
+            InviteStatus.EXPIRED,
+            InviteStatus.REVOKED,
+            InviteStatus.SUBMITTED,
+        }:
+            return invite
+        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        if self._now_datetime() < expires:
+            return invite
+        expired = replace(invite, status=InviteStatus.EXPIRED)
+        self._put("invite", expired.invite_id, expired)
+        return expired
+
     def issue_invite(self, case_id: str, contact_id: str) -> dict[str, Any]:
         case = self._require("case", case_id, VendorCase)
         contact = self._require("contact", contact_id, VendorContact)
@@ -208,6 +222,17 @@ class VendorBackend:
             raise VendorBackendError(
                 "contact_product_mismatch", "contact and product must belong to the same vendor"
             )
+        for existing in self.list_invites(case_id):
+            if existing.contact_id == contact_id and existing.status in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                raise VendorBackendError(
+                    "active_invite_exists",
+                    "an active invitation already exists; rotate or revoke it before issuing another",
+                    status=409,
+                )
         token = self._token_factory()
         if not isinstance(token, str) or len(token) < 32:
             raise VendorBackendError("weak_token", "token factory must provide at least 32 characters")
@@ -237,15 +262,30 @@ class VendorBackend:
         return {"invite": invite.to_reviewer_dict(), "token": token}
 
     def resend_invite(self, invite_id: str) -> dict[str, Any]:
-        old = self._require("invite", invite_id, VendorInvite)
-        if old.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be resent", status=409)
-        now = self._now()
-        self._put(
-            "invite",
-            old.invite_id,
-            replace(old, status=InviteStatus.REVOKED, revoked_at=now),
+        old = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
         )
+        replacement = next(
+            (
+                invite
+                for invite in self._list("invite", VendorInvite)
+                if invite.replaced_invite_id == old.invite_id
+            ),
+            None,
+        )
+        if replacement is not None:
+            raise VendorBackendError(
+                "invite_already_rotated",
+                "invitation was already rotated; use the latest invitation",
+                status=409,
+            )
+        if old.status in {
+            InviteStatus.ISSUED,
+            InviteStatus.OPENED,
+            InviteStatus.IN_PROGRESS,
+        }:
+            old = replace(old, status=InviteStatus.REVOKED, revoked_at=self._now())
+            self._put("invite", old.invite_id, old)
         issued = self.issue_invite(old.case_id, old.contact_id)
         replacement = self._require(
             "invite", issued["invite"]["invite_id"], VendorInvite
@@ -253,21 +293,31 @@ class VendorBackend:
         replacement = replace(replacement, replaced_invite_id=old.invite_id)
         self._put("invite", replacement.invite_id, replacement)
         issued["invite"] = replacement.to_reviewer_dict()
-        self._event("invite.resent", "invite", replacement.invite_id, case_id=old.case_id)
+        self._event("invite.rotated", "invite", replacement.invite_id, case_id=old.case_id)
         return issued
 
     def revoke_invite(self, invite_id: str) -> dict[str, Any]:
-        invite = self._require("invite", invite_id, VendorInvite)
+        invite = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
+        )
         if invite.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be revoked", status=409)
+            raise VendorBackendError(
+                "already_submitted", "submitted invitation cannot be revoked", status=409
+            )
+        if invite.status in {InviteStatus.REVOKED, InviteStatus.EXPIRED}:
+            return invite.to_reviewer_dict()
         revoked = replace(invite, status=InviteStatus.REVOKED, revoked_at=self._now())
         self._put("invite", invite_id, revoked)
         self._event("invite.revoked", "invite", invite_id, case_id=invite.case_id)
         return revoked.to_reviewer_dict()
 
     def list_invites(self, case_id: str | None = None) -> list[VendorInvite]:
-        invites = self._list("invite", VendorInvite)
-        return [invite for invite in invites if case_id is None or invite.case_id == case_id]
+        invites = [
+            self._expire_invite_if_needed(invite)
+            for invite in self._list("invite", VendorInvite)
+            if case_id is None or invite.case_id == case_id
+        ]
+        return sorted(invites, key=lambda invite: (invite.issued_at, invite.invite_id))
 
     def resolve_invite(self, token: str, *, mark_open: bool = False) -> dict[str, Any]:
         invite = self._valid_invite(token)
@@ -858,15 +908,13 @@ class VendorBackend:
         )
         if invite is None:
             raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self._expire_invite_if_needed(invite)
         if invite.status is InviteStatus.REVOKED:
             raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        if invite.status is InviteStatus.EXPIRED:
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         if invite.status is InviteStatus.SUBMITTED:
             raise VendorBackendError("invite_submitted", "invitation was already submitted", status=409)
-        expires = datetime.datetime.fromisoformat(invite.expires_at)
-        if self._now_datetime() >= expires:
-            expired = replace(invite, status=InviteStatus.EXPIRED)
-            self._put("invite", invite.invite_id, expired)
-            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         return invite
 
     def _draft_submission(self, invite: VendorInvite) -> Submission:

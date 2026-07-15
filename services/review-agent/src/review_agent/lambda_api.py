@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -110,10 +111,25 @@ _PUBLIC_ROUTES = {
 }
 
 
+class SnapshotConflictError(LocalApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            409,
+            "concurrent_update",
+            "the workspace changed during this request; refresh and retry",
+        )
+
+
 class WorkspaceStore(Protocol):
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None: ...
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None: ...
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None: ...
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]: ...
 
@@ -126,13 +142,28 @@ class InMemoryWorkspaceStore:
     def __init__(self) -> None:
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._catalogs: dict[str, list[dict[str, Any]]] = {}
+        self._lock = threading.RLock()
 
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
-        value = self._snapshots.get(workspace_id)
-        return _json_clone(value) if value is not None else None
+        with self._lock:
+            value = self._snapshots.get(workspace_id)
+            return _json_clone(value) if value is not None else None
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
-        self._snapshots[workspace_id] = _json_clone(snapshot)
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
+        with self._lock:
+            current = self._snapshots.get(workspace_id)
+            current_revision = (
+                int(current.get("persistence_revision", 0)) if current is not None else None
+            )
+            if current_revision != expected_revision:
+                raise SnapshotConflictError()
+            self._snapshots[workspace_id] = _json_clone(snapshot)
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         return _json_clone(self._catalogs.get(workspace_id, []))
@@ -153,6 +184,7 @@ class FileWorkspaceStore:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path).expanduser()
+        self._lock = threading.RLock()
 
     def _read(self) -> dict[str, Any]:
         if not self._path.is_file():
@@ -169,13 +201,27 @@ class FileWorkspaceStore:
         self._path.write_text(_json_dumps(data), encoding="utf-8")
 
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
-        value = self._read()["snapshots"].get(workspace_id)
-        return _json_clone(value) if value is not None else None
+        with self._lock:
+            value = self._read()["snapshots"].get(workspace_id)
+            return _json_clone(value) if value is not None else None
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
-        data = self._read()
-        data["snapshots"][workspace_id] = _json_clone(snapshot)
-        self._write(data)
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
+        with self._lock:
+            data = self._read()
+            current = data["snapshots"].get(workspace_id)
+            current_revision = (
+                int(current.get("persistence_revision", 0)) if current is not None else None
+            )
+            if current_revision != expected_revision:
+                raise SnapshotConflictError()
+            data["snapshots"][workspace_id] = _json_clone(snapshot)
+            self._write(data)
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         return _json_clone(self._read()["catalogs"].get(workspace_id, []))
@@ -292,20 +338,51 @@ class DynamoWorkspaceStore:
             raise RuntimeError("workspace snapshot is malformed")
         return _decimal_to_native(value)
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         encoded = _json_dumps(snapshot)
         if len(encoded.encode("utf-8")) >= 350_000:
             raise RuntimeError("workspace snapshot exceeds the safe DynamoDB item limit")
-        self._tables["cases"].put_item(
-            Item={
-                "case_id": _physical(workspace_id, "snapshot"),
-                "workspace_id": workspace_id,
-                "record_type": "workspace_snapshot",
-                "schema_version": _SCHEMA_VERSION,
-                "snapshot": encoded,
-                "updated_at": _utc_now(),
-            }
-        )
+        revision = int(snapshot.get("persistence_revision", 0))
+        item = {
+            "case_id": _physical(workspace_id, "snapshot"),
+            "workspace_id": workspace_id,
+            "record_type": "workspace_snapshot",
+            "schema_version": _SCHEMA_VERSION,
+            "revision": revision,
+            "snapshot": encoded,
+            "updated_at": _utc_now(),
+        }
+        options: dict[str, Any] = {}
+        try:
+            from boto3.dynamodb.conditions import Attr
+        except ModuleNotFoundError:
+            pass
+        else:
+            if expected_revision is None:
+                options["ConditionExpression"] = Attr("case_id").not_exists()
+            elif expected_revision == 0:
+                options["ConditionExpression"] = Attr("revision").not_exists() | Attr(
+                    "revision"
+                ).eq(0)
+            else:
+                options["ConditionExpression"] = Attr("revision").eq(expected_revision)
+        table = self._tables["cases"]
+        try:
+            table.put_item(Item=item, **options)
+        except Exception as error:
+            meta = getattr(table, "meta", None)
+            client = getattr(meta, "client", None)
+            exceptions = getattr(client, "exceptions", None)
+            conflict_type = getattr(exceptions, "ConditionalCheckFailedException", None)
+            if conflict_type is not None and isinstance(error, conflict_type):
+                raise SnapshotConflictError() from error
+            raise
         self._write_projections(workspace_id, snapshot)
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
@@ -541,7 +618,16 @@ def seed_workspace(
         repository.put("catalog", entry.record_id, entry, workspace_id=workspace_id)
     store.replace_catalog(workspace_id, [entry.to_dict() for entry in entries])
     snapshot = snapshot_api(api, workspace_id=workspace_id)
-    store.save_snapshot(workspace_id, snapshot)
+    current = store.load_snapshot(workspace_id)
+    expected_revision = (
+        int(current.get("persistence_revision", 0)) if current is not None else None
+    )
+    snapshot["persistence_revision"] = (expected_revision or 0) + 1
+    store.save_snapshot(
+        workspace_id,
+        snapshot,
+        expected_revision=expected_revision,
+    )
     return {
         "workspace_id": workspace_id,
         "seeded_cases": len(api._cases),
@@ -712,6 +798,7 @@ def create_handler(
             snapshot = store.load_snapshot(workspace_id)
             if snapshot is None:
                 raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
+            revision = int(snapshot.get("persistence_revision", 0))
             api = restore_api(snapshot, store.load_catalog(workspace_id), workspace_id=workspace_id)
             result, status, mutated = _dispatch(
                 api,
@@ -723,7 +810,13 @@ def create_handler(
                 reviewer_id=reviewer_id,
             )
             if mutated:
-                store.save_snapshot(workspace_id, snapshot_api(api, workspace_id=workspace_id))
+                next_snapshot = snapshot_api(api, workspace_id=workspace_id)
+                next_snapshot["persistence_revision"] = revision + 1
+                store.save_snapshot(
+                    workspace_id,
+                    next_snapshot,
+                    expected_revision=revision,
+                )
             _log(correlation_id, "request.completed", status)
             return _response(
                 status,
@@ -736,7 +829,13 @@ def create_handler(
             _log(correlation_id, "request.rejected", error.status)
             return _response(
                 error.status,
-                {"error": {"code": error.code, "message": str(error)}},
+                {
+                    "error": {
+                        "code": error.code,
+                        "message": str(error),
+                        "correlation_id": correlation_id,
+                    }
+                },
                 correlation_id,
                 origin=_header(event, "origin"),
                 allowed_origins=origins,
@@ -745,7 +844,13 @@ def create_handler(
             _log(correlation_id, "request.failed", 500)
             return _response(
                 500,
-                {"error": {"code": "internal_error", "message": "request failed"}},
+                {
+                    "error": {
+                        "code": "internal_error",
+                        "message": "request failed",
+                        "correlation_id": correlation_id,
+                    }
+                },
                 correlation_id,
                 origin=_header(event, "origin"),
                 allowed_origins=origins,
@@ -905,7 +1010,7 @@ def _dispatch_case(
     if method == "POST" and suffix == "invites":
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
-        return api.list_case_invites(case_id), 200, False
+        return api.list_case_invites(case_id), 200, True
     if method == "POST" and suffix == "review-runs":
         return api.create_review_run(case_id, body), 201, True
     if method == "GET" and suffix == "review-runs":
