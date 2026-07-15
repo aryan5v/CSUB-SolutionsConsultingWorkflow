@@ -7,10 +7,15 @@
     "infra": "bin/app.ts"
   },
   "scripts": {
+    "auth:build": "npm --prefix ../services/auth-api ci && npm --prefix ../services/auth-api run build",
+    "presynth": "npm run auth:build",
     "synth": "cdk synth",
+    "prediff": "npm run auth:build",
     "diff": "cdk diff",
+    "predeploy": "npm run auth:build",
     "deploy": "cdk deploy",
     "destroy": "cdk destroy",
+    "pretest": "npm run auth:build",
     "test": "jest",
     "typecheck": "tsc --noEmit"
   },

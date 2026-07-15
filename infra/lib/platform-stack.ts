@@ -848,6 +848,7 @@ export class PlatformStack extends cdk.Stack {
       logGroup: proxyLogGroup,
       environment: {
         APP_ENV: appEnv,
+        USE_LOCAL_FAKES: 'false',
         WORKSPACE_ID: 'csub-demo',
         CONTRACTS_SCHEMA_DIR: '/opt/schemas',
         ALLOWED_ORIGINS: allowedOrigins.join(','),
@@ -1006,6 +1007,7 @@ export class PlatformStack extends cdk.Stack {
       ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/review', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/packet', [apigwv2.HttpMethod.GET]],
+      ['/cases/{id}/packet/pdf', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/servicenow/preview', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/servicenow/commit', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/invites', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],

@@ -418,7 +418,7 @@ describe('API authorization boundaries', () => {
     const byKey = new Map<string, any>(routes.map((r) => [r.RouteKey, r]));
 
     // Reviewer/admin routes are JWT-authorized.
-    for (const key of ['POST /cases', 'GET /review-queue', 'POST /cases/{id}/review']) {
+    for (const key of ['POST /cases', 'GET /review-queue', 'POST /cases/{id}/review', 'GET /cases/{id}/packet/pdf']) {
       expect(byKey.get(key).AuthorizationType).toBe('JWT');
       expect(byKey.get(key).AuthorizerId).toBeDefined();
     }
@@ -495,6 +495,7 @@ describe('Connected Lambda configuration', () => {
         Variables: Match.objectLike({
           CONTRACTS_SCHEMA_DIR: '/opt/schemas',
           WORKSPACE_ID: 'csub-demo',
+          USE_LOCAL_FAKES: 'false',
           MAX_JSON_BYTES: '1048576',
           PRESIGN_TTL_SECONDS: '300',
           VENDOR_TABLE: Match.anyValue(),
