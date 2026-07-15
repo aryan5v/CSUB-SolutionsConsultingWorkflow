@@ -210,38 +210,77 @@ describe('API authorization boundaries', () => {
       expect(byKey.get(key).AuthorizerId).toBeDefined();
     }
     // Public-at-gateway routes carry no Cognito authorizer.
-    for (const key of ['GET /intake', 'POST /intake', 'POST /slack/events']) {
+    for (const key of [
+      'GET /health',
+      'GET /vendor/invites/current',
+      'POST /vendor/invites/current/open',
+      'GET /vendor/invites/current/questions',
+      'POST /vendor/invites/current/evidence',
+      'POST /vendor/invites/current/trust-center',
+      'POST /vendor/invites/current/answers',
+      'POST /vendor/invites/current/coverage',
+      'POST /vendor/invites/current/finalize',
+      'GET /intake',
+      'POST /intake',
+      'POST /slack/events',
+    ]) {
       expect(byKey.get(key).AuthorizationType ?? 'NONE').toBe('NONE');
       expect(byKey.get(key).AuthorizerId).toBeUndefined();
     }
-    // No route embeds the invite token in the URL path (it rides Authorization).
+    // No route embeds the invite token in the URL path or query.
     expect(routes.some((r) => String(r.RouteKey).includes('{token}'))).toBe(false);
+    expect(routes.some((r) => /[?&](token|invite_token)=/.test(String(r.RouteKey)))).toBe(false);
     expect(byKey.has('GET /intake/{token}')).toBe(false);
   });
 
-  test('CORS permits the Authorization header for Bearer intake', () => {
+  test('CORS permits bearer intake from only the UI and local development origins', () => {
     const { platform } = build(baseConfig);
     platform.hasResourceProperties('AWS::ApiGatewayV2::Api', {
       CorsConfiguration: Match.objectLike({
-        AllowHeaders: Match.arrayWith(['Authorization']),
+        AllowHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
+        AllowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+        AllowOrigins: Match.arrayWith([
+          'http://127.0.0.1:5173',
+          'http://localhost:5173',
+        ]),
       }),
     });
+    const api = Object.values(platform.findResources('AWS::ApiGatewayV2::Api'))[0] as any;
+    expect(api.Properties.CorsConfiguration.AllowOrigins).not.toContain('*');
   });
 });
 
-describe('Lambda proxy configuration', () => {
-  test('runs Node 22 on ARM64 with a <= 1 MiB JSON metadata cap and presign TTL', () => {
+describe('Connected Lambda configuration', () => {
+  test('runs Python 3.13 on ARM64 with deterministic source/layer packaging', () => {
     const { platform } = build(baseConfig);
     platform.hasResourceProperties('AWS::Lambda::Function', {
-      Runtime: 'nodejs22.x',
+      Runtime: 'python3.13',
       Architectures: ['arm64'],
-      Handler: 'index.handler',
+      Handler: 'review_agent.lambda_api.handler',
+      MemorySize: 512,
       Environment: {
         Variables: Match.objectLike({
+          CONTRACTS_SCHEMA_DIR: '/opt/schemas',
+          WORKSPACE_ID: 'csub-demo',
           MAX_JSON_BYTES: '1048576',
           PRESIGN_TTL_SECONDS: '300',
+          VENDOR_TABLE: Match.anyValue(),
+          PRODUCT_TABLE: Match.anyValue(),
+          CONTACT_TABLE: Match.anyValue(),
+          INVITE_TABLE: Match.anyValue(),
+          SUBMISSION_TABLE: Match.anyValue(),
+          REVIEW_TABLE: Match.anyValue(),
+          PROFILE_TABLE: Match.anyValue(),
+          INTEGRATION_EVENT_TABLE: Match.anyValue(),
+          AUDIT_TABLE: Match.anyValue(),
+          IDEMPOTENCY_TABLE: Match.anyValue(),
         }),
       },
+    });
+    platform.resourceCountIs('AWS::Lambda::LayerVersion', 1);
+    platform.hasResourceProperties('AWS::Lambda::LayerVersion', {
+      CompatibleArchitectures: ['arm64'],
+      CompatibleRuntimes: ['python3.13'],
     });
     const maxBytes = 1048576;
     expect(maxBytes).toBeLessThanOrEqual(1024 * 1024);
@@ -279,6 +318,20 @@ describe('IAM least privilege', () => {
       // No blanket "service:*" (prefix-scoped grants like s3:GetObject* are allowed).
       expect(/^[a-z0-9-]+:\*$/.test(a)).toBe(false);
     }
+  });
+
+  test('generated packet objects remain read-only to the case proxy', () => {
+    const { platform } = build(baseConfig);
+    const policies = Object.values(platform.findResources('AWS::IAM::Policy'));
+    const putObjectStatements = policies.flatMap((policy: any) =>
+      policy.Properties.PolicyDocument.Statement.filter((statement: any) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('s3:PutObject');
+      }),
+    );
+    expect(putObjectStatements.length).toBeGreaterThan(0);
+    expect(JSON.stringify(putObjectStatements)).toContain('EvidenceBucket');
+    expect(JSON.stringify(putObjectStatements)).not.toContain('GeneratedBucket');
   });
 
   test('agent runtime trust policy pins SourceAccount (confused-deputy guard)', () => {
@@ -404,6 +457,14 @@ describe('Deployment gates', () => {
         RequestHeaderAllowlist: Match.arrayWith(['X-Correlation-Id', 'Content-Type']),
       },
     });
+    configured.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'python3.13',
+      Environment: {
+        Variables: Match.objectLike({ AGENT_RUNTIME_ENDPOINT_ARN: Match.anyValue() }),
+      },
+    });
+    const enabledPolicies = JSON.stringify(configured.findResources('AWS::IAM::Policy'));
+    expect(enabledPolicies).toContain('bedrock-agentcore:InvokeAgentRuntime');
     configured.hasOutput('AgentRuntimeConfigured', { Value: 'true' });
   });
 
@@ -447,10 +508,19 @@ describe('Deployment gates', () => {
     const on = build({ ...baseConfig, enableGuardrail: true }).platform;
     on.resourceCountIs('AWS::Bedrock::Guardrail', 1);
     on.resourceCountIs('AWS::Bedrock::GuardrailVersion', 1);
+    on.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'python3.13',
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_ID: Match.anyValue(),
+          GUARDRAIL_VERSION: Match.anyValue(),
+        }),
+      },
+    });
     on.hasOutput('GuardrailEnabled', { Value: 'true' });
   });
 
-  test('no Slack secret is referenced or generated unless imported by ARN', () => {
+  test('Slack secret remains absent by default and gated env/IAM are restored when imported', () => {
     const { platform } = build(baseConfig);
     platform.resourceCountIs('AWS::SecretsManager::Secret', 0);
     const lambdas = platform.findResources('AWS::Lambda::Function');
@@ -460,6 +530,20 @@ describe('Deployment gates', () => {
     for (const env of proxyEnvs) {
       expect(env.SLACK_SECRET_ARN).toBeUndefined();
     }
+
+    const secretArn =
+      'arn:aws:secretsmanager:us-west-2:111111111111:secret:csub/slack-test-AbCdEf';
+    const withSlack = build({ ...baseConfig, slackSecretArn: secretArn }).platform;
+    withSlack.resourceCountIs('AWS::SecretsManager::Secret', 0);
+    withSlack.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'python3.13',
+      Environment: {
+        Variables: Match.objectLike({ SLACK_SECRET_ARN: secretArn }),
+      },
+    });
+    expect(JSON.stringify(withSlack.findResources('AWS::IAM::Policy'))).toContain(
+      'secretsmanager:GetSecretValue',
+    );
   });
 });
 

@@ -331,6 +331,8 @@ export class PlatformStack extends cdk.Stack {
     // ====================================================================
     // Secrets Manager — import an EXISTING Slack secret only (no placeholder)
     // ====================================================================
+    // The deterministic Lambda does not implement Slack yet, but preserving
+    // this gated env/grant keeps the signed Slack adapter boundary additive.
     let slackSecret: secretsmanager.ISecret | undefined;
     if (config.slackSecretArn) {
       slackSecret = secretsmanager.Secret.fromSecretCompleteArn(
@@ -618,30 +620,61 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // ====================================================================
-    // Lambda proxy (Node 22, ARM64, SDK v3) + HTTP API
+    // Connected deterministic review API (Python 3.13, ARM64) + HTTP API
     // ====================================================================
+    const contractSchemas = new lambda.LayerVersion(this, 'ContractSchemaLayer', {
+      description: 'Locked JSON schemas consumed by the deterministic review Lambda.',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'packages', 'contracts'), {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        exclude: ['openapi.yaml', 'README.md'],
+      }),
+      compatibleArchitectures: [lambda.Architecture.ARM_64],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_13],
+      removalPolicy,
+    });
+
+    const allowedOrigins = [
+      `https://${this.distribution.distributionDomainName}`,
+      'http://127.0.0.1:5173',
+      'http://localhost:5173',
+    ];
     this.proxyFunction = new lambda.Function(this, 'CaseProxyFunction', {
       functionName: `csub-case-proxy-${appEnv}`,
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.PYTHON_3_13,
       architecture: lambda.Architecture.ARM_64,
-      handler: 'index.handler',
-      // Committed, dependency-light asset; the tested TS source of truth lives
-      // in services/case-api/src and is bundled to this shape on deploy.
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'case-proxy')),
-      memorySize: 256,
+      handler: 'review_agent.lambda_api.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', '..', 'services', 'review-agent', 'src'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          exclude: ['**/__pycache__/**', '**/*.pyc', '**/*.pyo'],
+        },
+      ),
+      layers: [contractSchemas],
+      memorySize: 512,
       timeout: cdk.Duration.seconds(29),
       logGroup: proxyLogGroup,
       environment: {
         APP_ENV: appEnv,
+        WORKSPACE_ID: 'csub-demo',
+        CONTRACTS_SCHEMA_DIR: '/opt/schemas',
+        ALLOWED_ORIGINS: allowedOrigins.join(','),
         EVIDENCE_BUCKET: this.evidenceBucket.bucketName,
         GENERATED_BUCKET: this.generatedBucket.bucketName,
         ANALYSIS_QUEUE_URL: this.analysisQueue.queueUrl,
+        MAX_JSON_BYTES: '1048576',
+        PRESIGN_TTL_SECONDS: '300',
+        CASES_TABLE: foundationStack.casesTable.tableName,
+        VENDOR_TABLE: this.tables.VendorTable.tableName,
+        PRODUCT_TABLE: this.tables.ProductTable.tableName,
+        CONTACT_TABLE: this.tables.ContactTable.tableName,
         INVITE_TABLE: this.tables.InviteTable.tableName,
+        SUBMISSION_TABLE: this.tables.SubmissionTable.tableName,
+        REVIEW_TABLE: this.tables.ReviewTable.tableName,
+        PROFILE_TABLE: this.tables.ProfileTable.tableName,
+        INTEGRATION_EVENT_TABLE: this.tables.IntegrationEventTable.tableName,
         AUDIT_TABLE: this.tables.AuditTable.tableName,
         IDEMPOTENCY_TABLE: this.tables.IdempotencyTable.tableName,
-        CASES_TABLE: foundationStack.casesTable.tableName,
-        MAX_JSON_BYTES: '1048576', // <= 1 MiB metadata surface
-        PRESIGN_TTL_SECONDS: '300',
         SERVICE_NOW_TABLE: config.serviceNowTableName,
         ...(agentEndpoint
           ? { AGENT_RUNTIME_ENDPOINT_ARN: agentEndpoint.attrAgentRuntimeEndpointArn }
@@ -656,22 +689,20 @@ export class PlatformStack extends cdk.Stack {
       },
     });
 
-    // Least-privilege grants for the proxy.
-    this.evidenceBucket.grantReadWrite(this.proxyFunction); // presigned PUT/GET issuance
+    // The deterministic API persists each domain projection to its existing
+    // purpose-built table. AgentCore remains an independently gated future
+    // provider boundary and is not required by the golden demo Lambda.
+    for (const table of Object.values(this.tables)) {
+      table.grantReadWriteData(this.proxyFunction);
+    }
+    foundationStack.casesTable.grantReadWriteData(this.proxyFunction);
+    this.evidenceBucket.grantReadWrite(this.proxyFunction);
     this.generatedBucket.grantRead(this.proxyFunction);
     this.analysisQueue.grantSendMessages(this.proxyFunction);
-    this.tables.InviteTable.grantReadWriteData(this.proxyFunction);
-    this.tables.AuditTable.grantReadWriteData(this.proxyFunction);
-    this.tables.IdempotencyTable.grantReadWriteData(this.proxyFunction);
-    this.tables.ReviewTable.grantReadWriteData(this.proxyFunction);
-    this.tables.SubmissionTable.grantReadWriteData(this.proxyFunction);
-    foundationStack.casesTable.grantReadWriteData(this.proxyFunction);
     dataKey.grantEncryptDecrypt(this.proxyFunction);
     if (slackSecret) {
       slackSecret.grantRead(this.proxyFunction);
     }
-    // Invoke AgentCore via the data-plane; scoped to this account/region
-    // runtimes. AgentCore-specific — only granted when AgentCore is enabled.
     if (config.enableAgentCoreServices) {
       this.proxyFunction.addToRolePolicy(
         new iam.PolicyStatement({
@@ -684,6 +715,48 @@ export class PlatformStack extends cdk.Stack {
       );
     }
 
+    // Keep optional provider permissions in a separate inline policy so the
+    // larger deterministic DynamoDB policy cannot crowd out prior capabilities.
+    const providerStatements = [
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject', 's3:PutObject'],
+        resources: [this.evidenceBucket.arnForObjects('*')],
+      }),
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [this.generatedBucket.arnForObjects('*')],
+      }),
+      new iam.PolicyStatement({
+        actions: ['sqs:SendMessage'],
+        resources: [this.analysisQueue.queueArn],
+      }),
+    ];
+    if (slackSecret) {
+      providerStatements.push(
+        new iam.PolicyStatement({
+          actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+          resources: [slackSecret.secretArn],
+        }),
+      );
+    }
+    if (config.enableAgentCoreServices) {
+      providerStatements.push(
+        new iam.PolicyStatement({
+          actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+          resources: [
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*/runtime-endpoint/*`,
+          ],
+        }),
+      );
+    }
+    const providerPolicy = new iam.Policy(this, 'CaseProxyProviderPolicy', {
+      statements: providerStatements,
+    });
+    if (this.proxyFunction.role) {
+      providerPolicy.attachToRole(this.proxyFunction.role);
+    }
+
     const cognitoAuthorizer = new HttpUserPoolAuthorizer('ReviewerAuthorizer', this.userPool, {
       userPoolClients: [this.userPoolClient],
     });
@@ -692,10 +765,12 @@ export class PlatformStack extends cdk.Stack {
       apiName: `csub-case-api-${appEnv}`,
       description: 'Reviewer, vendor-intake, and integration surface for the review agent.',
       corsPreflight: {
-        allowOrigins: ['*'],
+        allowOrigins: allowedOrigins,
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
           apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PATCH,
+          apigwv2.CorsHttpMethod.DELETE,
           apigwv2.CorsHttpMethod.OPTIONS,
         ],
         allowHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
@@ -725,30 +800,67 @@ export class PlatformStack extends cdk.Stack {
       ['/cases/{id}', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/documents', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/analyze', [apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/review', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/packet', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/servicenow/preview', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/servicenow/commit', [apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/invites', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/review-runs', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/review-queue', [apigwv2.HttpMethod.GET]],
+      ['/integration-events', [apigwv2.HttpMethod.GET]],
       ['/vendors', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
-      ['/catalog', [apigwv2.HttpMethod.GET]],
-      ['/profile', [apigwv2.HttpMethod.GET]],
+      ['/vendors/{id}', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH, apigwv2.HttpMethod.DELETE]],
+      ['/vendor-products', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/vendor-products/{id}', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH, apigwv2.HttpMethod.DELETE]],
+      ['/vendor-contacts', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/vendor-contacts/{id}', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH, apigwv2.HttpMethod.DELETE]],
+      ['/invites/{id}/revoke', [apigwv2.HttpMethod.POST]],
+      ['/invites/{id}/resend', [apigwv2.HttpMethod.POST]],
+      ['/review-profiles', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/review-profiles/{id}', [apigwv2.HttpMethod.PATCH]],
+      ['/review-profiles/{id}/fixture-test', [apigwv2.HttpMethod.POST]],
+      ['/review-profiles/{id}/activate', [apigwv2.HttpMethod.POST]],
+      ['/review-profiles/{id}/rollback', [apigwv2.HttpMethod.POST]],
+      ['/catalog/search', [apigwv2.HttpMethod.GET]],
+      ['/catalog/matches/{id}/confirm', [apigwv2.HttpMethod.POST]],
+      ['/servicenow/imports/{id}/preview', [apigwv2.HttpMethod.GET]],
+      ['/servicenow/imports/{id}/create', [apigwv2.HttpMethod.POST]],
     ];
     for (const [routePath, methods] of protectedRoutes) {
       this.api.addRoutes({ path: routePath, methods, integration, authorizer: cognitoAuthorizer });
     }
 
-    // --- Public-at-gateway routes: enforced downstream, NOT by Cognito ---
-    // Invite intake is token-FREE at the URL: the opaque invite token is read
-    // only from the Authorization: Bearer header inside the Lambda (never in the
-    // path/query), so it cannot leak into API Gateway, CloudFront, browser
-    // history, or access logs. Authenticity is enforced downstream by hash.
+    // --- Public-at-gateway routes: bearer/signature enforced downstream ---
     this.api.addRoutes({
-      path: '/intake',
-      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      path: '/health',
+      methods: [apigwv2.HttpMethod.GET],
       integration,
     });
-    // Slack events: authenticity enforced by signature verification downstream.
+    for (const [routePath, methods] of [
+      // Canonical routes consumed by the integrated vendor intake UI.
+      ['/vendor/invites/current', [apigwv2.HttpMethod.GET]],
+      ['/vendor/invites/current/open', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/questions', [apigwv2.HttpMethod.GET]],
+      ['/vendor/invites/current/evidence', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/trust-center', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/answers', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/coverage', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/finalize', [apigwv2.HttpMethod.POST]],
+      // Backward-compatible aliases; tokens remain header-only.
+      ['/intake', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/intake/evidence', [apigwv2.HttpMethod.POST]],
+      ['/intake/trust-center', [apigwv2.HttpMethod.POST]],
+      ['/intake/answers', [apigwv2.HttpMethod.POST]],
+      ['/intake/coverage', [apigwv2.HttpMethod.POST]],
+      ['/intake/questions', [apigwv2.HttpMethod.GET]],
+      ['/intake/finalize', [apigwv2.HttpMethod.POST]],
+    ] as Array<[string, apigwv2.HttpMethod[]]>) {
+      // Opaque invite tokens are accepted only in Authorization: Bearer.
+      // No public route contains a token path or query parameter.
+      this.api.addRoutes({ path: routePath, methods, integration });
+    }
+    // Slack remains a separately signed future integration surface.
     this.api.addRoutes({
       path: '/slack/events',
       methods: [apigwv2.HttpMethod.POST],
