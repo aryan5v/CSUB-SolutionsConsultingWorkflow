@@ -515,10 +515,21 @@ class S3EvidenceUploadIssuer:
 
 
 def build_evidence_upload_issuer() -> EvidenceUploadIssuer:
+    # Fixture mode is explicitly disabled and never touches the network.
     if os.environ.get("USE_LOCAL_FAKES", "true").lower() != "false":
         return DisabledEvidenceUploadIssuer()
-    if not os.environ.get("EVIDENCE_BUCKET") or not os.environ.get("EVIDENCE_STATE_TABLE"):
-        return DisabledEvidenceUploadIssuer()
+    # Live mode must fail closed: a missing bucket or state table is a real
+    # misconfiguration, not a reason to silently fall back to the disabled
+    # issuer and accept uploads that record nothing.
+    missing = [
+        name
+        for name in ("EVIDENCE_BUCKET", "EVIDENCE_STATE_TABLE")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "live evidence uploads require " + ", ".join(missing)
+        )
     return S3EvidenceUploadIssuer.from_environment()
 
 
