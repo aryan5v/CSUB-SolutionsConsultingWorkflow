@@ -79,11 +79,14 @@ customer-managed KMS key and `cases` table are passed by object reference
   (immutable `(user_id, version)`), integration-event, audit, and idempotency.
 - **Cognito:** reviewer user pool (no self-service signup) + app client.
 - **API (HTTP API + Lambda proxy):** reviewer/admin routes require the Cognito
-  JWT authorizer; `/intake/{token}` and `/slack/events` are public at the
-  gateway and enforced downstream (opaque token / signature). The Node 22 ARM64
-  Lambda proxy uses AWS SDK v3 (SigV4) to reach AgentCore — never `fetch` — caps
-  the JSON metadata surface at ≤ 1 MiB, allowlists headers (never forwarding
-  Host/Authorization), and returns correlation-ID errors without bodies/tokens.
+  JWT authorizer; `/intake` and `/slack/events` are public at the
+  gateway and enforced downstream (opaque token / signature). The invite token
+  is token-free in the URL — it is read only from `Authorization: Bearer`,
+  validated and hashed inside the Lambda, and never placed in a path or query.
+  The Node 22 ARM64 Lambda proxy uses AWS SDK v3 (SigV4) to reach AgentCore —
+  never `fetch` — caps the JSON metadata surface at ≤ 1 MiB, allowlists headers
+  (never forwarding Host/Authorization), and returns correlation-ID errors
+  without bodies/tokens.
 - **Async boundary:** KMS-encrypted analysis SQS queue + DLQ.
 - **AgentCore:** least-privilege execution role, seven-day encrypted Memory,
   a managed Browser for allowlisted research, plus a **gated** ARM64 HTTP

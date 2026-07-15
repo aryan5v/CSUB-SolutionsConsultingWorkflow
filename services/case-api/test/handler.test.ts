@@ -5,6 +5,7 @@ import {
   ProxyDeps,
   createHandler,
   exceedsBodyLimit,
+  extractBearerToken,
   filterHeaders,
   hashToken,
   isSafeId,
@@ -87,6 +88,25 @@ describe('pure helpers', () => {
     const long = 'x'.repeat(40);
     expect(toSessionId(long)).toBe(long);
   });
+
+  test('extractBearerToken enforces the exact Bearer scheme and size bounds', () => {
+    expect(extractBearerToken({ authorization: 'Bearer invite-token-abcdef123456' })).toBe(
+      'invite-token-abcdef123456',
+    );
+    expect(extractBearerToken({ Authorization: 'Bearer invite-token-abcdef123456' })).toBe(
+      'invite-token-abcdef123456',
+    );
+    // Missing / wrong scheme / malformed.
+    expect(extractBearerToken({})).toBeNull();
+    expect(extractBearerToken({ authorization: 'invite-token-abcdef123456' })).toBeNull();
+    expect(extractBearerToken({ authorization: 'bearer invite-token-abcdef123456' })).toBeNull();
+    expect(extractBearerToken({ authorization: 'Basic dXNlcjpwYXNz' })).toBeNull();
+    // Too short and too long.
+    expect(extractBearerToken({ authorization: 'Bearer short' })).toBeNull();
+    expect(extractBearerToken({ authorization: `Bearer ${'a'.repeat(513)}` })).toBeNull();
+    // Illegal characters (spaces / control) rejected.
+    expect(extractBearerToken({ authorization: 'Bearer has space token here' })).toBeNull();
+  });
 });
 
 describe('handler routing and security', () => {
@@ -157,15 +177,14 @@ describe('handler routing and security', () => {
     );
   });
 
-  test('intake forwards only the token hash and allowlisted headers', async () => {
+  test('intake reads the token from Authorization: Bearer and forwards only its hash', async () => {
     const deps = makeDeps();
     const handler = createHandler(config, deps);
     const token = 'invite-token-abcdef123456';
     await handler(
       event({
-        routeKey: 'GET /intake/{token}',
-        pathParameters: { token },
-        headers: { Authorization: 'Bearer x', 'x-correlation-id': 'corr-1' },
+        routeKey: 'GET /intake',
+        headers: { authorization: `Bearer ${token}`, 'x-correlation-id': 'corr-1' },
       }),
     );
     expect(deps.invokeAgent).toHaveBeenCalledTimes(1);
@@ -173,18 +192,26 @@ describe('handler routing and security', () => {
       input: { token_hash: string; headers: Record<string, string> };
     };
     expect(payload.input.token_hash).toBe(hashToken(token));
+    // Raw token never appears anywhere in the downstream payload/correlation.
     expect(JSON.stringify(payload)).not.toContain(token);
+    // Authorization is never forwarded downstream.
+    expect(payload.input.headers.authorization).toBeUndefined();
     expect(payload.input.headers.Authorization).toBeUndefined();
     expect(payload.input.headers['x-correlation-id']).toBe('corr-1');
   });
 
-  test('short invite tokens are rejected before any downstream call', async () => {
+  test('intake without a valid Bearer token is rejected before any downstream call', async () => {
     const deps = makeDeps();
     const handler = createHandler(config, deps);
-    const res = await handler(
-      event({ routeKey: 'POST /intake/{token}', pathParameters: { token: 'short' } }),
-    );
-    expect(res.statusCode).toBe(401);
+    for (const headers of [
+      {},
+      { authorization: 'Bearer short' },
+      { authorization: 'invite-token-abcdef123456' },
+    ]) {
+      const res = await handler(event({ routeKey: 'POST /intake', headers }));
+      expect(res.statusCode).toBe(401);
+      expect(JSON.parse(res.body as string).error).toBe('invalid_invite');
+    }
     expect(deps.invokeAgent).not.toHaveBeenCalled();
   });
 

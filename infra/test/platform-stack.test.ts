@@ -136,10 +136,22 @@ describe('API authorization boundaries', () => {
       expect(byKey.get(key).AuthorizerId).toBeDefined();
     }
     // Public-at-gateway routes carry no Cognito authorizer.
-    for (const key of ['GET /intake/{token}', 'POST /intake/{token}', 'POST /slack/events']) {
+    for (const key of ['GET /intake', 'POST /intake', 'POST /slack/events']) {
       expect(byKey.get(key).AuthorizationType ?? 'NONE').toBe('NONE');
       expect(byKey.get(key).AuthorizerId).toBeUndefined();
     }
+    // No route embeds the invite token in the URL path (it rides Authorization).
+    expect(routes.some((r) => String(r.RouteKey).includes('{token}'))).toBe(false);
+    expect(byKey.has('GET /intake/{token}')).toBe(false);
+  });
+
+  test('CORS permits the Authorization header for Bearer intake', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+      CorsConfiguration: Match.objectLike({
+        AllowHeaders: Match.arrayWith(['Authorization']),
+      }),
+    });
   });
 });
 

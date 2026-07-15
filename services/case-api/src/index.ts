@@ -83,6 +83,29 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
+/** Bounds for an opaque invite token carried in `Authorization: Bearer <token>`. */
+export const INVITE_TOKEN_MIN = 16;
+export const INVITE_TOKEN_MAX = 512;
+
+/**
+ * Extract and validate an opaque invite token from the Authorization header.
+ * Requires the exact `Bearer ` scheme and an opaque token within size bounds.
+ * Returns `null` for missing/malformed/oversized tokens; never throws and never
+ * echoes the token. The token must NEVER appear in the URL path or query.
+ */
+export function extractBearerToken(
+  headers: Record<string, string | undefined> = {},
+): string | null {
+  const auth = headers.authorization ?? headers.Authorization;
+  if (typeof auth !== 'string') return null;
+  const prefix = 'Bearer ';
+  if (!auth.startsWith(prefix)) return null;
+  const token = auth.slice(prefix.length);
+  if (!/^[A-Za-z0-9._~+/=-]+$/.test(token)) return null;
+  if (token.length < INVITE_TOKEN_MIN || token.length > INVITE_TOKEN_MAX) return null;
+  return token;
+}
+
 /** True when the (possibly base64) body exceeds the configured JSON cap. */
 export function exceedsBodyLimit(
   body: string | undefined,
@@ -229,15 +252,18 @@ export function createHandler(config: ProxyConfig, deps: ProxyDeps) {
         );
       }
 
-      if (routeKey.startsWith('GET /intake/') || routeKey.startsWith('POST /intake/')) {
-        const token = pathParams.token;
-        if (typeof token !== 'string' || token.length < 16) {
+      if (routeKey === 'GET /intake' || routeKey === 'POST /intake') {
+        // Read the opaque invite token ONLY from Authorization: Bearer — never
+        // the path/query — so it cannot leak into gateway/CDN/browser/logs.
+        const token = extractBearerToken(event.headers);
+        if (token === null) {
           return errorResponse(401, 'invalid_invite', correlationId);
         }
         if (!config.agentRuntimeEndpointArn) {
           return errorResponse(503, 'agent_runtime_unavailable', correlationId);
         }
-        // Forward only the token HASH plus allowlisted headers — never plaintext.
+        // Hash in Lambda; forward only the hash plus allowlisted headers (which
+        // exclude Authorization). The raw token never leaves this function.
         const result = await deps.invokeAgent(
           config.agentRuntimeEndpointArn,
           toSessionId(correlationId),

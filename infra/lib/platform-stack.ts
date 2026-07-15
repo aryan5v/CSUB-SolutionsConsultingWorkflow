@@ -713,9 +713,12 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // --- Public-at-gateway routes: enforced downstream, NOT by Cognito ---
-    // Invite-token intake: opaque token verified in the runtime, not the gateway.
+    // Invite intake is token-FREE at the URL: the opaque invite token is read
+    // only from the Authorization: Bearer header inside the Lambda (never in the
+    // path/query), so it cannot leak into API Gateway, CloudFront, browser
+    // history, or access logs. Authenticity is enforced downstream by hash.
     this.api.addRoutes({
-      path: '/intake/{token}',
+      path: '/intake',
       methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
       integration,
     });

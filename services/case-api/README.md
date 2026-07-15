@@ -27,7 +27,8 @@ proxy. It uses AWS SDK v3 modular clients (S3 presigner, SQS, and the
 never `fetch`. It caps the JSON metadata surface at ≤ 1 MiB, allowlists
 downstream headers (never forwarding Host/Authorization), issues case-scoped
 presigned evidence uploads/packet downloads instead of streaming bytes through
-API Gateway, forwards only invite-token **hashes**, and returns
+API Gateway, reads the opaque invite token only from `Authorization: Bearer`
+(never the URL path/query), forwards only its **hash**, and returns
 correlation-ID-tagged errors without logging bodies, tokens, or secrets. Side
 effects are injected (`createHandler(config, deps)`) so `test/handler.test.ts`
 runs hermetically.

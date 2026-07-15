@@ -67,6 +67,26 @@ export const filterHeaders = (headers) => {
 
 const hashToken = (token) => createHash('sha256').update(token, 'utf8').digest('hex');
 
+const INVITE_TOKEN_MIN = 16;
+const INVITE_TOKEN_MAX = 512;
+
+/**
+ * Extract and validate an opaque invite token from Authorization: Bearer.
+ * Requires the exact `Bearer ` scheme and an opaque token within size bounds.
+ * Returns null for missing/malformed/oversized tokens; never echoes the token.
+ * The token must NEVER appear in the URL path or query.
+ */
+export const extractBearerToken = (headers = {}) => {
+  const auth = headers.authorization ?? headers.Authorization;
+  if (typeof auth !== 'string') return null;
+  const prefix = 'Bearer ';
+  if (!auth.startsWith(prefix)) return null;
+  const token = auth.slice(prefix.length);
+  if (!/^[A-Za-z0-9._~+/=-]+$/.test(token)) return null;
+  if (token.length < INVITE_TOKEN_MIN || token.length > INVITE_TOKEN_MAX) return null;
+  return token;
+};
+
 async function issueEvidenceUpload(caseId, correlationId) {
   const key = `evidence/${caseId}/${randomUUID()}`;
   const command = new PutObjectCommand({
@@ -141,7 +161,7 @@ export async function handler(event, context) {
     }
 
     const caseId = pathParams.id;
-    if ((routeKey.includes('{id}') || routeKey.includes('{token}')) && caseId && !isSafeId(caseId)) {
+    if (routeKey.includes('{id}') && caseId && !isSafeId(caseId)) {
       return errorResponse(400, 'invalid_identifier', correlationId);
     }
 
@@ -153,18 +173,18 @@ export async function handler(event, context) {
     if (routeKey === 'GET /cases/{id}/packet') {
       return await issuePacketDownload(caseId, correlationId);
     }
-    // Invite intake: verify the opaque token by hash; never log/echo plaintext.
-    if (routeKey.startsWith('GET /intake/') || routeKey.startsWith('POST /intake/')) {
-      const token = pathParams.token;
-      if (!token || typeof token !== 'string' || token.length < 16) {
+    // Invite intake: read the opaque token ONLY from Authorization: Bearer
+    // (never path/query), so it cannot leak into gateway/CDN/browser/logs.
+    if (routeKey === 'GET /intake' || routeKey === 'POST /intake') {
+      const token = extractBearerToken(event.headers);
+      if (token === null) {
         return errorResponse(401, 'invalid_invite', correlationId);
       }
-      const tokenHash = hashToken(token);
-      // Downstream verification (InviteTable lookup) happens in the runtime; the
-      // proxy forwards only the hash plus allowlisted context.
+      // Hash in Lambda; forward only the hash plus allowlisted context (which
+      // excludes Authorization). The raw token never leaves this function.
       return await forwardToAgentCore(
         routeKey,
-        { token_hash: tokenHash, headers: filterHeaders(event.headers) },
+        { token_hash: hashToken(token), headers: filterHeaders(event.headers) },
         correlationId,
       );
     }
