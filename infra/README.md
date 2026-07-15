@@ -244,3 +244,32 @@ InvalidClientTokenId: The security token included in the request is invalid.
 ```
 
 No deployment or AWS mutation was attempted. Re-authenticate the approved sandbox profile, rerun `aws sts get-caller-identity`, then follow the synth/diff/deploy gate before uploading only a sanitized fixture. This credential blocker does not replace the local parser, authorization, partial-batch, CDK synthesis, or contract checks.
+
+## Guarded continuous delivery
+
+The operator bootstraps GitHub OIDC once through the approved SSO profile:
+
+```bash
+AWS_PROFILE=<approved-sso-profile> AWS_REGION=us-west-2 \
+  GITHUB_ORGANIZATION=<github-owner> GITHUB_REPOSITORY=<repository-name> \
+  scripts/deploy/bootstrap_github_oidc.sh
+```
+
+The bootstrap creates the `production` GitHub environment with a main-only
+branch rule, enables immutable custom OIDC subject claims, creates a
+termination-protected `VettedGitHubOidc` stack, and outputs the deploy-role and
+SNS alert-topic ARNs. Subscribe an operator to the topic, then set the public
+stack outputs and ARNs as repository variables listed in
+[`DEPLOYMENT.md`](DEPLOYMENT.md). Never store AWS keys in GitHub.
+
+Every push to `main` runs `.github/workflows/deploy.yml`. Build and synth happen
+without cloud credentials. The deployment job accepts only the sealed bundle,
+guards both stacks before executing either one, promotes content-addressed UI
+assets with `index.html` last, and runs release/auth/API/catalog canaries. An
+exact healthy release is retained in the versioned frontend bucket for
+automatic recovery. Manual workflow dispatch supports a non-executing dry run,
+an explicit deploy, or rollback to a recorded healthy SHA.
+
+Automatic CD intentionally blocks removal, replacement, IAM, auth, KMS, bucket
+policy, and related security changes. Review those with `cdk diff` and deploy
+through the approved SSO identity; there is no workflow bypass flag.
