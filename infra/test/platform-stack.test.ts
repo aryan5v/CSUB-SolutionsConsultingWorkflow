@@ -267,11 +267,14 @@ describe('VETTED Better Auth same-origin session layer', () => {
     const cloudFrontPermissions = permissions.filter(
       (permission) => permission.Properties.Principal === 'cloudfront.amazonaws.com',
     );
-    expect(cloudFrontPermissions).toHaveLength(1);
-    expect(cloudFrontPermissions[0].Properties.Action).toBe('lambda:InvokeFunctionUrl');
-    expect(JSON.stringify(cloudFrontPermissions[0].Properties.SourceArn)).toContain(
-      'FrontendDistribution',
-    );
+    expect(cloudFrontPermissions).toHaveLength(2);
+    expect(cloudFrontPermissions.map((permission) => permission.Properties.Action).sort()).toEqual([
+      'lambda:InvokeFunction',
+      'lambda:InvokeFunctionUrl',
+    ]);
+    cloudFrontPermissions.forEach((permission) => {
+      expect(JSON.stringify(permission.Properties.SourceArn)).toContain('FrontendDistribution');
+    });
   });
 
   test('does not add public Better Auth routes to the protected reviewer API', () => {

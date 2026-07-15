@@ -810,6 +810,14 @@ export class PlatformStack extends cdk.Stack {
         compress: false,
       },
     );
+    // Function URL OAC needs both permissions: the URL-specific action CDK
+    // creates and the underlying Lambda invoke action used by CloudFront.
+    this.authFunction.addPermission('CloudFrontInvokeFunctionViaUrl', {
+      action: 'lambda:InvokeFunction',
+      principal: new iam.ServicePrincipal('cloudfront.amazonaws.com'),
+      sourceArn: this.distribution.distributionArn,
+      invokedViaFunctionUrl: true,
+    });
 
     // ====================================================================
     // Connected deterministic review API (Python 3.13, ARM64) + HTTP API
@@ -1027,6 +1035,7 @@ export class PlatformStack extends cdk.Stack {
       ['/review-profiles/{id}/fixture-test', [apigwv2.HttpMethod.POST]],
       ['/review-profiles/{id}/activate', [apigwv2.HttpMethod.POST]],
       ['/review-profiles/{id}/rollback', [apigwv2.HttpMethod.POST]],
+      ['/catalog', [apigwv2.HttpMethod.GET]],
       ['/catalog/search', [apigwv2.HttpMethod.GET]],
       ['/catalog/matches/{id}/confirm', [apigwv2.HttpMethod.POST]],
       ['/servicenow/imports/{id}/preview', [apigwv2.HttpMethod.GET]],
