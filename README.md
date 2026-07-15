@@ -25,6 +25,20 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 └── .env.example          Environment variable template
 ```
 
+The React/Vite reviewer workspace lives under `apps/reviewer-web/src/`. It adapts the Twenty
+record-workspace and navigation patterns documented in
+[`docs/decisions/0002-twenty-frontend-adaptation.md`](docs/decisions/0002-twenty-frontend-adaptation.md)
+into a dashboard-first vendor-management prototype. The local sanitized demo
+preserves the full PR #8 workspace: Inbox and My work queues, Vendors,
+Contacts, Review requests, Tasks, Notes, a local workflow builder with runs and
+versions, grounded Chat, Settings, Documentation, scoped Evidence, Audit, and
+one detailed human-review workspace with two-step simulated ServiceNow
+write-back. The shell includes accessible light/dark themes and the original
+yellow/blue design language. Tailwind and shadcn configuration support locally
+owned Dither Kit charts, gradients, buttons, and generative record avatars. See
+[`docs/twenty-vendor-frontend-plan.md`](docs/twenty-vendor-frontend-plan.md) for
+the phased Twenty-to-vendor adaptation plan.
+
 ## Start here
 
 - [`docs/PRD.md`](docs/PRD.md): product requirements, scope, interfaces, security constraints, and acceptance criteria.
@@ -64,6 +78,13 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
    ```bash
    make bootstrap
    make verify
+   ```
+
+7. Start the local reviewer workspace:
+
+   ```bash
+   npm --prefix apps/reviewer-web ci
+   npm --prefix apps/reviewer-web run dev
    ```
 
 ## Development principles
