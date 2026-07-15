@@ -9,6 +9,7 @@ TypeScript Lambda adapter remains a Wednesday deployment concern.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,12 +30,17 @@ from .contracts.packet import PacketSection
 from .contracts.schema import ContractValidationError, validate, validate_definition
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
+from .contracts.vendor import SoftwareCatalogEntry
+from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
 from .orchestration.state import InMemoryCheckpointer
 from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
+from .profiles.service import ProfileError, ReviewProfileService
 from .samples import escalation_case, low_risk_case, sample_records
+from .vendor.repository import InMemoryVendorRepository
+from .vendor.service import VendorBackend, VendorBackendError
 
 _FIXED_CLOCK = "2026-07-14T20:00:00+00:00"
 
@@ -102,10 +108,103 @@ class LocalReviewApi:
         self._software_index = ApprovedSoftwareIndex(records)
         self._writeback_config = writeback_config or LocalWritebackConfig()
         self._connector = MockServiceNowConnector()
+        self._vendor_repository = InMemoryVendorRepository()
+        local_clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
+        self._seed_review_profiles()
+        self._vendor = VendorBackend(
+            self._vendor_repository,
+            self._profiles,
+            clock=local_clock,
+        )
+        catalog_entries = []
+        for record in records:
+            row_number = record.source_coordinates.row if record.source_coordinates else 2
+            catalog_entries.append(
+                SoftwareCatalogEntry(
+                    record_id=record.record_id,
+                    canonical_name=record.canonical_name,
+                    vendor=record.vendor,
+                    normalized_identity=normalized_identity(
+                        record.canonical_name,
+                        record.short_name,
+                        record.audience,
+                        tuple(record.platform),
+                    ),
+                    source_row=row_number or 2,
+                    source_hash=hashlib.sha256(
+                        (
+                            record.source_coordinates.source_id
+                            if record.source_coordinates
+                            else record.record_id
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    raw_values=dict(record.source_row),
+                    supported_software=record.support,
+                    campus_license=record.licensing,
+                    aliases=tuple(record.aliases),
+                    short_name=record.short_name,
+                    platform=tuple(record.platform),
+                    audience=record.audience,
+                )
+            )
+        self._vendor.put_catalog_entries(catalog_entries)
+        self._seed_servicenow_import()
         self._cases: dict[str, _CaseRecord] = {}
         self._case_sequence = 0
         if seed_demo:
             self._seed_demo_cases()
+
+    def _seed_review_profiles(self) -> None:
+        fixtures = {
+            "security": [
+                {
+                    "requirement_id": "SEC.DATA.001",
+                    "question": "Describe encryption for institutional data in transit and at rest.",
+                    "source_citation": {"source_id": "fixture:security-profile", "section": "data-protection"},
+                    "expected_evidence": ["security whitepaper", "SOC 2 excerpt"],
+                    "output_fields": ["security_summary"],
+                    "remediation_guidance": "Provide current encryption documentation.",
+                }
+            ],
+            "accessibility": [
+                {
+                    "requirement_id": "A11Y.VPAT.001",
+                    "question": "Provide the current VPAT or Accessibility Conformance Report.",
+                    "source_citation": {"source_id": "fixture:accessibility-profile", "section": "vpat"},
+                    "expected_evidence": ["VPAT", "ACR"],
+                    "output_fields": ["accessibility_findings"],
+                    "remediation_guidance": "Provide a current product-specific accessibility report.",
+                }
+            ],
+        }
+        for profile_key, criteria in fixtures.items():
+            profile = self._profiles.create_draft(profile_key, criteria)
+            self._profiles.fixture_test(profile.profile_version_id)
+            self._profiles.activate(profile.profile_version_id)
+
+    def _seed_servicenow_import(self) -> None:
+        self._connector.seed_record(
+            record_id="RITM0098200",
+            table=self._writeback_config.table,
+            fields={
+                "number": "RITM0098200",
+                "short_description": "Synthetic Scheduling Tool",
+                "u_vendor": "Example Vendor",
+                "description": "Sanitized scheduling use case for a public event.",
+                "u_expected_users": 25,
+                "u_platform": ["web"],
+                "u_data_classification": "public",
+                "u_estimated_cost_usd": 0,
+                "u_integrations": [],
+                "u_uses_sso": False,
+                "u_uses_ai": False,
+                "u_classroom_or_public_use": True,
+                "requested_for_name": "Sample Requester",
+                "requested_for_email": "requester@example.edu",
+                "requested_for_department": "Library",
+            },
+        )
 
     def list_review_queue(self) -> dict[str, Any]:
         items = [self._queue_item(record.state) for record in self._cases.values()]
@@ -341,6 +440,263 @@ class LocalReviewApi:
         record = self._require_case(case_id)
         return [event.to_dict() for event in record.audit_sink.events]
 
+
+    # Vendor and administrator API surface -----------------------------------
+
+    def list_vendors(self) -> dict[str, Any]:
+        return {"items": [item.to_dict() for item in self._vendor.list_vendors()]}
+
+    def get_vendor_record(self, vendor_id: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.get_vendor(vendor_id).to_dict())
+
+    def create_vendor_record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-records", "CreateVendor")
+        return self._vendor_call(
+            lambda: self._vendor.create_vendor(
+                payload["name"], payload.get("official_domain")
+            ).to_dict()
+        )
+
+    def update_vendor_record(self, vendor_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) - {"name", "official_domain"} or not payload:
+            raise LocalApiError(400, "validation_error", "unsupported vendor update fields")
+        return self._vendor_call(
+            lambda: self._vendor.update_vendor(
+                vendor_id,
+                name=payload.get("name"),
+                official_domain=payload.get("official_domain"),
+            ).to_dict()
+        )
+
+    def delete_vendor_record(self, vendor_id: str) -> dict[str, Any]:
+        self._vendor_call(lambda: self._vendor.delete_vendor(vendor_id))
+        return {"deleted": True, "vendor_id": vendor_id}
+
+    def list_vendor_products(self, vendor_id: str | None = None) -> dict[str, Any]:
+        return {"items": [item.to_dict() for item in self._vendor.list_products(vendor_id)]}
+
+    def get_vendor_product(self, product_id: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.get_product(product_id).to_dict())
+
+    def create_vendor_product(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-records", "CreateProduct")
+        return self._vendor_call(
+            lambda: self._vendor.create_product(payload["vendor_id"], payload["name"]).to_dict()
+        )
+
+    def update_vendor_product(self, product_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"name"}:
+            raise LocalApiError(400, "validation_error", "product update requires only name")
+        return self._vendor_call(
+            lambda: self._vendor.update_product(product_id, name=payload["name"]).to_dict()
+        )
+
+    def delete_vendor_product(self, product_id: str) -> dict[str, Any]:
+        self._vendor_call(lambda: self._vendor.delete_product(product_id))
+        return {"deleted": True, "product_id": product_id}
+
+    def list_vendor_contacts(self, vendor_id: str | None = None) -> dict[str, Any]:
+        return {"items": [item.to_dict() for item in self._vendor.list_contacts(vendor_id)]}
+
+    def get_vendor_contact(self, contact_id: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.get_contact(contact_id).to_dict())
+
+    def create_vendor_contact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-records", "CreateContact")
+        return self._vendor_call(
+            lambda: self._vendor.create_contact(
+                payload["vendor_id"], payload["name"], payload["email"]
+            ).to_dict()
+        )
+
+    def update_vendor_contact(self, contact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) - {"name", "email"} or not payload:
+            raise LocalApiError(400, "validation_error", "unsupported contact update fields")
+        return self._vendor_call(
+            lambda: self._vendor.update_contact(
+                contact_id, name=payload.get("name"), email=payload.get("email")
+            ).to_dict()
+        )
+
+    def delete_vendor_contact(self, contact_id: str) -> dict[str, Any]:
+        self._vendor_call(lambda: self._vendor.delete_contact(contact_id))
+        return {"deleted": True, "contact_id": contact_id}
+
+    def issue_vendor_invite(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_case(case_id)
+        self._validate_vendor_payload(payload, "vendor-intake", "IssueInvite")
+        return self._vendor_call(lambda: self._vendor.issue_invite(case_id, payload["contact_id"]))
+
+    def list_case_invites(self, case_id: str) -> dict[str, Any]:
+        self._require_case(case_id)
+        return {
+            "items": [invite.to_reviewer_dict() for invite in self._vendor.list_invites(case_id)]
+        }
+
+    def revoke_vendor_invite(self, invite_id: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.revoke_invite(invite_id))
+
+    def resend_vendor_invite(self, invite_id: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.resend_invite(invite_id))
+
+    def resolve_vendor_invite(self, token: str, *, mark_open: bool = False) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.resolve_invite(token, mark_open=mark_open))
+
+    def vendor_add_evidence(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-intake", "EvidenceMetadata")
+        return self._vendor_call(lambda: self._vendor.add_evidence(token, payload).to_dict())
+
+    def vendor_set_trust_center(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-intake", "TrustCenter")
+        return self._vendor_call(
+            lambda: self._vendor.set_trust_center_url(
+                token, payload["trust_center_url"]
+            ).to_vendor_dict()
+        )
+
+    def vendor_save_answers(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-intake", "Answers")
+        return self._vendor_call(
+            lambda: self._vendor.save_answers(token, payload["answers"]).to_vendor_dict()
+        )
+
+    def vendor_add_coverage(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "vendor-intake", "Coverage")
+        return self._vendor_call(
+            lambda: self._vendor.add_coverage(
+                token, payload["requirement_id"], payload["evidence_artifact_ids"]
+            ).to_dict()
+        )
+
+    def vendor_questions(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(
+            lambda: {"items": self._vendor.unresolved_questions(token)}
+        )
+
+    def vendor_finalize(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(
+            lambda: self._vendor.finalize_submission(token).to_vendor_dict()
+        )
+
+    def list_profiles(self) -> dict[str, Any]:
+        return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
+
+    def create_profile_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "review-profile-version", "CreateDraft")
+        return self._profile_call(
+            lambda: self._profiles.create_draft(
+                payload["profile_key"], payload["criteria"]
+            ).to_dict()
+        )
+
+    def update_profile_draft(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"criteria"} or not isinstance(payload["criteria"], list):
+            raise LocalApiError(400, "validation_error", "profile update requires criteria")
+        return self._profile_call(
+            lambda: self._profiles.update_draft(profile_id, payload["criteria"]).to_dict()
+        )
+
+    def fixture_test_profile(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._validate_vendor_payload(payload, "review-profile-version", "FixtureTest")
+        return self._profile_call(
+            lambda: self._profiles.fixture_test(profile_id, payload["fixtures"])
+        )
+
+    def activate_profile(self, profile_id: str) -> dict[str, Any]:
+        return self._profile_call(lambda: self._profiles.activate(profile_id).to_dict())
+
+    def rollback_profile(self, profile_id: str) -> dict[str, Any]:
+        profile = self._profile_call(lambda: self._profiles.get(profile_id))
+        return self._profile_call(
+            lambda: self._profiles.rollback(
+                profile.profile_key, profile.profile_version_id
+            ).to_dict()
+        )
+
+    def create_review_run(self, case_id: str) -> dict[str, Any]:
+        record = self._require_case(case_id)
+        run = self._vendor_call(lambda: self._vendor.create_review_run(case_id))
+        record.state.human_decision = None
+        record.state.write_preview = None
+        record.state.write_result = None
+        record.state.idempotency_key = None
+        return run.to_dict()
+
+    def list_review_runs(self, case_id: str) -> dict[str, Any]:
+        self._require_case(case_id)
+        return {"items": [run.to_dict() for run in self._vendor.list_review_runs(case_id)]}
+
+    def search_catalog(self, query: str, vendor: str | None = None) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.search_catalog(query, vendor))
+
+    def confirm_catalog_match(self, record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"match_method", "reviewer_id"}:
+            raise LocalApiError(
+                400,
+                "validation_error",
+                "catalog confirmation requires match_method and reviewer_id",
+            )
+        return self._vendor_call(
+            lambda: self._vendor.confirm_catalog_match(
+                record_id, payload["match_method"], payload["reviewer_id"]
+            )
+        )
+
+    def preview_servicenow_import(self, external_id: str) -> dict[str, Any]:
+        try:
+            return self._connector.preview_import(external_id)
+        except ConnectorError as error:
+            raise self._connector_error(error) from error
+
+    def create_from_servicenow_import(self, external_id: str) -> dict[str, Any]:
+        preview = self.preview_servicenow_import(external_id)
+        created = self.create_case(preview["mapped_values"])
+        record = self._require_case(created["case_id"])
+        record.audit.record(
+            event_id=f"{created['case_id']}-servicenow-import",
+            event_type="servicenow.imported",
+            case_id=created["case_id"],
+            occurred_at=self._now(),
+            actor_type=self._reviewer_actor(),
+            workflow_version=record.state.workflow_version,
+            detail={
+                "external_id": external_id,
+                "mapping_version": preview["mapping_version"],
+                "simulated": True,
+            },
+        )
+        return {"preview": preview, "case": created}
+
+    def integration_events(self) -> dict[str, Any]:
+        return {
+            "items": [
+                event.to_dict()
+                for event in self._vendor_repository.list(
+                    "event", workspace_id=self._vendor.workspace_id
+                )
+            ]
+        }
+
+    @staticmethod
+    def _validate_vendor_payload(payload: dict[str, Any], schema: str, definition: str) -> None:
+        try:
+            validate_definition(payload, schema, definition)
+        except ContractValidationError as error:
+            raise LocalApiError(400, "validation_error", str(error)) from error
+
+    @staticmethod
+    def _vendor_call(operation):
+        try:
+            return operation()
+        except VendorBackendError as error:
+            raise LocalApiError(error.status, error.code, str(error)) from error
+
+    @staticmethod
+    def _profile_call(operation):
+        try:
+            return operation()
+        except ProfileError as error:
+            raise LocalApiError(400, "profile_error", str(error)) from error
     def _seed_demo_cases(self) -> None:
         labarchives = CaseIntake(
             product_name="LabArchives",
@@ -405,7 +761,38 @@ class LocalReviewApi:
             table=config.table,
             record_id=target_id,
         )
+        self._register_vendor_case(case_id, intake)
         return record
+
+    def _register_vendor_case(self, case_id: str, intake: CaseIntake) -> None:
+        vendor = next(
+            (
+                item
+                for item in self._vendor.list_vendors()
+                if item.name.casefold() == intake.vendor_name.casefold()
+            ),
+            None,
+        )
+        if vendor is None:
+            vendor = self._vendor.create_vendor(
+                intake.vendor_name,
+                official_domain=intake.official_domain,
+            )
+        product = next(
+            (
+                item
+                for item in self._vendor.list_products(vendor.vendor_id)
+                if item.name.casefold() == intake.product_name.casefold()
+            ),
+            None,
+        )
+        if product is None:
+            product = self._vendor.create_product(vendor.vendor_id, intake.product_name)
+        scope = (
+            f"data_classification={intake.data_classification.value};"
+            f"platform={','.join(sorted(intake.platform))}"
+        )
+        self._vendor.register_case(case_id, product.product_id, intake.use_case, scope)
 
     def _case_payload(self, record: _CaseRecord) -> dict[str, Any]:
         response = {

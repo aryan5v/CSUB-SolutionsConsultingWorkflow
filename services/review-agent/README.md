@@ -19,9 +19,10 @@ workflow rationale and
 
 ```bash
 # From this workspace:
-make test                                  # deterministic unit/API tests (65)
+make test                                  # deterministic unit/API tests (83)
 PYTHONPATH=src python3 -m review_agent.demo
 PYTHONPATH=src python3 -m review_agent.server --port 8787
+PYTHONPATH=src python3 -m review_agent.ingestion.software_workbook --dry-run /path/to/export.xlsx
 ```
 
 The CLI demo runs a low-risk, a medium-risk, and a safe-escalation case, then a
@@ -42,6 +43,8 @@ src/review_agent/
   specialists/     Parallel security/accessibility nodes + citation checker (FR-5)
   packet/          Low- and medium-risk packet composition (FR-6)
   orchestration/   Workflow runner, node functions, checkpointer (sec 5)
+  vendor/          Workspace-scoped repository interfaces, invite/intake service, immutable runs
+  profiles/        Cited draft/fixture-test/activate/rollback profile lifecycle
   adapters/        model (Bedrock), storage (S3), servicenow (mock) interfaces + fakes
   audit/           Structured audit log that rejects sensitive content (sec 7)
   config.py        Env-driven config (region, model IDs) with no secrets
@@ -61,3 +64,20 @@ structured inputs; disputed thresholds escalate rather than being resolved by a
 model. Every write requires a recorded approved `HumanDecision`, a second
 confirmation, matching record version, and is idempotent on
 `case_id + decision_version`.
+
+The standard-library HTTP server is a local adapter, not an authentication
+boundary. Production API Gateway wiring must derive reviewer/admin identity from
+Cognito and move invitation bearer tokens out of access-logged URL paths (or
+redact those paths) before deployment. No local route browses a submitted trust
+center URL; only validated HTTPS public-host metadata is stored.
+
+## Demo assumptions
+
+The two active local review profiles are sanitized, explicitly labeled fixture
+criteria (`fixture:security-profile` and `fixture:accessibility-profile`); they
+are not CSUB policy and establish no thresholds or approval rules. The seeded
+`csub-demo-import-v1` ServiceNow field mapping and request are deterministic
+mock configuration for contract testing only. An administrator must replace
+both fixtures with source-approved profile versions and a reviewed field map
+before any deployed use; models cannot create criteria, mappings, approvals, or
+field selections.

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/software-catalog-entry.schema.json",
+  "title": "SoftwareCatalogEntry",
+  "type": "object", "additionalProperties": false,
+  "required": ["workspace_id", "record_id", "canonical_name", "vendor", "normalized_identity", "source_row", "source_hash", "raw_values", "supported_software", "campus_license", "aliases", "short_name", "platform", "audience", "approval_inferred"],
+  "properties": {
+    "workspace_id": {"type": "string"}, "record_id": {"type": "string"}, "canonical_name": {"type": "string"}, "vendor": {"type": "string"},
+    "normalized_identity": {"type": "string"}, "source_row": {"type": "integer", "minimum": 2},
+    "source_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "raw_values": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+    "supported_software": {"type": ["string", "null"]}, "campus_license": {"type": ["string", "null"]},
+    "aliases": {"type": "array", "items": {"type": "string"}}, "short_name": {"type": ["string", "null"]},
+    "platform": {"type": "array", "items": {"type": "string"}}, "audience": {"type": ["string", "null"]},
+    "approval_inferred": {"const": false}
+  }
+}

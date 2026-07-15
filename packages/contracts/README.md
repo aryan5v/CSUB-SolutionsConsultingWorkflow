@@ -24,6 +24,12 @@ schemas/
   review-queue.schema.json       # GET /review-queue response envelope
   case-action-response.schema.json # Analyze/review/preview/commit response envelope
   servicenow-operations.schema.json  # WritePreview / WriteResult / HumanDecision (FR-7)
+  vendor-records.schema.json     # Workspace-scoped Vendor/Product/Contact/Case records
+  vendor-intake.schema.json      # Hashed invites, submissions, evidence, coverage, and vendor payloads
+  review-profile-version.schema.json # Immutable cited profile criteria and activation lifecycle
+  review-run.schema.json         # Product/use-case/scope-specific immutable review snapshots
+  software-catalog-entry.schema.json # Lossless source rows and explicit support/license signals
+  integration-event.schema.json  # Workspace-scoped integration timeline events
 ```
 
 ## Status

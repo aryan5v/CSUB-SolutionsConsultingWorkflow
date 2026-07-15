@@ -51,6 +51,8 @@ class ServiceNowConnector(Protocol):
 
     def get_request(self, external_id: str) -> dict | None: ...
 
+    def preview_import(self, external_id: str) -> dict: ...
+
     def preview_update(self, case_id: str, decision_version: int) -> WritePreview: ...
 
     def update_request(
@@ -85,6 +87,21 @@ _TABLE_SCHEMAS: dict[str, dict] = {
         ],
         "read_only_fields": ["number", "sys_id", "opened_by"],
     }
+}
+
+_IMPORT_MAPPING_VERSION = "csub-demo-import-v1"
+_IMPORT_FIELD_MAPPING: dict[str, str] = {
+    "short_description": "product_name",
+    "u_vendor": "vendor_name",
+    "description": "use_case",
+    "u_expected_users": "expected_users",
+    "u_platform": "platform",
+    "u_data_classification": "data_classification",
+    "u_estimated_cost_usd": "estimated_cost_usd",
+    "u_integrations": "integrations",
+    "u_uses_sso": "uses_sso",
+    "u_uses_ai": "uses_ai",
+    "u_classroom_or_public_use": "classroom_or_public_use",
 }
 
 
@@ -139,6 +156,39 @@ class MockServiceNowConnector:
             "table": record.table,
             "fields": dict(record.fields),
             "version": record.version,
+        }
+
+    def preview_import(self, external_id: str) -> dict:
+        """Map a seeded request through fixed administrator configuration.
+
+        The source and mapped values are returned before case creation.  No
+        model or caller can add fields to the mapping.
+        """
+        record = self._records.get(external_id)
+        if record is None:
+            raise UnknownRecordError(f"record '{external_id}' not found")
+        source = dict(record.fields)
+        missing = sorted(field for field in _IMPORT_FIELD_MAPPING if field not in source)
+        if missing:
+            raise ConnectorError(f"seeded import record is missing configured fields: {missing}")
+        mapped = {
+            target: source[source_field]
+            for source_field, target in _IMPORT_FIELD_MAPPING.items()
+        }
+        requester = {
+            "name": source.get("requested_for_name"),
+            "email": source.get("requested_for_email"),
+            "department": source.get("requested_for_department"),
+        }
+        mapped["requester"] = requester
+        return {
+            "simulated": True,
+            "mapping_version": _IMPORT_MAPPING_VERSION,
+            "record_id": record.record_id,
+            "record_version": record.version,
+            "source": source,
+            "field_mapping": dict(_IMPORT_FIELD_MAPPING),
+            "mapped_values": mapped,
         }
 
     def preview_update(self, case_id: str, decision_version: int) -> WritePreview:

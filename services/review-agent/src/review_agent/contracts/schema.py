@@ -15,6 +15,7 @@ import functools
 import json
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -104,14 +105,22 @@ def _check(value: object, schema: dict, path: str, root_schema: dict) -> None:
             if key not in value:
                 raise ContractValidationError(f"{path}: missing required field '{key}'")
         properties = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
+        additional = schema.get("additionalProperties")
+        if additional is False:
             extras = set(value) - set(properties)
             if extras:
                 raise ContractValidationError(f"{path}: unexpected fields {sorted(extras)}")
+        minimum_properties = schema.get("minProperties")
+        if minimum_properties is not None and len(value) < minimum_properties:
+            raise ContractValidationError(
+                f"{path}: object has fewer than {minimum_properties} properties"
+            )
         for key, item in value.items():
             subschema = properties.get(key)
             if isinstance(subschema, dict):
                 _check(item, subschema, f"{path}.{key}", root_schema)
+            elif isinstance(additional, dict):
+                _check(item, additional, f"{path}.{key}", root_schema)
 
     if isinstance(value, list):
         minimum_items = schema.get("minItems")
@@ -128,6 +137,11 @@ def _check(value: object, schema: dict, path: str, root_schema: dict) -> None:
     if isinstance(value, str):
         if "minLength" in schema and len(value) < schema["minLength"]:
             raise ContractValidationError(f"{path}: string is shorter than {schema['minLength']}")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ContractValidationError(f"{path}: string is longer than {schema['maxLength']}")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise ContractValidationError(f"{path}: string does not match required pattern")
         value_format = schema.get("format")
         if value_format == "email":
             if len(value) > 254 or value.count("@") != 1:

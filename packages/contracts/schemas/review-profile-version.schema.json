@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/review-profile-version.schema.json",
+  "title": "ReviewProfileVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace_id", "profile_version_id", "profile_key", "version", "criteria", "created_at", "status", "fixture_tested_at"],
+  "properties": {
+    "workspace_id": {"type": "string", "minLength": 1},
+    "profile_version_id": {"type": "string", "minLength": 1},
+    "profile_key": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["draft", "activated"]},
+    "fixture_tested_at": {"type": ["string", "null"]},
+    "criteria": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Criterion"}}
+  },
+  "$defs": {
+    "Criterion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requirement_id", "question", "source_citation", "expected_evidence", "output_fields", "remediation_guidance"],
+      "properties": {
+        "requirement_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$"},
+        "question": {"type": "string", "minLength": 1},
+        "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string", "minLength": 1}}, "additionalProperties": true},
+        "expected_evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "output_fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "remediation_guidance": {"type": "string", "minLength": 1}
+      }
+    },
+    "CreateDraft": {
+      "type": "object", "additionalProperties": false, "required": ["profile_key", "criteria"],
+      "properties": {"profile_key": {"type": "string", "minLength": 1}, "criteria": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Criterion"}}}
+    },
+    "FixtureTest": {
+      "type": "object", "additionalProperties": false, "required": ["fixtures"],
+      "properties": {"fixtures": {"type": "array", "minItems": 1, "items": {"type": "object"}}}
+    }
+  }
+}
