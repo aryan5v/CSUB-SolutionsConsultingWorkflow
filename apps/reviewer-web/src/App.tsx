@@ -35,6 +35,11 @@ import {
   Sparkles,
   StickyNote,
   Sun,
+  Download,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RotateCcw,
   Upload,
   UserCheck,
   Workflow,
@@ -73,13 +78,13 @@ import {
   ContactsPage,
   DocumentationPage,
   NotesPage,
-  RequestsPage,
   SettingsPage,
   TasksPage,
   WorkflowsPage,
   type RestoredPage,
 } from "./WorkspacePages";
 import { VendorRecordsPage } from "./VendorRecordsPage";
+import { CatalogPage } from "./CatalogPage";
 import "./app.css";
 
 type Page = "dashboard" | "queue" | "review" | "evidence" | "audit" | RestoredPage;
@@ -246,21 +251,26 @@ const outcomeChartConfig = {
   escalated: { label: "Safe escalation routes", color: "red" },
 } as const;
 
+const throughputConfig = {
+  entered: { label: "Entered review", color: "blue" },
+  completed: { label: "Completed", color: "green" },
+} as const;
+
 type NavItem = { page: Page; label: string; icon: typeof LayoutDashboard; count?: number; queueMode?: QueueMode };
 const navGroups: Array<{ label: string; items: NavItem[] }> = [
   { label: "Workspace", items: [
     { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { page: "queue", label: "Inbox", icon: Inbox, count: 3, queueMode: "inbox" },
-    { page: "queue", label: "My work", icon: ClipboardCheck, count: 1, queueMode: "my-work" },
+    { page: "queue", label: "Inbox", icon: Inbox, queueMode: "inbox" },
+    { page: "queue", label: "My work", icon: ClipboardCheck, queueMode: "my-work" },
     { page: "review", label: "Active review", icon: FileCheck2 },
     { page: "chat", label: "Chat", icon: MessageCircle },
   ] },
   { label: "Records", items: [
-    { page: "vendors", label: "Vendors", icon: Building2, count: 6 },
+    { page: "vendors", label: "Vendors", icon: Building2 },
     { page: "contacts", label: "Contacts", icon: ContactRound },
-    { page: "requests", label: "Review requests", icon: FileText, count: 5 },
-    { page: "tasks", label: "Tasks", icon: ListTodo, count: 4 },
-    { page: "notes", label: "Notes", icon: StickyNote, count: 3 },
+    { page: "requests", label: "Review requests", icon: FileText },
+    { page: "tasks", label: "Tasks", icon: ListTodo },
+    { page: "notes", label: "Notes", icon: StickyNote },
   ] },
   { label: "Automation", items: [
     { page: "workflows", label: "Workflows", icon: Workflow },
@@ -331,12 +341,13 @@ function Button({ children, variant = "secondary", icon, className = "", ...prop
   return <button className={`button button-${variant} ${className}`} {...props}>{icon}{children}</button>;
 }
 
-function MetricCard({ label, value, detail, icon, tone, trend }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; trend: { data: number[]; color: DitherColor } }) {
+function MetricCard({ label, value, detail, icon, tone, trend, secondary }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; trend: { data: number[]; color: DitherColor }; secondary: { label: string; value: string } }) {
   return <article className="metric-card">
     <div className="metric-top">
       <div className={`metric-icon metric-${tone}`}>{icon}</div>
       <div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
     </div>
+    <div className="metric-secondary"><span>{secondary.label}</span><b>{secondary.value}</b></div>
     <div className="metric-spark" aria-hidden="true">
       <Sparkline data={trend.data} color={trend.color} variant="gradient" bloom="low" />
     </div>
@@ -356,6 +367,44 @@ function ReviewRow({ review, onOpen, compact = false }: { review: ReviewCase; on
   </button>;
 }
 
+type DashboardPoint = { date: string; entered: number; attention: number; analyzing: number; completed: number; escalated: number; needsEvidence: number };
+
+function parseDayOffset(updated: string): number {
+  const value = updated.toLowerCase();
+  if (/(now|min|hour|hr|today|just|local api|moment|second)/.test(value)) return 0;
+  if (/yesterday/.test(value)) return 1;
+  const relative = value.match(/(\d+)\s*(day|d)\b/);
+  if (relative) return Math.min(6, Number(relative[1]));
+  const parsed = Date.parse(updated);
+  if (!Number.isNaN(parsed)) return Math.max(0, Math.min(6, Math.floor((Date.now() - parsed) / 86_400_000)));
+  return 0;
+}
+
+function buildDashboardSeries(cases: ReviewCase[]): DashboardPoint[] {
+  const today = new Date();
+  const days = Array.from({ length: 7 }, (_unused, index) => {
+    const day = new Date(today);
+    day.setDate(today.getDate() - (6 - index));
+    return day;
+  });
+  const points: DashboardPoint[] = days.map((day) => ({
+    date: day.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    entered: 0, attention: 0, analyzing: 0, completed: 0, escalated: 0, needsEvidence: 0,
+  }));
+  cases.forEach((review) => {
+    const index = 6 - parseDayOffset(review.updated);
+    if (index < 0 || index > 6) return;
+    const point = points[index];
+    point.entered += 1;
+    if (review.status === "Analyzing") point.analyzing += 1;
+    if (review.status === "Completed") point.completed += 1;
+    if (review.status === "Ready for review" || review.status === "Needs evidence") point.attention += 1;
+    if (review.status === "Needs evidence") point.needsEvidence += 1;
+    if (review.route === "Safe escalation") point.escalated += 1;
+  });
+  return points;
+}
+
 function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases: ReviewCase[]; onNavigate: (page: Page) => void; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void }) {
   const primaryCase = cases[0] ?? null;
   const actionCases = cases.filter((review) => review.status === "Ready for review" || review.status === "Needs evidence");
@@ -363,22 +412,25 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
   const analyzingCount = cases.filter((review) => review.status === "Analyzing").length;
   const completedCount = cases.filter((review) => review.status === "Completed").length;
   const escalationCount = cases.filter((review) => review.route === "Safe escalation").length;
-  const currentTrend = (value: number, color: DitherColor) => ({ data: Array(7).fill(value) as number[], color });
-  const currentActivityData = [{ day: "Current", intake: cases.length, review: cases.filter((review) => review.status === "Ready for review").length }];
+  const series = buildDashboardSeries(cases);
+  const needsEvidenceCount = cases.filter((review) => review.status === "Needs evidence").length;
+  const readyCount = cases.filter((review) => review.status === "Ready for review").length;
+  const share = (count: number) => (cases.length ? `${Math.round((count / cases.length) * 100)}% of queue` : "0% of queue");
+  const spark = (key: "attention" | "analyzing" | "completed" | "escalated") => series.map((point) => point[key]);
   const currentRiskData = [
     { route: "low", reviews: cases.filter((review) => review.route === "Low risk").length },
     { route: "medium", reviews: cases.filter((review) => review.route === "Medium risk").length },
     { route: "escalated", reviews: escalationCount },
   ];
-  const currentEvidenceData = [{ scope: "Queue", verified: completedCount, review: cases.filter((review) => review.status === "Needs evidence").length }];
+  const currentEvidenceData = [{ scope: "Queue", verified: completedCount, review: needsEvidenceCount }];
   const currentCoverageData = [
-    { dimension: "Ready", covered: cases.filter((review) => review.status === "Ready for review").length, required: cases.length },
+    { dimension: "Ready", covered: readyCount, required: cases.length },
     { dimension: "Analysis", covered: analyzingCount, required: cases.length },
-    { dimension: "Evidence", covered: cases.filter((review) => review.status === "Needs evidence").length, required: cases.length },
+    { dimension: "Evidence", covered: needsEvidenceCount, required: cases.length },
     { dimension: "Complete", covered: completedCount, required: cases.length },
     { dimension: "Escalated", covered: escalationCount, required: cases.length },
   ];
-  const currentOutcomeData = [{ day: "Current", approved: completedCount, escalated: escalationCount }];
+  const currentOutcomeData = series.map((point) => ({ day: point.date, approved: point.completed, escalated: point.escalated }));
   return <div className="dashboard-page">
     <DitherGradient from="blue" to="transparent" direction="up" cell={4} opacity={0.16} className="dashboard-gradient" />
     <div className="dashboard-content-layer">
@@ -397,41 +449,39 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
     </section>
 
     <section className="metric-grid" aria-label="Review queue summary">
-      <MetricCard label="Needs your attention" value={String(attentionCount)} detail="Current loaded queue" icon={<Inbox size={18} />} tone="yellow" trend={currentTrend(attentionCount, "orange")} />
-      <MetricCard label="In analysis" value={String(analyzingCount)} detail="Current loaded queue" icon={<Activity size={18} />} tone="blue" trend={currentTrend(analyzingCount, "blue")} />
-      <MetricCard label="Completed" value={String(completedCount)} detail="Current loaded queue" icon={<CheckCircle2 size={18} />} tone="green" trend={currentTrend(completedCount, "green")} />
-      <MetricCard label="Safe escalations" value={String(escalationCount)} detail="Current loaded queue" icon={<AlertTriangle size={18} />} tone="red" trend={currentTrend(escalationCount, "red")} />
+      <MetricCard label="Needs your attention" value={String(attentionCount)} detail="Ready or waiting on evidence" icon={<Inbox size={18} />} tone="yellow" trend={{ data: spark("attention"), color: "orange" }} secondary={{ label: "Share of queue", value: share(attentionCount) }} />
+      <MetricCard label="In analysis" value={String(analyzingCount)} detail="Specialist or policy stage" icon={<Activity size={18} />} tone="blue" trend={{ data: spark("analyzing"), color: "blue" }} secondary={{ label: "Share of queue", value: share(analyzingCount) }} />
+      <MetricCard label="Completed" value={String(completedCount)} detail="Decision recorded" icon={<CheckCircle2 size={18} />} tone="green" trend={{ data: spark("completed"), color: "green" }} secondary={{ label: "Share of queue", value: share(completedCount) }} />
+      <MetricCard label="Safe escalations" value={String(escalationCount)} detail="Held for review" icon={<AlertTriangle size={18} />} tone="red" trend={{ data: spark("escalated"), color: "red" }} secondary={{ label: "Evidence gaps", value: String(needsEvidenceCount) }} />
     </section>
 
-    <div className="dashboard-grid">
-      <section className="panel attention-panel">
-        <div className="panel-heading">
-          <div><p className="eyebrow">Next up</p><h2>Needs attention</h2><p>Reviews remain paused until a person acts.</p></div>
-          <Button variant="ghost" onClick={() => onNavigate("queue")}>View queue <ArrowRight size={14} /></Button>
-        </div>
-        <div className="review-list">
-          {actionCases.map((review) => <ReviewRow key={review.id} review={review} compact onOpen={onOpenCase} />)}
-        </div>
-      </section>
+    <section className="panel throughput-panel">
+      <div className="panel-heading">
+        <div><p className="eyebrow">Last 7 days</p><h2>Review throughput</h2><p>Records entering review and completions, placed by their most recent update. Every value comes from the loaded queue.</p></div>
+        <span className="ascii-note">API SNAPSHOT</span>
+      </div>
+      <div className="chart-summary"><strong>{cases.length}</strong><span>records loaded</span><small>{completedCount} completed · {escalationCount} escalated</small></div>
+      <div className="chart-frame chart-frame-tall" aria-label="Dated area chart of records entering review and completions over the last seven days">
+        <AreaChart data={series} config={throughputConfig} bloom="low" animationDuration={700}>
+          <XAxis dataKey="date" />
+          <YAxis />
+          <Legend isClickable />
+          <Tooltip labelKey="date" />
+          <Area dataKey="entered" variant="gradient" />
+          <Area dataKey="completed" variant="dotted" />
+        </AreaChart>
+      </div>
+    </section>
 
-      <section className="panel activity-panel">
-        <div className="panel-heading">
-          <div><p className="eyebrow">Current snapshot</p><h2>Review activity</h2><p>Counts from the records currently loaded in this workspace.</p></div>
-          <span className="ascii-note">QUEUE</span>
-        </div>
-        <div className="chart-summary"><strong>{cases.length}</strong><span>records loaded</span><small>{cases.filter((review) => review.status === "Ready for review").length} ready for a decision</small></div>
-        <div className="chart-frame" aria-label="Area chart of currently loaded reviews and records ready for a decision">
-          <AreaChart data={currentActivityData} config={activityConfig} bloom="low" animationDuration={700}>
-            <XAxis dataKey="day" />
-            <YAxis />
-            <Legend isClickable />
-            <Tooltip labelKey="day" />
-            <Area dataKey="intake" variant="dotted" />
-            <Area dataKey="review" variant="gradient" />
-          </AreaChart>
-        </div>
-      </section>
-    </div>
+    <section className="panel attention-panel">
+      <div className="panel-heading">
+        <div><p className="eyebrow">Next up</p><h2>Needs attention</h2><p>Reviews remain paused until a person acts.</p></div>
+        <Button variant="ghost" onClick={() => onNavigate("queue")}>View queue <ArrowRight size={14} /></Button>
+      </div>
+      <div className="review-list">
+        {actionCases.length ? actionCases.map((review) => <ReviewRow key={review.id} review={review} compact onOpen={onOpenCase} />) : <div className="empty-state"><Inbox size={18} /><strong>Nothing is waiting on you.</strong><span>New requests appear here as they arrive.</span></div>}
+      </div>
+    </section>
 
     <div className="dashboard-insight-grid">
       <section className="panel dither-insight-card">
@@ -551,7 +601,7 @@ function SpecialistCard({ icon, title, status, summary, points }: { icon: ReactN
   </article>;
 }
 
-function ReviewOverview({ state, review, recordContext, recordContextError, onOpenEvidence, matchConfirmed, onConfirmMatch }: { state: ReviewState | null; review: ReviewCase; recordContext: ReviewerRecordContext | null; recordContextError: string; onOpenEvidence: () => void; matchConfirmed: boolean; onConfirmMatch: () => void }) {
+function ReviewOverview({ state, review, recordContext, recordContextError, onOpenEvidence, onOpenPacket, matchConfirmed, onConfirmMatch }: { state: ReviewState | null; review: ReviewCase; recordContext: ReviewerRecordContext | null; recordContextError: string; onOpenEvidence: () => void; onOpenPacket: () => void; matchConfirmed: boolean; onConfirmMatch: () => void }) {
   const intake = state?.case_input;
   const candidate = state?.software_candidates[0];
   const latestInvite = recordContext?.invites[recordContext.invites.length - 1];
@@ -619,6 +669,7 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
       <div className="card-heading"><div><p className="eyebrow">05 / Evidence & citations</p><h2>{policy ? `${policy.required_evidence.length} required evidence item${policy.required_evidence.length === 1 ? "" : "s"}` : "Analysis paused"}</h2></div><StatusBadge>{policy ? "Review needed" : "Paused"}</StatusBadge></div>
       <div className="gap-row"><span className="gap-icon">!</span><span><strong>{policy ? (policy.required_evidence.join(", ") || "No additional evidence required") : "Confirm the software candidate before evidence analysis."}</strong><small>{policy ? "Requirements come from the deterministic policy result." : "No specialist or policy result has been fabricated."}</small></span><Button variant="secondary" onClick={onOpenEvidence}>Review sources <ExternalLink size={14} /></Button></div>
       <div className="evidence-summary-row"><span><FileCheck2 size={16} />{policy?.citations.length ?? 0} policy citations</span><span><CheckCircle2 size={16} />{state?.draft_packet ? "Packet composed" : "Packet not composed"}</span><span><FolderLock size={16} />{state ? "Connected scoped state" : "Offline demo only"}</span></div>
+      {state?.draft_packet && <button type="button" className="evidence-pdf-link" onClick={onOpenPacket}><Download size={14} aria-hidden="true" />Open the evidence packet (PDF)</button>}
     </section>
   </div>;
 }
@@ -658,10 +709,11 @@ function WritebackPreview({ decision, written, preview, onWrite }: { decision: D
   </section>;
 }
 
-function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "packet" | "writeback") => void }) {
+function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange, comment, onCommentChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, rerunAvailable }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "packet" | "writeback") => void; comment: string; onCommentChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; rerunAvailable: boolean }) {
   return <aside className="decision-panel">
     <div className="decision-panel-heading"><span className="decision-icon"><UserCheck size={19} /></span><div><p className="eyebrow">Human checkpoint</p><h2>Your decision</h2></div></div>
     <p className="decision-copy">Review the draft, cited findings, and open accessibility item. Your action is recorded with this packet version.</p>
+    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Reviewer comment (optional)</span><textarea value={comment} onChange={(event) => onCommentChange(event.target.value)} placeholder="Add context for this decision. It is saved with your recorded action." /></label>
     <div className="decision-state"><span>Current decision</span><StatusBadge>{decision}</StatusBadge></div>
     {!approvalAllowed && approvalBlockReason && <div className="decision-prerequisite"><LockKeyhole size={15} /><span><strong>Approval is locked.</strong> {approvalBlockReason}</span></div>}
     {decision === "Pending" ? <div className="decision-buttons">
@@ -677,11 +729,17 @@ function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecis
       <span><History size={14} />Every decision is audited</span>
       <span><CircleDashed size={14} />External write is simulated</span>
     </div>
+    <div className="decision-rerun">
+      <p className="eyebrow">One custom rerun</p>
+      <p className="decision-rerun-copy">Run the analysis once more with a specific instruction. This creates a new immutable review version and invalidates the prior write-back preview.</p>
+      <textarea value={rerunInstruction} onChange={(event) => onRerunInstructionChange(event.target.value)} placeholder="For example: recheck the VPAT against the requested product version." disabled={rerunUsed || !rerunAvailable} aria-label="Custom rerun instruction" />
+      <Button variant="secondary" className="full-width" icon={<RotateCcw size={14} />} disabled={rerunUsed || !rerunAvailable} onClick={onRerun}>{rerunUsed ? "Custom rerun used" : "Rerun with this instruction"}</Button>
+    </div>
     {decision === "Approved" && <Button variant="primary" className="full-width" onClick={() => onTabChange("writeback")}>Review write-back <ArrowRight size={14} /></Button>}
   </aside>;
 }
 
-function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void }) {
+function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence, onOpenPacket, comment, onCommentChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
   const [tab, setTab] = useState<"overview" | "packet" | "writeback">("overview");
   const approvalAllowed = matchConfirmed && Boolean(state?.draft_packet) && state?.status !== "escalated";
   const approvalBlockReason = !matchConfirmed
@@ -726,11 +784,11 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
 
     <div className="review-workspace">
       <div className="review-main">
-        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={onOpenEvidence} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
+        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={onOpenEvidence} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
         {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the fuzzy or semantic software candidate before deterministic policy, specialist analysis, and packet composition continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
       </div>
-      <DecisionPanel decision={decision} approvalAllowed={approvalAllowed} approvalBlockReason={approvalBlockReason} onDecision={onDecision} onTabChange={setTab} />
+      <DecisionPanel decision={decision} approvalAllowed={approvalAllowed} approvalBlockReason={approvalBlockReason} onDecision={onDecision} onTabChange={setTab} comment={comment} onCommentChange={onCommentChange} rerunInstruction={rerunInstruction} onRerunInstructionChange={onRerunInstructionChange} onRerun={onRerun} rerunUsed={rerunUsed} rerunAvailable={Boolean(state)} />
     </div>
   </>;
 }
@@ -859,6 +917,10 @@ export default function App() {
   const [globalQuery, setGlobalQuery] = useState("");
   const [newRequestOpen, setNewRequestOpen] = useState(false);
   const [toast, setToast] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("review-sidebar") === "collapsed");
+  const [reviewComment, setReviewComment] = useState("");
+  const [rerunInstruction, setRerunInstruction] = useState("");
+  const [rerunUsed, setRerunUsed] = useState(false);
 
   const syncActionResponse = (response: CaseActionResponse, syncDraft = false) => {
     const summary = queueItemToSummary(response.queue_item);
@@ -928,6 +990,10 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    localStorage.setItem("review-sidebar", sidebarCollapsed ? "collapsed" : "expanded");
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(timer);
@@ -936,6 +1002,9 @@ export default function App() {
   const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => { if (nextQueueMode) setQueueMode(nextQueueMode); setPage(nextPage); setMobileNavOpen(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const apiErrorMessage = (error: unknown) => error instanceof ReviewApiError ? error.message : "The local backend request failed.";
   const openCase = (review: ReviewCase) => {
+    setReviewComment("");
+    setRerunInstruction("");
+    setRerunUsed(false);
     const state = caseStates[review.id];
     if (!state) {
       setToast(`${review.product} is available as a sanitized local summary while the backend is offline.`);
@@ -1019,6 +1088,7 @@ export default function App() {
         reviewer_id: "alex.reviewer@example.edu",
         action,
         decided_at: new Date().toISOString(),
+        comments: reviewComment.trim() || undefined,
         edits,
       });
       syncActionResponse(reviewed);
@@ -1052,6 +1122,35 @@ export default function App() {
       setToast(apiErrorMessage(error));
     }
   };
+  const openPacket = async () => {
+    if (!activeState?.draft_packet) { setToast("A composed packet is required before opening the evidence PDF."); return; }
+    try {
+      const result = await reviewApi.getPacketPdf(activeState.case_id);
+      const pdfUrl = result.view_url;
+      if (!pdfUrl) { setToast(result.simulated ? "Fixture mode has no downloadable packet PDF. Use the live API to view the packet." : "The packet is composed, but no downloadable PDF link was returned yet."); return; }
+      const safe = new URL(pdfUrl, window.location.origin);
+      if (safe.protocol !== "https:" && safe.hostname !== "127.0.0.1" && safe.hostname !== "localhost") {
+        setToast("The packet PDF link was not a safe HTTPS URL.");
+        return;
+      }
+      window.open(safe.toString(), "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setToast(apiErrorMessage(error));
+    }
+  };
+  const runCustomRerun = async () => {
+    if (rerunUsed) { setToast("Only one custom rerun is allowed for a review."); return; }
+    if (!rerunInstruction.trim()) { setToast("Add a short instruction before rerunning."); return; }
+    if (!backendConnected || !activeState) { setToast("Connect the local backend to rerun analysis."); return; }
+    try {
+      const response = await reviewApi.rerunAnalysis(activeState.case_id, rerunInstruction.trim());
+      syncActionResponse(response, true);
+      setRerunUsed(true);
+      setToast("Rerun complete. A new immutable review version was created and the prior preview is invalidated.");
+    } catch (error) {
+      setToast(apiErrorMessage(error));
+    }
+  };
   const submitRequest = async (input: CaseIntakeInput) => {
     if (reviewApi.mode === "fixture") {
       setToast("Fixture mode is read-only for review decisions. Switch to live API mode to create a durable case.");
@@ -1070,20 +1169,26 @@ export default function App() {
     }
   };
 
+  const navCount = (item: NavItem): number | undefined => {
+    if (item.page === "queue" && item.queueMode === "inbox") return cases.filter((review) => review.status !== "Completed").length || undefined;
+    if (item.page === "queue" && item.queueMode === "my-work") return cases.filter((review) => review.owner === "Alex Reviewer").length || undefined;
+    return undefined;
+  };
   const pageLabel = page === "queue" ? (queueMode === "my-work" ? "My work" : queueMode === "inbox" ? "Inbox" : "Review queue") : allNavItems.find((item) => item.page === page)?.label ?? "Workspace";
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
     <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
       <div className="brand">
-        <span className="brand-mark">[TR]</span>
-        <span><strong>Technology Review</strong><small>Reviewer workspace</small></span>
+        <img className="brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
+        <span><strong>Vetted</strong><small>Reviewer workspace</small></span>
+        <button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={sidebarCollapsed}>{sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
         <button className="sidebar-close" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"><X size={18} /></button>
       </div>
-      <div className="workspace-chip"><span>CSUB</span><div><strong>Solutions Consulting</strong><small>{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : backendConnected ? "Live API connected" : "Live API unavailable"}</small></div></div>
+      <div className="workspace-chip"><span>CSUB</span><div><strong>CSUB workspace</strong><small>{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : backendConnected ? "Live API connected" : "Live API unavailable"}</small></div></div>
       <nav className="primary-nav" aria-label="Primary navigation">
-        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} /><span>{item.label}</span>{item.count && <em>{item.count}</em>}</button>; })}</div>)}
+        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em>{badge}</em> : null; })()}</button>; })}</div>)}
       </nav>
       <div className="sidebar-spacer" />
       <div className="boundary-card"><ShieldCheck size={17} /><div><strong>Human-controlled</strong><span>AI can draft and compare. It cannot set policy, approve, or write externally.</span></div></div>
@@ -1105,10 +1210,10 @@ export default function App() {
         {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span><small>No fixture records were substituted. Set <code>VITE_REVIEW_DATA_MODE=fixture</code> only when you intend to use the simulated demo.</small></div>}
         {page === "dashboard" && <DashboardPage cases={cases} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
         {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} mode={queueMode} />}
-        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} />}
-        {page === "vendors" && <VendorRecordsPage notify={setToast} />}
+        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
+        {page === "vendors" && <CatalogPage notify={setToast} />}
         {page === "contacts" && <ContactsPage notify={setToast} />}
-        {page === "requests" && <RequestsPage onOpenReview={() => navigate("review")} notify={setToast} />}
+        {page === "requests" && <VendorRecordsPage notify={setToast} />}
         {page === "tasks" && <TasksPage notify={setToast} />}
         {page === "notes" && <NotesPage notify={setToast} />}
         {(page === "workflows" || page === "workflow-runs" || page === "workflow-versions") && <WorkflowsPage view={page} navigate={(nextPage) => navigate(nextPage)} notify={setToast} />}

@@ -1,4 +1,5 @@
-import { reviewerAuth, type ReviewerAuthProvider } from "./auth";
+import type { ReviewerAuthProvider } from "./auth";
+import { betterAuthReviewer } from "./authClient";
 
 export type QueueStatus = "Ready for review" | "Analyzing" | "Needs evidence" | "Completed";
 export type RiskRoute = "Low risk" | "Medium risk" | "Safe escalation" | "Pending route";
@@ -272,6 +273,35 @@ export type CatalogSearchResponse = {
   semantic_disclosure: string;
   catalog_membership_is_approval: false;
 };
+
+export type CatalogListItem = {
+  record_id: string;
+  canonical_name: string;
+  vendor: string;
+  product?: string | null;
+  aliases?: string[] | null;
+  platform?: string | null;
+  audience?: string | null;
+  department?: string | null;
+  support_flag?: string | null;
+  license_flag?: string | null;
+  source_row?: number | null;
+};
+export type CatalogListResponse = {
+  items: CatalogListItem[];
+  total: number;
+  offset: number;
+  limit: number;
+  catalog_membership_is_approval: false;
+};
+
+export type PacketPdfResponse = {
+  view_url?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  pdf_sha256?: string | null;
+  simulated?: boolean;
+};
 export type ReviewerRecordContext = {
   invites: InviteProjection[];
   contacts: VendorContact[];
@@ -352,7 +382,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
   const baseUrl = (options.baseUrl ?? import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
   const mode = options.mode ?? configuredMode();
   const runFetch = (input: RequestInfo | URL, init?: RequestInit) => (options.fetchImpl ?? globalThis.fetch)(input, init);
-  const authProvider = options.authProvider ?? reviewerAuth;
+  const authProvider = options.authProvider ?? betterAuthReviewer;
   const fixture = createFixtureAdapter();
 
   function fixtureInviteView(markOpen = false): VendorInviteView {
@@ -421,6 +451,9 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     },
     analyzeCase(caseId: string, confirmedMatchId?: string): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: "alex.reviewer@example.edu" } : {}) });
+    },
+    rerunAnalysis(caseId: string, customInstruction: string): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: "alex.reviewer@example.edu", rerun: true, custom_instruction: customInstruction }) });
     },
     recordDecision(caseId: string, decision: ReviewDecisionInput): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/review`, { method: "POST", body: JSON.stringify({ case_id: caseId, ...decision }) });
@@ -499,6 +532,34 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     confirmCatalogMatch(recordId: string, matchMethod: MatchMethod, reviewerId: string): Promise<{ confirmed: true; approval_granted: false }> {
       if (mode === "fixture") return fixtureOnly({ confirmed: true, approval_granted: false });
       return request(`/catalog/matches/${encodeURIComponent(recordId)}/confirm`, { method: "POST", body: JSON.stringify({ match_method: matchMethod, reviewer_id: reviewerId }) });
+    },
+    async listCatalog(query = "", limit = 20, offset = 0): Promise<CatalogListResponse> {
+      if (mode === "fixture") {
+        const rows: CatalogListItem[] = [
+          { record_id: "row-238", canonical_name: "Canvas", vendor: "Instructure", product: "Canvas LMS", platform: "Web", audience: "Faculty and students", department: "Academic Technology", support_flag: "Supported", license_flag: "Institution license", source_row: 238 },
+          { record_id: "row-144", canonical_name: "Qualtrics XM", vendor: "Qualtrics", product: "Experience Management", platform: "Web", audience: "Staff", department: "Institutional Research", support_flag: "Supported", license_flag: "Site license", source_row: 144 },
+          { record_id: "row-091", canonical_name: "Zoom", vendor: "Zoom Video Communications", product: "Meetings", platform: "Web, Desktop", audience: "All", department: "IT", support_flag: "Supported", license_flag: "Enterprise", source_row: 91 },
+          { record_id: "row-172", canonical_name: "LabArchives", vendor: "LabArchives, LLC", product: "Electronic Lab Notebook", platform: "Web", audience: "Research", department: "College of Science", support_flag: "Conditional", license_flag: "Departmental", source_row: 172 },
+        ];
+        const q = query.trim().toLowerCase();
+        const filtered = q ? rows.filter((row) => `${row.canonical_name} ${row.vendor} ${row.product ?? ""}`.toLowerCase().includes(q)) : rows;
+        return fixtureOnly({ items: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit, catalog_membership_is_approval: false });
+      }
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (query.trim()) params.set("q", query.trim());
+      const payload = await request<Partial<CatalogListResponse> & { records?: CatalogListItem[] }>(`/catalog?${params.toString()}`);
+      const items = payload.items ?? payload.records ?? [];
+      return {
+        items,
+        total: typeof payload.total === "number" ? payload.total : items.length,
+        offset: typeof payload.offset === "number" ? payload.offset : offset,
+        limit: typeof payload.limit === "number" ? payload.limit : limit,
+        catalog_membership_is_approval: false,
+      };
+    },
+    getPacketPdf(caseId: string): Promise<PacketPdfResponse> {
+      if (mode === "fixture") return fixtureOnly({ view_url: null, content_type: "application/pdf", size_bytes: 0, pdf_sha256: "simulated-fixture", simulated: true });
+      return request(`/cases/${encodeURIComponent(caseId)}/packet/pdf`);
     },
     resolveInvite(token: string): Promise<VendorInviteView> {
       if (mode === "fixture") return fixtureOnly(fixtureInviteView());

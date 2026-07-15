@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { LockKeyhole, LogOut, ShieldCheck } from "lucide-react";
-import { reviewerAuth, type ReviewerAuthProvider, type ReviewerAuthSnapshot } from "./auth";
+import type { ReviewerAuthProvider, ReviewerAuthSnapshot } from "./auth";
+import { betterAuthReviewer } from "./authClient";
 
 export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolean {
   return mode === "live";
@@ -9,7 +10,7 @@ export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolea
 export default function AuthGate({
   children,
   mode,
-  provider = reviewerAuth,
+  provider = betterAuthReviewer,
 }: {
   children: ReactNode;
   mode: "live" | "fixture";
@@ -43,17 +44,17 @@ export default function AuthGate({
 
   return <main className="auth-gate" id="main-content">
     <section className="auth-card" aria-labelledby="reviewer-sign-in-title">
-      <div className="auth-icon"><LockKeyhole size={24} aria-hidden="true" /></div>
-      <p className="eyebrow">CSUB · SECURE REVIEWER WORKSPACE</p>
+      <img className="auth-logo" src="/vetted-logo.png" alt="" width={40} height={40} aria-hidden="true" />
+      <p className="eyebrow">VETTED · CSUB REVIEWER WORKSPACE</p>
       <h1 id="reviewer-sign-in-title">Reviewer sign-in required</h1>
       {auth.status === "checking"
         ? <p role="status">Checking your session…</p>
-        : <p>{auth.message ?? "Use the seeded Cognito reviewer account supplied by the demo operator."}</p>}
+        : <p>{auth.message ?? "Sign in with campus single sign-on to open the seeded CSUB reviewer workspace."}</p>}
       {auth.status !== "checking" && <button className="button primary" type="button" onClick={() => void provider.signIn()}>
-        Sign in with Cognito
+        <LockKeyhole size={15} aria-hidden="true" />Go to sign-in
       </button>}
       {auth.status === "error" && <div className="auth-error" role="alert">{auth.message}</div>}
-      <small>Live mode never falls back to fixture records. Credentials are entered only on Cognito Managed Login.</small>
+      <small>Campus single sign-on is the only way in. Live mode never falls back to fixture records.</small>
     </section>
   </main>;
 }

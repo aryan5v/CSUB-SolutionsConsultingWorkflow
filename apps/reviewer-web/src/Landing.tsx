@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import "./landing.css";
 
 /*
- * Public landing surface for the CSUB Technology Review Agent ("Vetted").
+ * Public landing surface for VETTED, the reviewer workspace for the seeded CSUB demo.
  * Visual language adapted from the PR #11 Paper reference: an isometric
  * automation line that carries a request in, runs evidence and policy checks,
  * pauses for human review, and sends an approved result out.
@@ -203,15 +203,15 @@ export default function Landing() {
       <div className="vp-inner">
         <header className="vp-nav">
           <a className="vp-brand" href="/">
-            <PixelLogo />
+            <img className="vp-brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
             Vetted
           </a>
           <div className="vp-nav-actions">
-            <a className="vp-nav-login" href="/app">
-              Log in
+            <a className="vp-nav-login" href="/login">
+              Sign in
             </a>
-            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/app">
-              Open the workspace
+            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/signup">
+              Create account
             </a>
           </div>
         </header>
@@ -245,12 +245,12 @@ export default function Landing() {
               A reviewer then makes the final call.
             </p>
             <div className="vp-cta-row land-fade-up-delay">
-              <a className="vp-btn vp-btn-ink" href="/app">
-                Open the workspace
+              <a className="vp-btn vp-btn-ink" href="/signup">
+                Create account
                 <ArrowIcon />
               </a>
-              <a className="vp-btn vp-btn-primary" href="#workflow">
-                See how a review runs
+              <a className="vp-btn vp-btn-primary" href="/login">
+                Sign in
               </a>
             </div>
             <div className="vp-checks land-fade-up-delay-2">
@@ -427,7 +427,8 @@ export default function Landing() {
             Vetted. AI reads, rules route, people decide.
           </div>
           <div className="vp-footer-links">
-            <a href="/app">Log in</a>
+            <a href="/login">Sign in</a>
+            <a href="/signup">Create account</a>
             <a href="/intake">Submit a vendor</a>
             <span className="vp-footer-copy">CSU AI Summer Camp 2026</span>
           </div>

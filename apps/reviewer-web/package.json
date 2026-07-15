@@ -1,5 +1,5 @@
 {
-  "name": "csub-technology-review-agent",
+  "name": "vetted-reviewer-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@xyflow/react": "12.11.2",
+    "better-auth": "1.6.23",
     "clsx": "2.1.1",
     "d3-scale": "4.0.2",
     "d3-shape": "3.2.0",

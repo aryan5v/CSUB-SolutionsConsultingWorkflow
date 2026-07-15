@@ -4,12 +4,15 @@ import App from "./App";
 import AuthGate from "./AuthGate";
 import Landing from "./Landing";
 import PublicIntake from "./PublicIntake";
+import { LoginPage, SignupPage } from "./AuthPages";
 import { consumeInviteTokenFromFragment, reviewApi } from "./api";
 
 /*
  * One React application owns every public and authenticated surface. Route
  * selection is a small pathname switch so we avoid a router dependency:
- *   /          public landing (marketing)
+ *   /          public VETTED landing
+ *   /login     reviewer sign-in (Better Auth)
+ *   /signup    reviewer account creation (Better Auth)
  *   /intake    public, file-first vendor intake
  *   /app/*     authenticated reviewer workspace
  *
@@ -20,6 +23,8 @@ import { consumeInviteTokenFromFragment, reviewApi } from "./api";
 function resolveRoute() {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path === "/app" || path.startsWith("/app/")) return <AuthGate mode={reviewApi.mode}><App /></AuthGate>;
+  if (path === "/login") return <LoginPage />;
+  if (path === "/signup") return <SignupPage />;
   if (path === "/intake") {
     const token = consumeInviteTokenFromFragment(window.location, window.history);
     return <PublicIntake initialToken={token} />;
