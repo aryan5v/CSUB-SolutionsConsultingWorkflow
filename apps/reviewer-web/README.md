@@ -50,6 +50,36 @@ intentionally want the clearly labeled in-browser fixture adapter. Set
 `VITE_API_BASE_URL` only when intentionally targeting another review API. Do
 not put credentials or invitation tokens in frontend environment variables.
 
+### Live reviewer authentication
+
+Live `/app` mode uses Cognito OAuth 2.0 authorization code with S256 PKCE and a
+public SPA client. The browser keeps the access and ID JWTs only in
+`sessionStorage`, ignores refresh tokens, clears expired or unauthorized
+sessions, and removes OAuth codes/state/token fragments from browser history.
+The access JWT is attached only to reviewer API methods. Vendor invitation
+methods continue to send only the case-scoped invitation bearer, and direct
+presigned uploads never receive the reviewer JWT. Fixture mode bypasses the
+auth provider only when `VITE_REVIEW_DATA_MODE=fixture` is explicit.
+
+Configure public identifiers/URLs at build time (none are credentials):
+
+```bash
+VITE_COGNITO_DOMAIN=https://<domain-prefix>.auth.<region>.amazoncognito.com
+VITE_COGNITO_CLIENT_ID=<public-spa-client-id>
+VITE_COGNITO_REDIRECT_URI=https://<frontend-host>/app
+VITE_COGNITO_LOGOUT_URI=https://<frontend-host>/app
+```
+
+The redirect and logout variables default to the current origin plus `/app`,
+but each exact URL must be allowlisted on the Cognito app client. The
+integration owner must add a Cognito user-pool domain and configure the existing
+public client with `generateSecret: false`, OAuth authorization-code grant,
+scopes `openid`, `email`, and `profile`, and exact callback/logout URLs. Keep
+SRP only if another reviewed client still needs it; this SPA does not collect a
+username or password and does not use SRP directly. Do not enable implicit
+grant. The integration change should also output the user-pool domain alongside
+the existing pool/client IDs.
+
 The connected core flow loads the review queue, creates vendor, product,
 contact, case, and tracked invitation records, pauses for fuzzy or semantic
 match confirmation, resumes deterministic analysis, displays the packet,

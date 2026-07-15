@@ -612,3 +612,15 @@ dd { margin: 0; color: var(--text-secondary); font-size: 9px; font-weight: 620; 
 .live-api-failure span { color:var(--foreground); font-size:9px; }.live-api-failure small { margin-left:auto; color:var(--text-muted); font-size:8px; }.live-api-failure code { color:var(--foreground); }
 .record-context-card { padding:17px; }.record-context-error { padding:9px; border-radius:5px; background:var(--critical-soft); color:var(--critical); font-size:8px; }
 @media(max-width:680px){.live-api-failure{flex-direction:column}.live-api-failure small{margin-left:0}}
+
+.auth-gate { display:grid; min-height:100vh; place-items:center; padding:24px; background:var(--background); }
+.auth-card { width:min(100%,440px); padding:30px; border:1px solid var(--border); border-radius:10px; background:var(--card); box-shadow:var(--shadow-md); text-align:center; }
+.auth-card h1 { margin:8px 0 10px; font-size:24px; }
+.auth-card p { margin:0 0 18px; color:var(--text-secondary); line-height:1.6; }
+.auth-card .button { display:inline-flex; margin:0 auto; }
+.auth-card > small { display:block; margin-top:18px; color:var(--text-muted); font-size:9px; line-height:1.5; }
+.auth-icon { display:grid; width:48px; height:48px; margin:0 auto 16px; place-items:center; border-radius:50%; background:var(--accent-soft); color:var(--accent); }
+.auth-error { margin-top:14px; padding:10px; border:1px solid color-mix(in srgb,var(--critical),transparent 55%); border-radius:6px; background:var(--critical-soft); color:var(--critical); font-size:10px; line-height:1.5; }
+.reviewer-session { position:fixed; z-index:60; right:12px; bottom:12px; display:flex; align-items:center; gap:7px; padding:7px 8px 7px 10px; border:1px solid var(--border-strong); border-radius:7px; background:var(--popover); box-shadow:var(--shadow-md); color:var(--text-secondary); font-size:9px; }
+.reviewer-session > button { display:flex; align-items:center; gap:5px; padding:5px 7px; border-radius:4px; background:var(--surface-subtle); color:var(--foreground); font-size:9px; }
+.reviewer-session > button:hover { background:var(--surface-active); }

@@ -1,3 +1,5 @@
+import { reviewerAuth, type ReviewerAuthProvider } from "./auth";
+
 export type QueueStatus = "Ready for review" | "Analyzing" | "Needs evidence" | "Completed";
 export type RiskRoute = "Low risk" | "Medium risk" | "Safe escalation" | "Pending route";
 export type ApiMode = "live" | "fixture";
@@ -291,7 +293,7 @@ export class ReviewApiError extends Error {
 }
 
 type FetchLike = typeof fetch;
-type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike };
+type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike; authProvider?: ReviewerAuthProvider };
 
 function configuredMode(): ApiMode {
   return import.meta.env.VITE_REVIEW_DATA_MODE === "fixture" ? "fixture" : "live";
@@ -350,6 +352,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
   const baseUrl = (options.baseUrl ?? import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
   const mode = options.mode ?? configuredMode();
   const runFetch = (input: RequestInfo | URL, init?: RequestInit) => (options.fetchImpl ?? globalThis.fetch)(input, init);
+  const authProvider = options.authProvider ?? reviewerAuth;
   const fixture = createFixtureAdapter();
 
   function fixtureInviteView(markOpen = false): VendorInviteView {
@@ -373,17 +376,29 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     };
   }
 
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  async function request<T>(path: string, init?: RequestInit, audience: "reviewer" | "vendor" = "reviewer"): Promise<T> {
+    if (mode === "fixture") {
+      throw new ReviewApiError(400, "fixture_network_blocked", "Fixture mode cannot call the live API.");
+    }
+    const headers = new Headers({
+      Accept: "application/json",
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...init?.headers,
+    });
+    if (audience === "reviewer") {
+      const accessToken = authProvider.getAccessToken();
+      if (!accessToken) {
+        throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.");
+      }
+      headers.set("Authorization", `Bearer ${accessToken}`);
+    }
     const response = await runFetch(`${baseUrl}${path}`, {
       ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...init?.headers,
-      },
+      headers,
     });
     const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string } };
     if (!response.ok) {
+      if (audience === "reviewer" && response.status === 401) authProvider.handleUnauthorized();
       throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`);
     }
     return payload as T;
@@ -487,15 +502,15 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     },
     resolveInvite(token: string): Promise<VendorInviteView> {
       if (mode === "fixture") return fixtureOnly(fixtureInviteView());
-      return request("/vendor/invites/current", { headers: authorization(token) });
+      return request("/vendor/invites/current", { headers: authorization(token) }, "vendor");
     },
     openInvite(token: string): Promise<VendorInviteView> {
       if (mode === "fixture") return fixtureOnly(fixtureInviteView(true));
-      return request("/vendor/invites/current/open", { method: "POST", headers: authorization(token) });
+      return request("/vendor/invites/current/open", { method: "POST", headers: authorization(token) }, "vendor");
     },
     async getVendorQuestions(token: string): Promise<VendorQuestion[]> {
       if (mode === "fixture") return fixtureInviteView().questions;
-      return (await request<{ items: VendorQuestion[] }>("/vendor/invites/current/questions", { headers: authorization(token) })).items;
+      return (await request<{ items: VendorQuestion[] }>("/vendor/invites/current/questions", { headers: authorization(token) }, "vendor")).items;
     },
     registerEvidence(token: string, metadata: EvidenceMetadata): Promise<EvidenceRegistration> {
       if (mode === "fixture") {
@@ -505,7 +520,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         fixture.submission.updated_at = new Date().toISOString();
         return fixtureOnly(artifact);
       }
-      return request("/vendor/invites/current/evidence", { method: "POST", headers: authorization(token), body: JSON.stringify(metadata) });
+      return request("/vendor/invites/current/evidence", { method: "POST", headers: authorization(token), body: JSON.stringify(metadata) }, "vendor");
     },
     async uploadEvidence(token: string, file: File): Promise<EvidenceUploadResult> {
       const registration = await this.registerEvidence(token, { filename: file.name, content_type: file.type || "application/octet-stream", size_bytes: file.size, sha256: await sha256(file) });
@@ -524,7 +539,9 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         form.append("file", file);
         body = form;
       }
-      const uploadResponse = await runFetch(uploadUrl, { method, headers: registration.upload.headers, body });
+      const uploadHeaders = new Headers(registration.upload.headers);
+      uploadHeaders.delete("Authorization");
+      const uploadResponse = await runFetch(uploadUrl, { method, headers: uploadHeaders, body });
       if (!uploadResponse.ok) throw new ReviewApiError(uploadResponse.status, "upload_failed", "The presigned evidence upload failed.");
       return { ...registration, transfer: "uploaded" };
     },
@@ -534,7 +551,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         fixture.submission.updated_at = new Date().toISOString();
         return fixtureOnly({ ...fixture.submission });
       }
-      return request("/vendor/invites/current/trust-center", { method: "POST", headers: authorization(token), body: JSON.stringify({ trust_center_url: trustCenterUrl }) });
+      return request("/vendor/invites/current/trust-center", { method: "POST", headers: authorization(token), body: JSON.stringify({ trust_center_url: trustCenterUrl }) }, "vendor");
     },
     saveAnswers(token: string, answers: Record<string, string>): Promise<VendorSubmission> {
       if (mode === "fixture") {
@@ -542,7 +559,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         fixture.submission.updated_at = new Date().toISOString();
         return fixtureOnly({ ...fixture.submission, answers: { ...fixture.submission.answers } });
       }
-      return request("/vendor/invites/current/answers", { method: "POST", headers: authorization(token), body: JSON.stringify({ answers }) });
+      return request("/vendor/invites/current/answers", { method: "POST", headers: authorization(token), body: JSON.stringify({ answers }) }, "vendor");
     },
     addCoverage(token: string, requirementId: string, evidenceArtifactIds: string[]): Promise<{ coverage_id: string }> {
       if (mode === "fixture") {
@@ -552,7 +569,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         fixture.submission.updated_at = new Date().toISOString();
         return fixtureOnly({ coverage_id: coverageId });
       }
-      return request("/vendor/invites/current/coverage", { method: "POST", headers: authorization(token), body: JSON.stringify({ requirement_id: requirementId, evidence_artifact_ids: evidenceArtifactIds }) });
+      return request("/vendor/invites/current/coverage", { method: "POST", headers: authorization(token), body: JSON.stringify({ requirement_id: requirementId, evidence_artifact_ids: evidenceArtifactIds }) }, "vendor");
     },
     finalizeVendorSubmission(token: string): Promise<VendorSubmission> {
       if (mode === "fixture") {
@@ -563,7 +580,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         if (fixture.invites[0]) fixture.invites[0] = { ...fixture.invites[0], status: "submitted", submitted_at: now };
         return fixtureOnly({ ...fixture.submission });
       }
-      return request("/vendor/invites/current/finalize", { method: "POST", headers: authorization(token) });
+      return request("/vendor/invites/current/finalize", { method: "POST", headers: authorization(token) }, "vendor");
     },
     async loadReviewerRecord(caseId: string, productName: string, vendorName: string): Promise<ReviewerRecordContext> {
       const [vendors, invites, profiles, runs, catalog] = await Promise.all([

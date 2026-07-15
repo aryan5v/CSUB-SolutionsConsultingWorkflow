@@ -8,12 +8,24 @@ import {
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
-  reviewApi,
   suppressResolvedQuestions,
   type QueueItem,
   type ReviewState,
   type VendorQuestion,
 } from "./api";
+import type { ReviewerAuthProvider } from "./auth";
+
+function authProvider(token = "reviewer-jwt") {
+  return {
+    initialize: vi.fn(),
+    getSnapshot: vi.fn().mockReturnValue({ status: "authenticated" }),
+    getAccessToken: vi.fn().mockReturnValue(token),
+    signIn: vi.fn(),
+    signOut: vi.fn(),
+    handleUnauthorized: vi.fn(),
+    subscribe: vi.fn(),
+  } satisfies ReviewerAuthProvider;
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -75,9 +87,9 @@ describe("review API client", () => {
       state: state({ status: "awaiting_match_confirmation" }),
     };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [item] }));
-    vi.stubGlobal("fetch", fetchMock);
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
 
-    const items = await reviewApi.listQueue();
+    const items = await client.listQueue();
 
     expect(items).toEqual([item]);
     expect(queueItemToSummary(item)).toMatchObject({
@@ -86,6 +98,7 @@ describe("review API client", () => {
       matchDetail: "Approved export · Row 172",
     });
     expect(fetchMock).toHaveBeenCalledWith("/api/review-queue", expect.any(Object));
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer reviewer-jwt");
   });
 
   it("sends human confirmation, decision, preview, and explicit commit requests", async () => {
@@ -96,18 +109,18 @@ describe("review API client", () => {
       simulated: true,
     };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(response));
-    vi.stubGlobal("fetch", fetchMock);
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
 
-    await reviewApi.analyzeCase("TR-260714-014", "approved-row-172");
-    await reviewApi.recordDecision("TR-260714-014", {
+    await client.analyzeCase("TR-260714-014", "approved-row-172");
+    await client.recordDecision("TR-260714-014", {
       decision_version: 1,
       reviewer_id: "alex.reviewer@example.edu",
       action: "approve",
       decided_at: "2026-07-14T20:30:00.000Z",
       edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
     });
-    await reviewApi.previewWriteback("TR-260714-014");
-    await reviewApi.commitWriteback("TR-260714-014", 3);
+    await client.previewWriteback("TR-260714-014");
+    await client.commitWriteback("TR-260714-014", 3);
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       confirmed_match_id: "approved-row-172",
@@ -166,17 +179,18 @@ describe("review API client", () => {
   });
 
   it("surfaces structured API failures", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
+    const client = createReviewApiClient({
+      mode: "live",
+      authProvider: authProvider(),
+      fetchImpl: vi.fn().mockResolvedValue(
         jsonResponse(
           { error: { code: "approval_required", message: "approval required" } },
           403,
         ),
       ),
-    );
+    });
 
-    await expect(reviewApi.previewWriteback("TR-260714-014")).rejects.toEqual(
+    await expect(client.previewWriteback("TR-260714-014")).rejects.toEqual(
       expect.objectContaining<Partial<ReviewApiError>>({
         status: 403,
         code: "approval_required",
@@ -208,7 +222,8 @@ describe("vendor invitation security", () => {
       submission: { workspace_id: "csub-demo", submission_id: "submission-1", invite_id: "invite-1", case_id: "case-1", product_id: "product-1", version: 1, status: "draft", trust_center_url: null, answers: {}, evidence_artifact_ids: [], coverage_ids: [], updated_at: null, finalized_at: null },
       questions: [],
     }));
-    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock });
+    const reviewer = authProvider("must-not-leak");
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
 
     await client.resolveInvite("raw-secret-token");
 
@@ -216,13 +231,33 @@ describe("vendor invitation security", () => {
     expect(url).toBe("/api/vendor/invites/current");
     expect(url).not.toContain("raw-secret-token");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
+    expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("never attaches the reviewer JWT to a presigned evidence upload", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        workspace_id: "csub-demo", artifact_id: "artifact-1", submission_id: "submission-1",
+        filename: "evidence.txt", content_type: "text/plain", size_bytes: 8, sha256: "hash", untrusted: true,
+        upload: { url: "https://uploads.example/object", method: "PUT", headers: { Authorization: "Bearer server-supplied-value", "x-amz-meta-test": "safe" } },
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    const reviewer = authProvider("reviewer-jwt-must-not-leak");
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
+
+    await client.uploadEvidence("vendor-invite-token", new File(["evidence"], "evidence.txt", { type: "text/plain" }));
+
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer vendor-invite-token");
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("Authorization")).toBeNull();
+    expect(JSON.stringify(fetchMock.mock.calls[1])).not.toContain("reviewer-jwt-must-not-leak");
+    expect(reviewer.getAccessToken).not.toHaveBeenCalled();
   });
 });
 
 describe("live and adaptive behavior", () => {
   it("surfaces a live transport failure without falling back to fixtures", async () => {
     const failure = new TypeError("network unavailable");
-    const client = createReviewApiClient({ mode: "live", fetchImpl: vi.fn().mockRejectedValue(failure) });
+    const client = createReviewApiClient({ mode: "live", fetchImpl: vi.fn().mockRejectedValue(failure), authProvider: authProvider() });
 
     await expect(client.listVendors()).rejects.toBe(failure);
   });
@@ -243,10 +278,34 @@ describe("live and adaptive behavior", () => {
     expect(requiresReviewerConfirmation({ match_method: "exact", requires_human_confirmation: false })).toBe(false);
 
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ confirmed: true, approval_granted: false }));
-    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock });
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
     await client.confirmCatalogMatch("row-17", "fuzzy", "reviewer@example.edu");
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/catalog/matches/row-17/confirm");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ match_method: "fuzzy", reviewer_id: "reviewer@example.edu" });
+  });
+
+  it("clears reviewer auth on 401 but preserves structured 403 behavior", async () => {
+    const reviewer = authProvider();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: "unauthorized", message: "expired" } }, 401))
+      .mockResolvedValueOnce(jsonResponse({ error: { code: "forbidden", message: "not allowed" } }, 403));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
+
+    await expect(client.listVendors()).rejects.toMatchObject({ status: 401 });
+    expect(reviewer.handleUnauthorized).toHaveBeenCalledTimes(1);
+    await expect(client.listVendors()).rejects.toMatchObject({ status: 403 });
+    expect(reviewer.handleUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps explicit fixture mode isolated from auth and network", async () => {
+    const reviewer = authProvider();
+    const fetchMock = vi.fn();
+    const client = createReviewApiClient({ mode: "fixture", fetchImpl: fetchMock, authProvider: reviewer });
+
+    await expect(client.listVendors()).resolves.toHaveLength(1);
+    await expect(client.analyzeCase("fixture-case")).rejects.toMatchObject({ code: "fixture_network_blocked" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(reviewer.getAccessToken).not.toHaveBeenCalled();
   });
 });

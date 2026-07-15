@@ -1,9 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import AuthGate from "./AuthGate";
 import Landing from "./Landing";
 import PublicIntake from "./PublicIntake";
-import { consumeInviteTokenFromFragment } from "./api";
+import { consumeInviteTokenFromFragment, reviewApi } from "./api";
 
 /*
  * One React application owns every public and authenticated surface. Route
@@ -18,7 +19,7 @@ import { consumeInviteTokenFromFragment } from "./api";
  */
 function resolveRoute() {
   const path = window.location.pathname.replace(/\/+$/, "");
-  if (path === "/app" || path.startsWith("/app/")) return <App />;
+  if (path === "/app" || path.startsWith("/app/")) return <AuthGate mode={reviewApi.mode}><App /></AuthGate>;
   if (path === "/intake") {
     const token = consumeInviteTokenFromFragment(window.location, window.history);
     return <PublicIntake initialToken={token} />;
