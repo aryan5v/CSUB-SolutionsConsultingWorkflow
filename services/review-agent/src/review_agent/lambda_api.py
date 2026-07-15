@@ -1352,7 +1352,10 @@ def _catalog_entry(value: dict[str, Any], *, workspace_id: str) -> SoftwareCatal
     return SoftwareCatalogEntry(
         record_id=_required_string(value, "record_id"),
         canonical_name=_required_string(value, "canonical_name"),
-        vendor=_required_string(value, "vendor"),
+        # The institutional export contains legitimately blank vendor cells.
+        # Keep the raw null in raw_values while the typed search contract uses
+        # an empty string for "not supplied".
+        vendor=_optional_string(value.get("vendor")) or "",
         normalized_identity=_required_string(value, "normalized_identity"),
         source_row=int(value["source_row"]),
         source_hash=_required_string(value, "source_hash"),

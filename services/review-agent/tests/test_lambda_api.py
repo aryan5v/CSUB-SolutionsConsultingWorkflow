@@ -155,6 +155,16 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(allowed["statusCode"], 200)
         self.assertEqual(len(payload["items"]), 3)
 
+    def test_blank_catalog_vendor_does_not_break_workspace_restore(self) -> None:
+        catalog = self.store.load_catalog("csub-demo")
+        catalog[0]["vendor"] = None
+        self.store.replace_catalog("csub-demo", catalog)
+
+        response, payload = self.call("GET", "/review-queue")
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(len(payload["items"]), 3)
+
     def test_case_state_survives_a_fresh_handler_cold_start(self) -> None:
         intake = {
             "product_name": "Synthetic Calendar",
