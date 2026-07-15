@@ -729,6 +729,24 @@ def create_handler(
     def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         correlation_id = _correlation_id(event, context)
         try:
+            # Durable AWS schedule (issue #53): an EventBridge Scheduler invokes
+            # this Lambda directly with {"scheduled_task": "renewals_run"}. Its
+            # IAM role is the authorization (no reviewer JWT, no API Gateway),
+            # so this path runs the expiry sweep and persists the result.
+            if isinstance(event, dict) and event.get("scheduled_task") == "renewals_run":
+                snapshot = store.load_snapshot(workspace_id)
+                if snapshot is None:
+                    raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
+                api = restore_api(
+                    snapshot,
+                    store.load_catalog(workspace_id),
+                    workspace_id=workspace_id,
+                    evidence_storage=evidence_store,
+                )
+                result = api.run_expiry_sweep()
+                store.save_snapshot(workspace_id, snapshot_api(api, workspace_id=workspace_id))
+                _log(correlation_id, "scheduled.renewals_run", 200)
+                return {"scheduled_task": "renewals_run", "result": result}
             method, path = _method_path(event)
             origin = _header(event, "origin")
             if method == "OPTIONS":
