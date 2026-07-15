@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/citation.schema.json",
+  "title": "Citation",
+  "description": "A grounding link from a generated claim to an institutional or captured official source (PRD FR-5). Every factual claim requires one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claim", "source"],
+  "properties": {
+    "claim": { "type": "string", "minLength": 1 },
+    "source": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" },
+    "scope": {
+      "type": "string",
+      "enum": ["policy", "case_evidence", "official_vendor", "standards"],
+      "description": "Retrieval scope the source came from; policy and case/vendor scopes stay isolated."
+    },
+    "verified": { "type": "boolean" }
+  }
+}

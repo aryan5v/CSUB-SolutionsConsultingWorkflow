@@ -1,0 +1,35 @@
+{
+  "name": "@csub/infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS CDK app for the CSUB Technology Review Agent prototype.",
+  "bin": {
+    "infra": "bin/app.ts"
+  },
+  "scripts": {
+    "auth:build": "npm --prefix ../services/auth-api ci && npm --prefix ../services/auth-api run build",
+    "presynth": "npm run auth:build",
+    "synth": "cdk synth",
+    "prediff": "npm run auth:build",
+    "diff": "cdk diff",
+    "predeploy": "npm run auth:build",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy",
+    "pretest": "npm run auth:build",
+    "test": "jest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^22.7.0",
+    "aws-cdk": "^2.170.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.0"
+  }
+}

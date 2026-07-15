@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/policy-result.schema.json",
+  "title": "PolicyResult",
+  "description": "Deterministic policy evaluation result (PRD FR-3). Model output may explain but must never alter these fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policy_version", "risk_route", "triggers", "required_evidence", "recommendation_clause_ids", "conflicts", "citations", "escalated"],
+  "properties": {
+    "policy_version": { "type": "string", "minLength": 1 },
+    "risk_route": {
+      "type": "string",
+      "enum": ["approved", "low", "medium", "high", "escalate", "unknown"]
+    },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "description"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "description": { "type": "string" },
+          "citation": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" }
+        }
+      }
+    },
+    "required_evidence": { "type": "array", "items": { "type": "string" } },
+    "recommendation_clause_ids": { "type": "array", "items": { "type": "string" } },
+    "conflicts": {
+      "type": "array",
+      "description": "Unresolved disputed thresholds; conflicts force escalation rather than a model guess.",
+      "items": { "$ref": "https://csub.example/contracts/conflict.schema.json" }
+    },
+    "citations": {
+      "type": "array",
+      "items": { "$ref": "https://csub.example/contracts/citation.schema.json" }
+    },
+    "escalated": { "type": "boolean" },
+    "escalation_reasons": { "type": "array", "items": { "type": "string" } }
+  }
+}

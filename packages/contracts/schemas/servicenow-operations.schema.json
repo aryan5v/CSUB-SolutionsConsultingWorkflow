@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/servicenow-operations.schema.json",
+  "title": "ServiceNowOperations",
+  "description": "Contract for the ServiceNowConnector (PRD FR-7, sec 5). MockServiceNowConnector is the active implementation; a future Serac MCP adapter must satisfy the same shapes. Field/table selection is deterministic configuration, never model-generated.",
+  "type": "object",
+  "$defs": {
+    "WritePreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "decision_version", "table", "record_id", "expected_record_version", "packet_version", "packet_sha256", "before", "after", "simulated"],
+      "properties": {
+        "case_id": { "type": "string" },
+        "decision_version": { "type": "integer", "minimum": 1 },
+        "table": { "type": "string" },
+        "record_id": { "type": "string" },
+        "expected_record_version": { "type": "integer", "minimum": 1 },
+        "packet_version": { "type": "integer", "minimum": 1 },
+        "packet_sha256": { "type": "string", "minLength": 1 },
+        "before": { "type": "object", "additionalProperties": true },
+        "after": { "type": "object", "additionalProperties": true },
+        "field_changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "from", "to"],
+            "properties": {
+              "field": { "type": "string" },
+              "from": { "type": ["string", "number", "boolean", "null"] },
+              "to": { "type": ["string", "number", "boolean", "null"] }
+            }
+          }
+        },
+        "simulated": { "const": true }
+      }
+    },
+    "WriteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idempotency_key", "record_id", "record_version", "committed", "simulated"],
+      "properties": {
+        "idempotency_key": {
+          "type": "string",
+          "description": "case_id + ':' + decision_version. Repeated commits with the same key are no-ops."
+        },
+        "record_id": { "type": "string" },
+        "record_version": { "type": "integer" },
+        "committed": { "type": "boolean" },
+        "duplicate_suppressed": { "type": "boolean" },
+        "attachment": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "attachment_id": { "type": "string" },
+            "sha256": { "type": "string" },
+            "already_present": { "type": "boolean" }
+          }
+        },
+        "connector_response": { "type": "object", "additionalProperties": true },
+        "simulated": { "const": true }
+      }
+    },
+    "HumanDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "decision_version", "reviewer_id", "action", "decided_at"],
+      "properties": {
+        "case_id": { "type": "string" },
+        "decision_version": { "type": "integer", "minimum": 1 },
+        "reviewer_id": { "type": "string" },
+        "action": { "type": "string", "enum": ["approve", "reject", "request_info"] },
+        "approved_fields": { "type": "object", "additionalProperties": true },
+        "comments": { "type": "string" },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["section_key", "body"],
+            "properties": {
+              "section_key": { "type": "string" },
+              "body": { "type": "string" }
+            }
+          }
+        },
+        "decided_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

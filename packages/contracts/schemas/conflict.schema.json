@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/conflict.schema.json",
+  "title": "Conflict",
+  "description": "A registered disagreement between institutional sources. Recorded, never silently resolved by a model (PRD sec 10, FR-3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["conflict_id", "topic", "positions"],
+  "properties": {
+    "conflict_id": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string", "minLength": 1 },
+    "positions": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "source"],
+        "properties": {
+          "value": { "type": "string" },
+          "source": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" },
+          "precedence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "1=partner override, 2=formal policy, 3=decision-tree draft, 4=discovery statement, 5=model inference."
+          }
+        }
+      }
+    },
+    "resolution": {
+      "type": ["string", "null"],
+      "description": "Null until a human/partner resolves it. A model may not populate this."
+    }
+  }
+}

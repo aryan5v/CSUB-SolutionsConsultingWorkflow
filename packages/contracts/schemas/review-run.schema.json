@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/review-run.schema.json",
+  "title": "ReviewRun",
+  "type": "object", "additionalProperties": false,
+  "required": ["workspace_id", "run_id", "case_id", "run_version", "approval_scope", "submission_id", "created_at", "unresolved_requirement_ids", "decision_valid", "write_preview_valid"],
+  "properties": {
+    "workspace_id": {"type": "string"}, "run_id": {"type": "string"}, "case_id": {"type": "string"},
+    "run_version": {"type": "integer", "minimum": 1}, "submission_id": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"}, "previous_run_id": {"type": ["string", "null"]},
+    "unresolved_requirement_ids": {"type": "array", "items": {"type": "string"}},
+    "decision_valid": {"const": false}, "write_preview_valid": {"const": false},
+    "approval_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["product_id", "use_case", "scope", "submission_version", "profile_version_ids"],
+      "properties": {
+        "product_id": {"type": "string"}, "use_case": {"type": "string"}, "scope": {"type": "string"},
+        "submission_version": {"type": "integer", "minimum": 1},
+        "profile_version_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    }
+  }
+}

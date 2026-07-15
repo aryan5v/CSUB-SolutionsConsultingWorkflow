@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/source-coordinates.schema.json",
+  "title": "SourceCoordinates",
+  "description": "Traceable pointer back to an institutional source location (workbook cell, PDF page, decision-tree node).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_id"],
+  "properties": {
+    "source_id": {
+      "type": "string",
+      "description": "Original Box file identifier or manifest source id."
+    },
+    "filename": { "type": "string" },
+    "sheet": { "type": "string" },
+    "cell": { "type": "string" },
+    "row": { "type": ["integer", "null"] },
+    "column": { "type": ["string", "null"] },
+    "page": { "type": ["integer", "null"] },
+    "node_id": { "type": ["string", "null"] },
+    "version": { "type": "string" },
+    "sha256": { "type": "string" }
+  }
+}

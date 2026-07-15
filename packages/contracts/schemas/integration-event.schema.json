@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/integration-event.schema.json",
+  "title": "IntegrationEvent",
+  "type": "object", "additionalProperties": false,
+  "required": ["workspace_id", "event_id", "event_type", "occurred_at", "resource_type", "resource_id", "detail"],
+  "properties": {
+    "workspace_id": {"type": "string"}, "event_id": {"type": "string"}, "event_type": {"type": "string"},
+    "occurred_at": {"type": "string", "format": "date-time"}, "resource_type": {"type": "string"}, "resource_id": {"type": "string"},
+    "case_id": {"type": ["string", "null"]}, "detail": {"type": "object"}
+  }
+}

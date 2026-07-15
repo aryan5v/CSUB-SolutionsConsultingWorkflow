@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/vendor-intake.schema.json",
+  "title": "Vendor invitation and submission contracts",
+  "$defs": {
+    "IssueInvite": {
+      "type": "object", "additionalProperties": false, "required": ["contact_id"],
+      "properties": {"contact_id": {"type": "string", "minLength": 1}}
+    },
+    "InviteProjection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "invite_id", "case_id", "product_id", "contact_id", "issued_at", "expires_at", "status", "opened_at", "revoked_at", "submitted_at", "replaced_invite_id"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "invite_id": {"type": "string"}, "case_id": {"type": "string"},
+        "product_id": {"type": "string"}, "contact_id": {"type": "string"},
+        "issued_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": "string", "format": "date-time"},
+        "status": {"enum": ["issued", "opened", "in_progress", "submitted", "revoked", "expired"]},
+        "opened_at": {"type": ["string", "null"]}, "revoked_at": {"type": ["string", "null"]},
+        "submitted_at": {"type": ["string", "null"]}, "replaced_invite_id": {"type": ["string", "null"]}
+      }
+    },
+    "VendorInviteRecord": {
+      "type": "object", "additionalProperties": false,
+      "description": "Internal persistence record; never use as a public response.",
+      "required": ["workspace_id", "invite_id", "case_id", "product_id", "contact_id", "token_hash", "issued_at", "expires_at", "status"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "invite_id": {"type": "string"}, "case_id": {"type": "string"},
+        "product_id": {"type": "string"}, "contact_id": {"type": "string"},
+        "token_hash": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "issued_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": "string", "format": "date-time"},
+        "status": {"enum": ["issued", "opened", "in_progress", "submitted", "revoked", "expired"]},
+        "opened_at": {"type": ["string", "null"]}, "revoked_at": {"type": ["string", "null"]},
+        "submitted_at": {"type": ["string", "null"]}, "replaced_invite_id": {"type": ["string", "null"]}
+      }
+    },
+    "EvidenceMetadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filename", "content_type", "size_bytes", "sha256"],
+      "properties": {
+        "filename": {"type": "string", "minLength": 1, "maxLength": 255},
+        "content_type": {"type": "string", "minLength": 1},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 50000000},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+      }
+    },
+    "EvidenceArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "artifact_id", "submission_id", "filename", "content_type", "size_bytes", "sha256", "untrusted"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "artifact_id": {"type": "string"}, "submission_id": {"type": "string"},
+        "filename": {"type": "string"}, "content_type": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}, "untrusted": {"const": true}
+      }
+    },
+    "TrustCenter": {
+      "type": "object", "additionalProperties": false, "required": ["trust_center_url"],
+      "properties": {"trust_center_url": {"type": "string", "minLength": 1}}
+    },
+    "Answers": {
+      "type": "object", "additionalProperties": false, "required": ["answers"],
+      "properties": {"answers": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}}
+    },
+    "Coverage": {
+      "type": "object", "additionalProperties": false, "required": ["requirement_id", "evidence_artifact_ids"],
+      "properties": {
+        "requirement_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$"},
+        "evidence_artifact_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "CoverageItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "coverage_id", "submission_id", "requirement_id", "profile_version_id", "evidence_artifact_ids", "source_citation"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "coverage_id": {"type": "string"}, "submission_id": {"type": "string"},
+        "requirement_id": {"type": "string"}, "profile_version_id": {"type": "string"},
+        "evidence_artifact_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
+      }
+    },
+    "Submission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "submission_id", "invite_id", "case_id", "product_id", "version", "status", "trust_center_url", "answers", "evidence_artifact_ids", "coverage_ids", "updated_at", "finalized_at"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "submission_id": {"type": "string"}, "invite_id": {"type": "string"},
+        "case_id": {"type": "string"}, "product_id": {"type": "string"}, "version": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["draft", "finalized"]}, "trust_center_url": {"type": ["string", "null"]},
+        "answers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "evidence_artifact_ids": {"type": "array", "items": {"type": "string"}},
+        "coverage_ids": {"type": "array", "items": {"type": "string"}},
+        "updated_at": {"type": ["string", "null"]}, "finalized_at": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

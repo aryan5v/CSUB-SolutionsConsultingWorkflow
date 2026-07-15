@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/review-queue-item.schema.json",
+  "title": "ReviewQueueItem",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "product", "vendor", "requester", "status", "route", "match", "match_detail", "stage", "updated", "owner", "state"],
+  "properties": {
+    "case_id": { "type": "string" },
+    "product": { "type": "string" },
+    "vendor": { "type": "string" },
+    "requester": { "type": "string" },
+    "status": { "type": "string", "enum": ["Ready for review", "Analyzing", "Needs evidence", "Completed"] },
+    "route": { "type": "string", "enum": ["Low risk", "Medium risk", "Safe escalation", "Pending route"] },
+    "match": { "type": "string" },
+    "match_detail": { "type": "string" },
+    "stage": { "type": "string" },
+    "updated": { "type": "string" },
+    "owner": { "type": "string" },
+    "state": { "$ref": "https://csub.example/contracts/review-graph-state.schema.json" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/audit-event.schema.json",
+  "title": "AuditEvent",
+  "description": "Structured audit event (PRD sec 7, ENGINEERING observability). Never contains document bodies, credentials, or sensitive prompts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "case_id", "occurred_at", "actor_type"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "description": "e.g. case.created, policy.evaluated, specialist.completed, packet.composed, review.decided, servicenow.previewed, servicenow.committed."
+    },
+    "case_id": { "type": "string" },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "actor_type": { "type": "string", "enum": ["requester", "reviewer", "system", "model"] },
+    "actor_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "workflow_version": { "type": "string" },
+    "policy_version": { "type": "string" },
+    "decision_version": { "type": ["integer", "null"] },
+    "detail": {
+      "type": "object",
+      "description": "Identifiers, versions, hashes, latency, and error metadata only. No document bodies.",
+      "additionalProperties": true
+    }
+  }
+}

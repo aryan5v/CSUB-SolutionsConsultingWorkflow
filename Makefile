@@ -2,7 +2,12 @@ PYTHON ?= python3
 VENV ?= .venv
 PRE_COMMIT ?= $(VENV)/bin/pre-commit
 
-.PHONY: bootstrap hooks check lint test verify agent-briefs aws-whoami
+REVIEW_AGENT ?= services/review-agent
+REVIEWER_WEB ?= apps/reviewer-web
+CASE_API ?= services/case-api
+INFRA ?= infra
+
+.PHONY: bootstrap hooks check lint test verify review-agent reviewer-web case-api infra-check agent-briefs aws-whoami
 
 bootstrap:
 	@$(PYTHON) -m venv $(VENV)
@@ -19,12 +24,36 @@ check:
 	@$(PYTHON) scripts/scan_secrets.py --all
 
 lint:
-	@$(PYTHON) -m compileall -q scripts tests
+	@$(PYTHON) -m compileall -q scripts tests $(REVIEW_AGENT)/src $(REVIEW_AGENT)/tests
 
 test:
 	@$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-verify: check lint test
+# Deterministic, stdlib-only review-agent slice. No live AWS; joins the gate.
+review-agent:
+	@$(MAKE) -C $(REVIEW_AGENT) test
+
+# Locked React/Vite workspace: install, unit-test API seams, type-check, and build.
+reviewer-web:
+	@npm --prefix $(REVIEWER_WEB) ci
+	@npm --prefix $(REVIEWER_WEB) run test
+	@npm --prefix $(REVIEWER_WEB) run check
+	@npm --prefix $(REVIEWER_WEB) run build
+
+# Locked TypeScript Lambda proxy workspace: install, unit-test, and type-check.
+case-api:
+	@npm --prefix $(CASE_API) ci
+	@npm --prefix $(CASE_API) run typecheck
+	@npm --prefix $(CASE_API) test
+
+# Non-mutating CDK checks only. Deployment still requires the documented gate.
+infra-check:
+	@npm --prefix $(INFRA) ci
+	@npm --prefix $(INFRA) run typecheck
+	@npm --prefix $(INFRA) test
+	@npm --prefix $(INFRA) run synth -- --strict
+
+verify: check lint test review-agent reviewer-web case-api infra-check
 	@git diff --check
 
 agent-briefs:

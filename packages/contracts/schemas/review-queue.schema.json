@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/review-queue.schema.json",
+  "title": "ReviewQueue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "simulated"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": { "$ref": "https://csub.example/contracts/review-queue-item.schema.json" }
+    },
+    "simulated": { "const": true }
+  }
+}

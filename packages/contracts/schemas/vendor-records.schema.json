@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/vendor-records.schema.json",
+  "title": "Vendor records",
+  "$defs": {
+    "Vendor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "vendor_id", "name", "official_domain"],
+      "properties": {
+        "workspace_id": {"type": "string", "minLength": 1},
+        "vendor_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "official_domain": {"type": ["string", "null"]}
+      }
+    },
+    "VendorProduct": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "product_id", "vendor_id", "name"],
+      "properties": {
+        "workspace_id": {"type": "string", "minLength": 1},
+        "product_id": {"type": "string", "minLength": 1},
+        "vendor_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
+    "VendorContact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "contact_id", "vendor_id", "name", "email"],
+      "properties": {
+        "workspace_id": {"type": "string", "minLength": 1},
+        "contact_id": {"type": "string", "minLength": 1},
+        "vendor_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "email": {"type": "string", "format": "email"}
+      }
+    },
+    "VendorCase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workspace_id", "case_id", "product_id", "use_case", "scope", "lifecycle"],
+      "properties": {
+        "workspace_id": {"type": "string", "minLength": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "product_id": {"type": "string", "minLength": 1},
+        "use_case": {"type": "string", "minLength": 1},
+        "scope": {"type": "string", "minLength": 1},
+        "lifecycle": {"enum": ["draft", "invited", "opened", "in_progress", "submitted", "analyzing", "needs_review", "approved", "changes_requested", "declined", "writeback_complete"]}
+      }
+    },
+    "CreateVendor": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "official_domain": {"type": "string", "minLength": 1}}
+    },
+    "CreateProduct": {
+      "type": "object", "additionalProperties": false, "required": ["vendor_id", "name"],
+      "properties": {"vendor_id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}}
+    },
+    "CreateContact": {
+      "type": "object", "additionalProperties": false, "required": ["vendor_id", "name", "email"],
+      "properties": {"vendor_id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}, "email": {"type": "string", "format": "email"}}
+    }
+  }
+}

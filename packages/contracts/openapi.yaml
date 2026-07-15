@@ -1,0 +1,414 @@
+# Public application interface for the CSUB Technology Review Agent (PRD sec 5).
+# This is the locked REST contract shared by services/case-api (TypeScript) and
+# consumed by apps/reviewer-web. Payload shapes reference the JSON Schemas in
+# ./schemas. Handlers are implemented Wednesday; this contract is locked Tuesday.
+openapi: 3.1.0
+info:
+  title: CSUB Technology Review Agent API
+  version: 0.1.0
+  description: >-
+    Case intake, analysis, human review, and simulated ServiceNow write-back.
+    All write-back is simulated and clearly labeled in the prototype.
+servers:
+  - url: https://api.example.local
+    description: Placeholder; real base URL is environment configuration.
+tags:
+  - name: cases
+  - name: review
+  - name: servicenow
+  - name: vendors
+  - name: vendor-intake
+  - name: profiles
+  - name: catalog
+paths:
+  /cases:
+    post:
+      tags: [cases]
+      summary: Create a case from guided intake.
+      operationId: createCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schemas/case-intake.schema.json" }
+      responses:
+        "201": { $ref: "#/components/responses/CaseCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /cases/{id}/documents:
+    post:
+      tags: [cases]
+      summary: Register uploaded evidence metadata (content stored separately, untrusted).
+      operationId: addCaseDocument
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "201": { description: Document metadata registered. }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /cases/{id}/analyze:
+    post:
+      tags: [cases]
+      summary: Start deterministic routing plus bounded specialist analysis.
+      operationId: analyzeCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirmed_match_id: { type: string }
+                reviewer_id:
+                  type: string
+                  description: Required when confirmed_match_id is present; configured locally and derived from the trusted reviewer session in production.
+      responses:
+        "202": { $ref: "#/components/responses/CaseAction" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /cases/{id}/stream:
+    get:
+      tags: [cases]
+      summary: Server-sent workflow progress and specialist results.
+      operationId: streamCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200": { description: text/event-stream of workflow state transitions. }
+  /cases/{id}/review:
+    post:
+      tags: [review]
+      summary: Record a reviewer decision (approve, reject, request_info) and edits.
+      operationId: reviewCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/HumanDecision" }
+      responses:
+        "200": { $ref: "#/components/responses/CaseAction" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cases/{id}/servicenow/preview:
+    post:
+      tags: [servicenow]
+      summary: Return a simulated before/after write-back preview (dry-run default).
+      operationId: previewServiceNow
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200": { $ref: "#/components/responses/CaseAction" }
+  /cases/{id}/servicenow/commit:
+    post:
+      tags: [servicenow]
+      summary: >-
+        Commit the simulated write after a recorded approval and an explicit
+        second confirmation. Idempotent on case_id + decision_version.
+      operationId: commitServiceNow
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [second_confirmation, expected_version]
+              properties:
+                second_confirmation: { const: true }
+                expected_version: { type: integer, minimum: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/CaseAction" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Stale expected version or missing approved decision. }
+  /cases/{id}/packet:
+    get:
+      tags: [cases]
+      summary: Fetch the current generated packet.
+      operationId: getPacket
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200":
+          description: Packet.
+          content:
+            application/json:
+              schema: { $ref: "./schemas/packet.schema.json" }
+  /review-queue:
+    get:
+      tags: [review]
+      summary: List cases awaiting reviewer action.
+      operationId: getReviewQueue
+      responses:
+        "200":
+          description: Sanitized review queue and current graph states.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReviewQueue" }
+  /vendors:
+    get:
+      tags: [vendors]
+      summary: List workspace-scoped vendors.
+      responses: {"200": {description: Vendor list.}}
+    post:
+      tags: [vendors]
+      summary: Create a vendor.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-records.schema.json#/$defs/CreateVendor"}}}}
+      responses: {"201": {description: Vendor created.}, "400": {$ref: "#/components/responses/ValidationError"}}
+  /vendor-products:
+    get:
+      tags: [vendors]
+      summary: List products, optionally filtered by vendor_id.
+      responses: {"200": {description: Product list.}}
+    post:
+      tags: [vendors]
+      summary: Create a vendor product.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-records.schema.json#/$defs/CreateProduct"}}}}
+      responses: {"201": {description: Product created.}}
+  /vendor-contacts:
+    get:
+      tags: [vendors]
+      summary: List vendor contacts.
+      responses: {"200": {description: Contact list.}}
+    post:
+      tags: [vendors]
+      summary: Create a vendor contact.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-records.schema.json#/$defs/CreateContact"}}}}
+      responses: {"201": {description: Contact created.}}
+  /vendors/{vendor_id}:
+    get:
+      tags: [vendors]
+      summary: Get one workspace-scoped vendor.
+      parameters: [{name: vendor_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Vendor.}, "404": {$ref: "#/components/responses/NotFound"}}
+    patch:
+      tags: [vendors]
+      summary: Update configured vendor metadata.
+      parameters: [{name: vendor_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Vendor updated.}}
+    delete:
+      tags: [vendors]
+      summary: Delete an unused vendor.
+      parameters: [{name: vendor_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Vendor deleted.}}
+  /vendor-products/{product_id}:
+    get:
+      tags: [vendors]
+      summary: Get one workspace-scoped vendor product.
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Product.}, "404": {$ref: "#/components/responses/NotFound"}}
+    patch:
+      tags: [vendors]
+      summary: Update a vendor product.
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Product updated.}}
+    delete:
+      tags: [vendors]
+      summary: Delete an unused product.
+      parameters: [{name: product_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Product deleted.}}
+  /vendor-contacts/{contact_id}:
+    get:
+      tags: [vendors]
+      summary: Get one workspace-scoped vendor contact.
+      parameters: [{name: contact_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Contact.}, "404": {$ref: "#/components/responses/NotFound"}}
+    patch:
+      tags: [vendors]
+      summary: Update a vendor contact.
+      parameters: [{name: contact_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Contact updated.}}
+    delete:
+      tags: [vendors]
+      summary: Delete an unused contact.
+      parameters: [{name: contact_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Contact deleted.}}
+  /cases/{id}/invites:
+    get:
+      tags: [vendor-intake]
+      summary: List tracked invitations without token hashes.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Invitation list.}}
+    post:
+      tags: [vendor-intake]
+      summary: Issue a case/product/contact-scoped opaque invitation.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/IssueInvite"}}}}
+      responses: {"201": {description: Raw token returned once; persisted projection excludes hash.}}
+  /invites/{invite_id}/revoke:
+    post:
+      tags: [vendor-intake]
+      summary: Revoke an invitation.
+      parameters: [{name: invite_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Revoked invitation projection.}}
+  /invites/{invite_id}/resend:
+    post:
+      tags: [vendor-intake]
+      summary: Revoke and replace an invitation with a new opaque token.
+      parameters: [{name: invite_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Replacement token returned once.}}
+  /vendor/invites/{token}:
+    get:
+      tags: [vendor-intake]
+      summary: Resolve only the case-scoped vendor projection; no policy, findings, or reviewer notes.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Safe vendor projection.}, "410": {description: Expired or revoked.}}
+  /vendor/invites/{token}/open:
+    post:
+      tags: [vendor-intake]
+      summary: Track the first successful invitation open.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Safe vendor projection.}}
+  /vendor/invites/{token}/questions:
+    get:
+      tags: [vendor-intake]
+      summary: Return only unresolved active-profile questions without policy configuration.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Unresolved stable requirement questions.}}
+  /vendor/invites/{token}/evidence:
+    post:
+      tags: [vendor-intake]
+      summary: Register untrusted evidence metadata only.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
+      responses: {"200": {description: Evidence metadata registered.}}
+  /vendor/invites/{token}/trust-center:
+    post:
+      tags: [vendor-intake]
+      summary: Store an HTTPS public-host trust-center URL without browsing it.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/TrustCenter"}}}}
+      responses: {"200": {description: Draft saved.}}
+  /vendor/invites/{token}/answers:
+    post:
+      tags: [vendor-intake]
+      summary: Save answers only for unresolved active-profile requirement IDs.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/Answers"}}}}
+      responses: {"200": {description: Recoverable draft saved.}}
+  /vendor/invites/{token}/coverage:
+    post:
+      tags: [vendor-intake]
+      summary: Cite submission evidence against one stable active requirement ID.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/Coverage"}}}}
+      responses: {"200": {description: Coverage recorded.}}
+  /vendor/invites/{token}/finalize:
+    post:
+      tags: [vendor-intake]
+      summary: Finalize the vendor submission once.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Immutable finalized submission.}}
+  /review-profiles:
+    get:
+      tags: [profiles]
+      summary: List immutable profile versions and drafts.
+      responses: {"200": {description: Profile versions.}}
+    post:
+      tags: [profiles]
+      summary: Create a deterministic profile draft; models cannot modify criteria.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/review-profile-version.schema.json#/$defs/CreateDraft"}}}}
+      responses: {"201": {description: Draft created.}}
+  /review-profiles/{profile_id}:
+    patch:
+      tags: [profiles]
+      summary: Replace criteria on a draft only; activated versions reject mutation.
+      parameters: [{name: profile_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Updated draft.}, "400": {description: Invalid or immutable profile.}}
+  /review-profiles/{profile_id}/fixture-test:
+    post:
+      tags: [profiles]
+      summary: Test a draft against deterministic fixtures before activation.
+      parameters: [{name: profile_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Fixture results.}}
+  /review-profiles/{profile_id}/activate:
+    post:
+      tags: [profiles]
+      summary: Activate a tested immutable version.
+      parameters: [{name: profile_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Activated profile.}}
+  /review-profiles/{profile_id}/rollback:
+    post:
+      tags: [profiles]
+      summary: Point active configuration to a previously activated immutable version.
+      parameters: [{name: profile_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Active pointer rolled back.}}
+  /cases/{id}/review-runs:
+    get:
+      tags: [review]
+      summary: List immutable run versions.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Review runs.}}
+    post:
+      tags: [review]
+      summary: Create a run snapshot; later calls are reruns that invalidate stale decisions/previews.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"201": {description: Review run., content: {application/json: {schema: {$ref: "./schemas/review-run.schema.json"}}}}}
+  /cases/{id}/review-runs/rerun:
+    post:
+      tags: [review]
+      summary: Create a new immutable run version and invalidate stale decision/write-preview state.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"201": {description: New immutable run version.}}
+  /catalog/search:
+    get:
+      tags: [catalog]
+      summary: Search lossless catalog records; fuzzy/semantic candidates require human confirmation.
+      parameters: [{name: q, in: query, required: true, schema: {type: string}}, {name: vendor, in: query, required: false, schema: {type: string}}]
+      responses: {"200": {description: Candidates with source row, score, method, flags, and confirmation requirement.}}
+  /catalog/matches/{record_id}/confirm:
+    post:
+      tags: [catalog]
+      summary: Record explicit reviewer confirmation for a candidate without granting approval.
+      parameters: [{name: record_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [match_method, reviewer_id]
+              properties:
+                match_method: {enum: [exact, alias, vendor_product, fuzzy, semantic]}
+                reviewer_id: {type: string, minLength: 1}
+      responses: {"200": {description: Human confirmation audit result; approval_granted is false.}}
+  /servicenow/imports/{external_id}/preview:
+    get:
+      tags: [servicenow]
+      summary: Preview seeded source and deterministic versioned mapped values.
+      parameters: [{name: external_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Simulated import preview.}}
+  /servicenow/imports/{external_id}/create:
+    post:
+      tags: [servicenow]
+      summary: Create a case from the exact previewed configured mapping and audit it.
+      parameters: [{name: external_id, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: Case created from simulated import.}}
+components:
+  schemas:
+    QueueItem: { $ref: "./schemas/review-queue-item.schema.json" }
+    CaseActionEnvelope: { $ref: "./schemas/case-action-response.schema.json" }
+    ReviewQueue: { $ref: "./schemas/review-queue.schema.json" }
+  parameters:
+    CaseId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    CaseAction:
+      description: Current graph state, queue projection, and non-sensitive audit events.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CaseActionEnvelope" }
+    CaseCreated:
+      description: Case created.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [case_id]
+            properties:
+              case_id: { type: string }
+    ValidationError:
+      description: Intake validation failed.
+    NotFound:
+      description: Case or resource not found.
+    Forbidden:
+      description: Reviewer not authorized for this action.

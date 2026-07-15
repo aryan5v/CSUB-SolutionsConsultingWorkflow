@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/case-action-response.schema.json",
+  "title": "CaseActionResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "queue_item", "audit_events", "simulated"],
+  "properties": {
+    "state": { "$ref": "https://csub.example/contracts/review-graph-state.schema.json" },
+    "queue_item": { "$ref": "https://csub.example/contracts/review-queue-item.schema.json" },
+    "audit_events": {
+      "type": "array",
+      "items": { "$ref": "https://csub.example/contracts/audit-event.schema.json" }
+    },
+    "simulated": { "const": true }
+  }
+}

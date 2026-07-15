@@ -25,6 +25,20 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 └── .env.example          Environment variable template
 ```
 
+The React/Vite reviewer workspace lives under `apps/reviewer-web/src/`. It adapts the Twenty
+record-workspace and navigation patterns documented in
+[`docs/decisions/0002-twenty-frontend-adaptation.md`](docs/decisions/0002-twenty-frontend-adaptation.md)
+into a dashboard-first vendor-management prototype. The local sanitized demo
+preserves the full PR #8 workspace: Inbox and My work queues, Vendors,
+Contacts, Review requests, Tasks, Notes, a local workflow builder with runs and
+versions, grounded Chat, Settings, Documentation, scoped Evidence, Audit, and
+one detailed human-review workspace with two-step simulated ServiceNow
+write-back. The shell includes accessible light/dark themes and the original
+yellow/blue design language. Tailwind and shadcn configuration support locally
+owned Dither Kit charts, gradients, buttons, and generative record avatars. See
+[`docs/twenty-vendor-frontend-plan.md`](docs/twenty-vendor-frontend-plan.md) for
+the phased Twenty-to-vendor adaptation plan.
+
 ## Start here
 
 - [`docs/PRD.md`](docs/PRD.md): product requirements, scope, interfaces, security constraints, and acceptance criteria.
@@ -42,7 +56,7 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 - [x] Three-day implementation plan approved
 - [x] AWS and bounded-agent architecture selected
 - [ ] Ingest and validate the supplied Box dataset
-- [ ] Complete the local low- and medium-risk vertical slices
+- [x] Complete connected local low-, medium-, and safe-escalation vertical slices
 - [ ] Deploy the approved AWS environment
 - [ ] Evaluate, harden, and demo the prototype
 
@@ -65,6 +79,23 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
    make bootstrap
    make verify
    ```
+
+7. Start the connected local application in two terminals:
+
+   ```bash
+   # Terminal 1: deterministic local API and workflow
+   PYTHONPATH=services/review-agent/src python3 -m review_agent.server --port 8787
+
+   # Terminal 2: reviewer workspace
+   npm --prefix apps/reviewer-web ci
+   npm --prefix apps/reviewer-web run dev
+   ```
+
+   Open `http://127.0.0.1:5173`. One Vite application serves the public landing
+   page at `/`, the public vendor intake at `/intake`, and the authenticated
+   reviewer workspace at `/app`. The application uses sanitized synthetic data
+   and clearly labeled simulated ServiceNow operations; it does not require AWS
+   credentials for the local flow.
 
 ## Development principles
 
