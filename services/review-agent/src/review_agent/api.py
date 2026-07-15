@@ -1215,12 +1215,23 @@ class LocalReviewApi:
     ) -> None:
         """Email the invited vendor contact when a human decision is recorded.
 
+        The recipient is the contact whose invitation carries the submitted
+        evidence (the SUBMITTED invite); a newer invitation issued to a
+        different contact never diverts the outcome. Only when no submission
+        was finalized does the newest non-revoked invitation apply. Delivery is
+        recorded idempotently: the same outcome for a case (a re-recorded
+        decision or a retried invocation) never sends or persists a duplicate.
         Best-effort: a case without a vendor invitation (no intake ran) sends
         nothing, and a failed delivery never blocks the reviewer decision. The
         truthful delivery mode is persisted on an integration event.
         """
         outcome = self._OUTCOME_EMAILS.get(lifecycle)
         if outcome is None:
+            return
+        dedupe_key = f"{case_id}:{lifecycle.value}"
+        if self._vendor.notification_recorded(
+            event_type="email.notification", dedupe_key=dedupe_key
+        ):
             return
         invites = [
             invite
@@ -1229,7 +1240,13 @@ class LocalReviewApi:
         ]
         if not invites:
             return
-        invite = max(invites, key=lambda item: item.issued_at)
+        submitted = [
+            invite for invite in invites if invite.status is InviteStatus.SUBMITTED
+        ]
+        if submitted:
+            invite = max(submitted, key=lambda item: item.submitted_at or item.issued_at)
+        else:
+            invite = max(invites, key=lambda item: item.issued_at)
         try:
             contact = self._vendor.get_contact(invite.contact_id)
         except VendorBackendError:
@@ -1246,6 +1263,7 @@ class LocalReviewApi:
             summary=subject,
             delivery=delivery,
             event_type="email.notification",
+            dedupe_key=dedupe_key,
         )
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:

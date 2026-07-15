@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import unittest
 
 import _bootstrap  # noqa: F401
 
 from review_agent.adapters.email import SimulatedEmailSender
 from review_agent.api import LocalReviewApi
+from review_agent.contracts.vendor import InviteStatus
 from review_agent.profiles.service import ReviewProfileService
 from review_agent.vendor.repository import InMemoryVendorRepository
 from review_agent.vendor.service import VendorBackend, VendorBackendError
@@ -87,20 +90,22 @@ class VendorReviewStatusTests(unittest.TestCase):
         self.assertFalse(status["intake_analysis_complete"])
         self.assertEqual(status["checklist"], [])
 
-    def test_checklist_splits_received_and_outstanding(self) -> None:
+    def test_checklist_splits_received_processing_and_outstanding(self) -> None:
         self.analyze_with_soc2()
         status = self.backend.review_status(self.token)
         by_id = {item["requirement_id"]: item for item in status["checklist"]}
         self.assertEqual(by_id["SEC.DATA.001"]["status"], "received")
         self.assertEqual(by_id["A11Y.VPAT.001"]["status"], "outstanding")
         self.assertEqual(by_id["A11Y.VPAT.001"]["expected_evidence"], ["VPAT"])
-        # An answered requirement also counts as received.
+        # Regression: an unvalidated free-text answer is never presented as
+        # received evidence; it is "processing" until validation (issue #36).
         self.backend.save_answers(self.token, {"A11Y.VPAT.001": "VPAT attached on request."})
         answered = {
             item["requirement_id"]: item["status"]
             for item in self.backend.review_status(self.token)["checklist"]
         }
-        self.assertEqual(answered["A11Y.VPAT.001"], "received")
+        self.assertEqual(answered["A11Y.VPAT.001"], "processing")
+        self.assertEqual(answered["SEC.DATA.001"], "received")
 
     def test_status_stays_readable_after_finalize(self) -> None:
         self.analyze_with_soc2()
@@ -146,6 +151,19 @@ class VendorReviewStatusTests(unittest.TestCase):
             self.backend.review_status(second["token"])
         self.assertEqual(expired.exception.code, "invite_expired")
 
+    def test_submitted_invite_cannot_read_status_after_expiry(self) -> None:
+        # Regression: a submitted token honors the same expiry as every other
+        # token operation instead of staying usable forever.
+        self.analyze_with_soc2()
+        self.backend.finalize_submission(self.token)
+        self.clock.value += datetime.timedelta(days=8)
+        with self.assertRaises(VendorBackendError) as expired:
+            self.backend.review_status(self.token)
+        self.assertEqual(expired.exception.code, "invite_expired")
+        # The submitted audit marker is preserved; only the read is rejected.
+        invite = self.backend.list_invites("CASE-1")[0]
+        self.assertIs(invite.status, InviteStatus.SUBMITTED)
+
 
 class VendorOutcomeEmailTests(unittest.TestCase):
     """Decision outcomes reach the invited contact via the email adapter."""
@@ -190,7 +208,12 @@ class VendorOutcomeEmailTests(unittest.TestCase):
         email_events = [item for item in events if item["event_type"] == "email.notification"]
         self.assertEqual(len(email_events), 1)
         self.assertEqual(email_events[0]["detail"]["delivery"], "simulated")
-        self.assertEqual(email_events[0]["detail"]["recipient"], "approve@vendor.example")
+        # Regression: the persisted event carries only a recipient digest; the
+        # raw address never enters the integration-event log.
+        expected_digest = hashlib.sha256(b"approve@vendor.example").hexdigest()
+        self.assertEqual(email_events[0]["detail"]["recipient_sha256"], expected_digest)
+        self.assertNotIn("recipient", email_events[0]["detail"])
+        self.assertNotIn("approve@vendor.example", json.dumps(events))
         status = self.api.vendor_review_status(token)
         self.assertEqual(status["review_stage"], "decided")
         self.assertEqual(status["outcome"], "approved")
@@ -223,6 +246,33 @@ class VendorOutcomeEmailTests(unittest.TestCase):
         status = api_two.vendor_review_status(issued["token"])
         self.assertEqual(status["review_stage"], "changes_requested")
         self.assertIsNone(status["outcome"])
+
+    def test_outcome_email_targets_submitted_contact_not_newest_invite(self) -> None:
+        # Regression: the notification goes to the contact whose invitation
+        # carries the submitted evidence, even when a newer invitation was
+        # issued to a different contact afterwards.
+        submitted_token = self.invite_for("TR-260714-018", "submitted@vendor.example")
+        self.api.vendor_finalize(submitted_token)
+        self.invite_for("TR-260714-018", "newer-contact@vendor.example")
+        self.api.analyze_case("TR-260714-018")
+        self.api.review_case("TR-260714-018", self.approve_payload("TR-260714-018"))
+        self.assertEqual(len(self.email.sent), 1)
+        self.assertEqual(self.email.sent[0]["to"], "submitted@vendor.example")
+
+    def test_duplicate_decision_recording_sends_single_email(self) -> None:
+        # Regression: re-recording the same outcome (e.g. a retried invocation)
+        # must not send or persist a duplicate notification (issue #38).
+        self.invite_for("TR-260714-018", "once@vendor.example")
+        self.api.analyze_case("TR-260714-018")
+        self.api.review_case("TR-260714-018", self.approve_payload("TR-260714-018"))
+        self.api.review_case(
+            "TR-260714-018", self.approve_payload("TR-260714-018", version=2)
+        )
+        self.assertEqual(len(self.email.sent), 1)
+        events = self.api.integration_events()["items"]
+        email_events = [item for item in events if item["event_type"] == "email.notification"]
+        self.assertEqual(len(email_events), 1)
+        self.assertEqual(email_events[0]["detail"]["dedupe_key"], "TR-260714-018:approved")
 
     def test_decision_without_invite_sends_nothing_and_never_blocks(self) -> None:
         self.api.analyze_case("TR-260714-018")

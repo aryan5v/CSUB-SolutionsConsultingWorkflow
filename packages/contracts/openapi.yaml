@@ -303,10 +303,10 @@ paths:
   /vendor/invites/{token}/status:
     get:
       tags: [vendor-intake]
-      summary: Vendor-safe review status; stays readable after the submission is finalized.
+      summary: Vendor-safe review status; stays readable after the submission is finalized, until the invitation expires.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses:
-        "200": {description: Received/outstanding checklist, collapsed review stage, and outcome once decided., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
+        "200": {description: Per-requirement evidence status checklist, collapsed review stage, and outcome once decided., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
         "410": {description: Expired or revoked.}
   /review-profiles:
     get:
