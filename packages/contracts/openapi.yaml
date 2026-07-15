@@ -1,0 +1,142 @@
+# Public application interface for the CSUB Technology Review Agent (PRD sec 5).
+# This is the locked REST contract shared by services/case-api (TypeScript) and
+# consumed by apps/reviewer-web. Payload shapes reference the JSON Schemas in
+# ./schemas. Handlers are implemented Wednesday; this contract is locked Tuesday.
+openapi: 3.1.0
+info:
+  title: CSUB Technology Review Agent API
+  version: 0.1.0
+  description: >-
+    Case intake, analysis, human review, and simulated ServiceNow write-back.
+    All write-back is simulated and clearly labeled in the prototype.
+servers:
+  - url: https://api.example.local
+    description: Placeholder; real base URL is environment configuration.
+tags:
+  - name: cases
+  - name: review
+  - name: servicenow
+paths:
+  /cases:
+    post:
+      tags: [cases]
+      summary: Create a case from guided intake.
+      operationId: createCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schemas/case-intake.schema.json" }
+      responses:
+        "201": { $ref: "#/components/responses/CaseCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /cases/{id}/documents:
+    post:
+      tags: [cases]
+      summary: Register uploaded evidence metadata (content stored separately, untrusted).
+      operationId: addCaseDocument
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "201": { description: Document metadata registered. }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /cases/{id}/analyze:
+    post:
+      tags: [cases]
+      summary: Start deterministic routing plus bounded specialist analysis.
+      operationId: analyzeCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "202": { description: Analysis started; poll the stream. }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /cases/{id}/stream:
+    get:
+      tags: [cases]
+      summary: Server-sent workflow progress and specialist results.
+      operationId: streamCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200": { description: text/event-stream of workflow state transitions. }
+  /cases/{id}/review:
+    post:
+      tags: [review]
+      summary: Record a reviewer decision (approve, reject, request_info) and edits.
+      operationId: reviewCase
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/HumanDecision" }
+      responses:
+        "200": { description: Decision recorded. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cases/{id}/servicenow/preview:
+    post:
+      tags: [servicenow]
+      summary: Return a simulated before/after write-back preview (dry-run default).
+      operationId: previewServiceNow
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200":
+          description: Simulated write preview.
+          content:
+            application/json:
+              schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/WritePreview" }
+  /cases/{id}/servicenow/commit:
+    post:
+      tags: [servicenow]
+      summary: >-
+        Commit the simulated write after a recorded approval and an explicit
+        second confirmation. Idempotent on case_id + decision_version.
+      operationId: commitServiceNow
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200":
+          description: Simulated write result.
+          content:
+            application/json:
+              schema: { $ref: "./schemas/servicenow-operations.schema.json#/$defs/WriteResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: Stale expected version or missing approved decision. }
+  /cases/{id}/packet:
+    get:
+      tags: [cases]
+      summary: Fetch the current generated packet.
+      operationId: getPacket
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200":
+          description: Packet.
+          content:
+            application/json:
+              schema: { $ref: "./schemas/packet.schema.json" }
+  /review-queue:
+    get:
+      tags: [review]
+      summary: List cases awaiting reviewer action.
+      operationId: getReviewQueue
+      responses:
+        "200": { description: Review queue items. }
+components:
+  parameters:
+    CaseId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    CaseCreated:
+      description: Case created.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [case_id]
+            properties:
+              case_id: { type: string }
+    ValidationError:
+      description: Intake validation failed.
+    NotFound:
+      description: Case or resource not found.
+    Forbidden:
+      description: Reviewer not authorized for this action.

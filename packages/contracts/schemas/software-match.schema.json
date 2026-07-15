@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/software-match.schema.json",
+  "title": "SoftwareMatch",
+  "description": "A single approved-software lookup candidate with disclosed match method (PRD FR-2). Fuzzy and semantic matches require reviewer confirmation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record_id", "match_method", "score", "requires_confirmation", "source_row_ref"],
+  "properties": {
+    "record_id": { "type": "string" },
+    "canonical_name": { "type": "string" },
+    "match_method": {
+      "type": "string",
+      "enum": ["exact", "alias", "vendor_product", "fuzzy", "semantic"]
+    },
+    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "requires_confirmation": {
+      "type": "boolean",
+      "description": "True for fuzzy and semantic methods; a model must not auto-confirm these."
+    },
+    "source_row_ref": { "$ref": "https://csub.example/contracts/source-coordinates.schema.json" }
+  }
+}

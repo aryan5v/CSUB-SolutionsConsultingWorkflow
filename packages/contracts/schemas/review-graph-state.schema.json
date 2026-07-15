@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/review-graph-state.schema.json",
+  "title": "ReviewGraphState",
+  "description": "Durable state carried through the LangGraph review workflow (PRD sec 5). Checkpointed for human pause/resume with a seven-day TTL.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "status", "case_input"],
+  "properties": {
+    "case_id": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["intake", "lookup", "awaiting_match_confirmation", "policy", "analysis", "packet", "awaiting_review", "writeback", "closed", "escalated"]
+    },
+    "case_input": { "$ref": "https://csub.example/contracts/case-intake.schema.json" },
+    "document_ids": { "type": "array", "items": { "type": "string" } },
+    "software_candidates": {
+      "type": "array",
+      "items": { "$ref": "https://csub.example/contracts/software-match.schema.json" }
+    },
+    "confirmed_match_id": { "type": ["string", "null"] },
+    "policy_result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://csub.example/contracts/policy-result.schema.json" }
+      ]
+    },
+    "specialist_results": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "security": { "type": ["object", "null"], "additionalProperties": true },
+        "accessibility": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    },
+    "evidence_gaps": { "type": "array", "items": { "type": "string" } },
+    "citations": { "type": "array", "items": { "$ref": "https://csub.example/contracts/citation.schema.json" } },
+    "conflicts": { "type": "array", "items": { "$ref": "https://csub.example/contracts/conflict.schema.json" } },
+    "draft_packet": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://csub.example/contracts/packet.schema.json" }
+      ]
+    },
+    "human_edits": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "human_decision": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://csub.example/contracts/servicenow-operations.schema.json#/$defs/HumanDecision" }
+      ]
+    },
+    "connector_target": { "type": ["object", "null"], "additionalProperties": true },
+    "write_preview": { "type": ["object", "null"], "additionalProperties": true },
+    "write_result": { "type": ["object", "null"], "additionalProperties": true },
+    "idempotency_key": { "type": ["string", "null"] },
+    "workflow_version": { "type": "string" },
+    "repair_passes_used": { "type": "integer", "minimum": 0, "maximum": 1 }
+  }
+}
