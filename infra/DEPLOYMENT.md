@@ -10,9 +10,9 @@ This is the recorded provisioning gate required before creating AWS resources
 |---|---|
 | Purpose | First real deployment of the prototype storage foundation (PRD sec 5). |
 | Account | `<SANDBOX_ACCOUNT_ID>` (AWS Innovation Sandbox — budget-capped, auto-expiring lease) |
-| Profile / identity | SSO role `myisb_IsbUsersPS` (`dvillanueva8@csub.edu`) |
+| Profile / identity | Approved sandbox SSO deployment role (recorded outside source; no personal identity committed). |
 | Region | `us-west-2` (camp-designated region) |
-| Resource owner | Danny Villanueva |
+| Resource owner | `<TEAM_OWNER>` |
 | Budget / alarm | Enforced by the Innovation Sandbox lease (account-level cap + auto-cleanup) |
 | Expiration | Governed by the sandbox lease |
 | Data classification | Sanitized / synthetic prototype data only. No real institutional data. |
@@ -66,7 +66,7 @@ public access blocked), DynamoDB table
 ### The sandbox SCP wrinkle and the fix
 
 A first attempt with the default synthesizer **rolled back**. The account is
-governed by an Innovation Sandbox SCP (`o-19qav45m70` / `p-nw6rpuvq`) that denies
+governed by an Innovation Sandbox SCP that denies
 actions performed by **CDK's bootstrap `cfn-exec-role`** (a guardrail against
 newly-created roles) — `iam:CreateRole`, `iam:DetachRolePolicy`, tagging, etc.
 
@@ -99,11 +99,30 @@ there).
 
 ## Platform stack (`PlatformStack`) — gate and runbook
 
-`PlatformStack` deploys the demo platform (Cognito, CloudFront/OAC + private S3,
-HTTP API + Lambda proxy, DynamoDB records, ECR, AgentCore Memory/Browser and
-gated Runtime/Endpoint, Guardrail + version, S3 Vector scopes + gated Knowledge
-Bases, encrypted logging/alarms/dashboard, CloudTrail, and a monthly Budget).
-It reuses the foundation KMS key and `cases` table by reference.
+`PlatformStack` deploys the supported core demo platform (Cognito,
+CloudFront/OAC + private S3, HTTP API + Lambda proxy, DynamoDB records, ECR,
+encrypted logging/alarms/dashboard, CloudTrail, SQS, and a monthly Budget).
+AgentCore, Guardrail, and S3 Vectors/Knowledge Bases remain fully modeled but
+are independently default-off behind typed deployment gates. It reuses the
+foundation KMS key and `cases` table by reference.
+
+### AWS Organizations SCP constraint
+
+The current deployment environment explicitly denies
+`s3vectors:CreateVectorBucket` and `bedrock-agentcore:CreateMemory` via AWS
+Organizations service control policies. Creating either resource causes
+CloudFormation rollback. Deploy the supported core with all three optional
+feature flags false:
+
+```bash
+-c enableAgentCoreServices=false \
+-c enableVectorStores=false \
+-c enableGuardrail=false
+```
+
+No account or personal identity is required to document or apply these gates.
+A future account may enable a service only after its effective SCPs are verified
+to permit the relevant create APIs.
 
 ### Additional gate to record before deploying
 
@@ -112,7 +131,10 @@ It reuses the foundation KMS key and `cases` table by reference.
 | Budget | Monthly `budgetLimitUsd` (default 50 USD); optional `budgetNotificationEmail`. |
 | Data classification | Sanitized/synthetic only. PII/PHI classification + guardrail-mode approval **required** before any Knowledge Base ingestion. |
 | Model IDs | Discover and pin `embeddingModelArn` / foundation-model IDs after auth; never commit them. |
-| AgentCore image | Publish the ARM64 HTTP image, then pass its immutable digest as `agentCoreImageUri`. |
+| AgentCore services | Default `enableAgentCoreServices=false`; enable only where SCPs permit AgentCore create APIs. An image URI never bypasses this gate. |
+| Vector stores | Default `enableVectorStores=false`; enable only where SCPs permit `s3vectors:CreateVectorBucket`. |
+| Guardrail | Independent default `enableGuardrail=false`; enable only after guardrail-mode approval. |
+| AgentCore image | After the master gate is allowed, publish the ARM64 HTTP image and pass its immutable digest as `agentCoreImageUri`. |
 | Network mode | `PUBLIC` for sandbox; production delta is `VPC` (`agentCoreNetworkMode=VPC`). |
 
 ### Commands (non-mutating first)
@@ -126,15 +148,21 @@ npm --prefix infra test                              # CDK unit assertions
 npm --prefix infra run synth -- --strict             # offline, no credentials
 npm --prefix infra run diff                          # review additive foundation export + new resources
 
-# Deploy foundation first (adds a managed export), then the platform.
+# Deploy foundation first (adds a managed export), then the supported core.
 npm --prefix infra run deploy -- ReviewFoundationStack
 npm --prefix infra run deploy -- PlatformStack \
+  -c enableAgentCoreServices=false \
+  -c enableVectorStores=false \
+  -c enableGuardrail=false \
   -c budgetLimitUsd=50 -c budgetNotificationEmail=<owner-email>
 
-# Later, once the runtime image and model access exist:
+# Future allowed account only: verify effective SCPs first, then opt in.
 npm --prefix infra run deploy -- PlatformStack \
+  -c enableAgentCoreServices=true \
   -c agentCoreImageUri=<account>.dkr.ecr.us-west-2.amazonaws.com/<repo>@sha256:<digest> \
-  -c embeddingModelArn=arn:aws:bedrock:us-west-2::foundation-model/<embed-model>
+  -c enableVectorStores=true \
+  -c embeddingModelArn=arn:aws:bedrock:us-west-2::foundation-model/<embed-model> \
+  -c enableGuardrail=true
 ```
 
 ### Deployed artifact for the Lambda proxy

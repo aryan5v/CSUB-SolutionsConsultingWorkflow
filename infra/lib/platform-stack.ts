@@ -403,195 +403,211 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // ====================================================================
-    // Retrieval scopes: S3 Vectors (always) + Knowledge Bases (gated)
+    // Retrieval scopes: S3 Vectors + Knowledge Bases
+    // GATE: only when enableVectorStores is true. Some AWS Organizations SCPs
+    // explicitly deny s3vectors:CreateVectorBucket, so this defaults off to keep
+    // the core platform deployable; the full infrastructure is preserved here
+    // for a future allowed account.
     // ====================================================================
-    const vectorEncryption: s3vectors.CfnVectorBucket.EncryptionConfigurationProperty = {
-      sseType: 'aws:kms',
-      kmsKeyArn: dataKey.keyArn,
-    };
+    let knowledgeBasesConfigured = false;
+    if (config.enableVectorStores) {
+      const vectorEncryption: s3vectors.CfnVectorBucket.EncryptionConfigurationProperty = {
+        sseType: 'aws:kms',
+        kmsKeyArn: dataKey.keyArn,
+      };
 
-    const makeVectorScope = (
-      scope: string,
-    ): { bucket: s3vectors.CfnVectorBucket; index: s3vectors.CfnIndex } => {
-      const bucket = new s3vectors.CfnVectorBucket(this, `${scope}VectorBucket`, {
-        vectorBucketName: `csub-${scope.toLowerCase()}-vectors-${appEnv}-${this.account}`,
-        encryptionConfiguration: vectorEncryption,
-      });
-      const index = new s3vectors.CfnIndex(this, `${scope}VectorIndex`, {
-        indexName: `csub-${scope.toLowerCase()}-index`,
-        vectorBucketArn: bucket.attrVectorBucketArn,
-        dataType: 'float32',
-        dimension: config.embeddingDimension,
-        distanceMetric: 'cosine',
-        // Metadata-filterable retrieval per scope (vendor/product, policy).
-        metadataConfiguration: { nonFilterableMetadataKeys: ['source_text'] },
-      });
-      index.addDependency(bucket);
-      return { bucket, index };
-    };
-
-    const policyScope = makeVectorScope('Policy');
-    const evidenceScope = makeVectorScope('Evidence');
-
-    if (config.embeddingModelArn) {
-      const kbRole = new iam.Role(this, 'KnowledgeBaseRole', {
-        assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com', {
-          conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
-        }),
-        description: 'Least-privilege role for CSUB Knowledge Base ingestion/query.',
-      });
-      kbRole.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['bedrock:InvokeModel'],
-          resources: [config.embeddingModelArn],
-        }),
-      );
-      kbRole.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['s3:GetObject', 's3:ListBucket'],
-          resources: [
-            this.evidenceBucket.bucketArn,
-            this.evidenceBucket.arnForObjects('*'),
-          ],
-        }),
-      );
-      kbRole.addToPolicy(
-        new iam.PolicyStatement({
-          actions: [
-            's3vectors:GetIndex',
-            's3vectors:QueryVectors',
-            's3vectors:PutVectors',
-            's3vectors:GetVectors',
-            's3vectors:DeleteVectors',
-          ],
-          resources: [policyScope.index.attrIndexArn, evidenceScope.index.attrIndexArn],
-        }),
-      );
-      dataKey.grantEncryptDecrypt(kbRole);
-
-      const makeKnowledgeBase = (
+      const makeVectorScope = (
         scope: string,
-        index: s3vectors.CfnIndex,
-      ): bedrock.CfnKnowledgeBase =>
-        new bedrock.CfnKnowledgeBase(this, `${scope}KnowledgeBase`, {
-          name: `csub-${scope.toLowerCase()}-kb-${appEnv}`,
-          roleArn: kbRole.roleArn,
-          knowledgeBaseConfiguration: {
-            type: 'VECTOR',
-            vectorKnowledgeBaseConfiguration: {
-              embeddingModelArn: config.embeddingModelArn!,
+      ): { bucket: s3vectors.CfnVectorBucket; index: s3vectors.CfnIndex } => {
+        const bucket = new s3vectors.CfnVectorBucket(this, `${scope}VectorBucket`, {
+          vectorBucketName: `csub-${scope.toLowerCase()}-vectors-${appEnv}-${this.account}`,
+          encryptionConfiguration: vectorEncryption,
+        });
+        const index = new s3vectors.CfnIndex(this, `${scope}VectorIndex`, {
+          indexName: `csub-${scope.toLowerCase()}-index`,
+          vectorBucketArn: bucket.attrVectorBucketArn,
+          dataType: 'float32',
+          dimension: config.embeddingDimension,
+          distanceMetric: 'cosine',
+          // Metadata-filterable retrieval per scope (vendor/product, policy).
+          metadataConfiguration: { nonFilterableMetadataKeys: ['source_text'] },
+        });
+        index.addDependency(bucket);
+        return { bucket, index };
+      };
+
+      const policyScope = makeVectorScope('Policy');
+      const evidenceScope = makeVectorScope('Evidence');
+
+      const embeddingModelArn = config.embeddingModelArn;
+      if (embeddingModelArn !== undefined) {
+        const kbRole = new iam.Role(this, 'KnowledgeBaseRole', {
+          assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com', {
+            conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+          }),
+          description: 'Least-privilege role for CSUB Knowledge Base ingestion/query.',
+        });
+        kbRole.addToPolicy(
+          new iam.PolicyStatement({
+            actions: ['bedrock:InvokeModel'],
+            resources: [embeddingModelArn],
+          }),
+        );
+        kbRole.addToPolicy(
+          new iam.PolicyStatement({
+            actions: ['s3:GetObject', 's3:ListBucket'],
+            resources: [this.evidenceBucket.bucketArn, this.evidenceBucket.arnForObjects('*')],
+          }),
+        );
+        kbRole.addToPolicy(
+          new iam.PolicyStatement({
+            actions: [
+              's3vectors:GetIndex',
+              's3vectors:QueryVectors',
+              's3vectors:PutVectors',
+              's3vectors:GetVectors',
+              's3vectors:DeleteVectors',
+            ],
+            resources: [policyScope.index.attrIndexArn, evidenceScope.index.attrIndexArn],
+          }),
+        );
+        dataKey.grantEncryptDecrypt(kbRole);
+
+        const makeKnowledgeBase = (
+          scope: string,
+          index: s3vectors.CfnIndex,
+        ): bedrock.CfnKnowledgeBase =>
+          new bedrock.CfnKnowledgeBase(this, `${scope}KnowledgeBase`, {
+            name: `csub-${scope.toLowerCase()}-kb-${appEnv}`,
+            roleArn: kbRole.roleArn,
+            knowledgeBaseConfiguration: {
+              type: 'VECTOR',
+              vectorKnowledgeBaseConfiguration: {
+                embeddingModelArn,
+              },
+            },
+            storageConfiguration: {
+              type: 'S3_VECTORS',
+              s3VectorsConfiguration: { indexArn: index.attrIndexArn },
+            },
+          });
+
+        makeKnowledgeBase('Policy', policyScope.index);
+        makeKnowledgeBase('Evidence', evidenceScope.index);
+        knowledgeBasesConfigured = true;
+      }
+    }
+
+    // ====================================================================
+    // AgentCore: execution role, Memory, Browser, Runtime/Endpoint
+    // GATE: only when enableAgentCoreServices is true. Some AWS Organizations
+    // SCPs explicitly deny bedrock-agentcore:CreateMemory (and related), so this
+    // defaults off to keep the core platform deployable. When disabled, NO
+    // AWS::BedrockAgentCore::* resources and NO AgentCore-specific roles,
+    // policies, or alarms are synthesized — and a configured runtime image URI
+    // does NOT bypass this gate.
+    // ====================================================================
+    let agentEndpoint: agentcore.CfnRuntimeEndpoint | undefined;
+    if (config.enableAgentCoreServices) {
+      const agentExecutionRole = new iam.Role(this, 'AgentRuntimeExecutionRole', {
+        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
+          conditions: {
+            StringEquals: { 'aws:SourceAccount': this.account },
+            ArnLike: {
+              'aws:SourceArn': `arn:aws:bedrock-agentcore:${this.region}:${this.account}:*`,
             },
           },
-          storageConfiguration: {
-            type: 'S3_VECTORS',
-            s3VectorsConfiguration: { indexArn: index.attrIndexArn },
+        }),
+        description: 'Least-privilege AgentCore runtime execution role.',
+      });
+      this.ecrRepository.grantPull(agentExecutionRole);
+      dataKey.grantEncryptDecrypt(agentExecutionRole);
+      this.evidenceBucket.grantReadWrite(agentExecutionRole);
+      this.generatedBucket.grantReadWrite(agentExecutionRole);
+      // Shared foundation cases table (coordinated by reference, not by export).
+      foundationStack.casesTable.grantReadWriteData(agentExecutionRole);
+      agentExecutionRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+          resources: [
+            `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
+          ],
+        }),
+      );
+      // Model invocation is scoped to Bedrock foundation-model/inference-profile
+      // ARNs in this account/region; no specific model ID is hard-coded here.
+      agentExecutionRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+          resources: [
+            `arn:aws:bedrock:${this.region}::foundation-model/*`,
+            `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+          ],
+        }),
+      );
+      if (this.guardrail) {
+        agentExecutionRole.addToPolicy(
+          new iam.PolicyStatement({
+            actions: ['bedrock:ApplyGuardrail'],
+            resources: [this.guardrail.attrGuardrailArn],
+          }),
+        );
+      }
+
+      // Seven-day short-term Memory (encrypted; no institutional data at synth).
+      new agentcore.CfnMemory(this, 'AgentMemory', {
+        name: `csub_review_memory_${appEnv}`,
+        description: 'Seven-day short-term AgentCore memory for the review workflow.',
+        eventExpiryDuration: 7,
+        encryptionKeyArn: dataKey.keyArn,
+      });
+
+      // Managed Browser for allowlisted official trust-center research only.
+      const browserRole = new iam.Role(this, 'AgentBrowserRole', {
+        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
+          conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+        }),
+        description: 'Least-privilege AgentCore managed browser role.',
+      });
+      dataKey.grantEncryptDecrypt(browserRole);
+      new agentcore.CfnBrowserCustom(this, 'AgentBrowser', {
+        name: `csub_review_browser_${appEnv}`,
+        description: 'Managed browser restricted to allowlisted official domains.',
+        executionRoleArn: browserRole.roleArn,
+        networkConfiguration: { networkMode: config.agentCoreNetworkMode },
+      });
+
+      // Runtime/Endpoint additionally require a supplied immutable image URI.
+      if (config.agentCoreImageUri) {
+        const cognitoDiscoveryUrl = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}/.well-known/openid-configuration`;
+        this.agentRuntime = new agentcore.CfnRuntime(this, 'AgentRuntime', {
+          agentRuntimeName: `csub_review_runtime_${appEnv}`,
+          description: 'ARM64 HTTP AgentCore runtime (GET /ping, POST /invocations, port 8080).',
+          roleArn: agentExecutionRole.roleArn,
+          agentRuntimeArtifact: {
+            containerConfiguration: { containerUri: config.agentCoreImageUri },
+          },
+          networkConfiguration: { networkMode: config.agentCoreNetworkMode },
+          protocolConfiguration: 'HTTP',
+          // Authenticated inbound via Cognito JWT; never anonymous.
+          authorizerConfiguration: {
+            customJwtAuthorizer: {
+              discoveryUrl: cognitoDiscoveryUrl,
+              allowedClients: [this.userPoolClient.userPoolClientId],
+            },
+          },
+          // Allowlist only safe headers into the container; never Host/Authorization.
+          requestHeaderConfiguration: {
+            requestHeaderAllowlist: ['X-Correlation-Id', 'Content-Type'],
           },
         });
 
-      makeKnowledgeBase('Policy', policyScope.index);
-      makeKnowledgeBase('Evidence', evidenceScope.index);
-    }
-
-    // ====================================================================
-    // AgentCore: execution role, Memory, Browser, Runtime/Endpoint (gated)
-    // ====================================================================
-    const agentExecutionRole = new iam.Role(this, 'AgentRuntimeExecutionRole', {
-      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
-        conditions: {
-          StringEquals: { 'aws:SourceAccount': this.account },
-          ArnLike: {
-            'aws:SourceArn': `arn:aws:bedrock-agentcore:${this.region}:${this.account}:*`,
-          },
-        },
-      }),
-      description: 'Least-privilege AgentCore runtime execution role.',
-    });
-    this.ecrRepository.grantPull(agentExecutionRole);
-    dataKey.grantEncryptDecrypt(agentExecutionRole);
-    this.evidenceBucket.grantReadWrite(agentExecutionRole);
-    this.generatedBucket.grantReadWrite(agentExecutionRole);
-    // Shared foundation cases table (coordinated by reference, not by export).
-    foundationStack.casesTable.grantReadWriteData(agentExecutionRole);
-    agentExecutionRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
-        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`],
-      }),
-    );
-    // Model invocation is scoped to Bedrock foundation-model/inference-profile
-    // ARNs in this account/region; no specific model ID is hard-coded here.
-    agentExecutionRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-        resources: [
-          `arn:aws:bedrock:${this.region}::foundation-model/*`,
-          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
-        ],
-      }),
-    );
-    if (this.guardrail) {
-      agentExecutionRole.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [this.guardrail.attrGuardrailArn],
-        }),
-      );
-    }
-
-    // Seven-day short-term Memory (encrypted; no institutional data at synth).
-    new agentcore.CfnMemory(this, 'AgentMemory', {
-      name: `csub_review_memory_${appEnv}`,
-      description: 'Seven-day short-term AgentCore memory for the review workflow.',
-      eventExpiryDuration: 7,
-      encryptionKeyArn: dataKey.keyArn,
-    });
-
-    // Managed Browser for allowlisted official trust-center research only.
-    const browserRole = new iam.Role(this, 'AgentBrowserRole', {
-      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
-        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
-      }),
-      description: 'Least-privilege AgentCore managed browser role.',
-    });
-    dataKey.grantEncryptDecrypt(browserRole);
-    new agentcore.CfnBrowserCustom(this, 'AgentBrowser', {
-      name: `csub_review_browser_${appEnv}`,
-      description: 'Managed browser restricted to allowlisted official domains.',
-      executionRoleArn: browserRole.roleArn,
-      networkConfiguration: { networkMode: config.agentCoreNetworkMode },
-    });
-
-    const cognitoDiscoveryUrl = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}/.well-known/openid-configuration`;
-
-    let agentEndpoint: agentcore.CfnRuntimeEndpoint | undefined;
-    if (config.agentCoreImageUri) {
-      this.agentRuntime = new agentcore.CfnRuntime(this, 'AgentRuntime', {
-        agentRuntimeName: `csub_review_runtime_${appEnv}`,
-        description: 'ARM64 HTTP AgentCore runtime (GET /ping, POST /invocations, port 8080).',
-        roleArn: agentExecutionRole.roleArn,
-        agentRuntimeArtifact: {
-          containerConfiguration: { containerUri: config.agentCoreImageUri },
-        },
-        networkConfiguration: { networkMode: config.agentCoreNetworkMode },
-        protocolConfiguration: 'HTTP',
-        // Authenticated inbound via Cognito JWT; never anonymous.
-        authorizerConfiguration: {
-          customJwtAuthorizer: {
-            discoveryUrl: cognitoDiscoveryUrl,
-            allowedClients: [this.userPoolClient.userPoolClientId],
-          },
-        },
-        // Allowlist only safe headers into the container; never Host/Authorization.
-        requestHeaderConfiguration: {
-          requestHeaderAllowlist: ['X-Correlation-Id', 'Content-Type'],
-        },
-      });
-
-      agentEndpoint = new agentcore.CfnRuntimeEndpoint(this, 'AgentRuntimeEndpoint', {
-        agentRuntimeId: this.agentRuntime.attrAgentRuntimeId,
-        name: `csub_${appEnv}`,
-      });
-      agentEndpoint.addDependency(this.agentRuntime);
+        agentEndpoint = new agentcore.CfnRuntimeEndpoint(this, 'AgentRuntimeEndpoint', {
+          agentRuntimeId: this.agentRuntime.attrAgentRuntimeId,
+          name: `csub_${appEnv}`,
+        });
+        agentEndpoint.addDependency(this.agentRuntime);
+      }
     }
 
     // ====================================================================
@@ -647,16 +663,19 @@ export class PlatformStack extends cdk.Stack {
     if (slackSecret) {
       slackSecret.grantRead(this.proxyFunction);
     }
-    // Invoke AgentCore via the data-plane; scoped to this account/region runtimes.
-    this.proxyFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*/runtime-endpoint/*`,
-        ],
-      }),
-    );
+    // Invoke AgentCore via the data-plane; scoped to this account/region
+    // runtimes. AgentCore-specific — only granted when AgentCore is enabled.
+    if (config.enableAgentCoreServices) {
+      this.proxyFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+          resources: [
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*/runtime-endpoint/*`,
+          ],
+        }),
+      );
+    }
 
     const cognitoAuthorizer = new HttpUserPoolAuthorizer('ReviewerAuthorizer', this.userPool, {
       userPoolClients: [this.userPoolClient],
@@ -761,20 +780,24 @@ export class PlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    // Knowledge Base ingestion-failure metric (namespace present once KBs run).
-    const kbIngestionAlarm = new cloudwatch.Alarm(this, 'KbIngestionFailureAlarm', {
-      alarmDescription: 'Knowledge Base ingestion documents failed.',
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/Bedrock',
-        metricName: 'IngestionDocumentFailed',
-        period: cdk.Duration.minutes(15),
-        statistic: cloudwatch.Stats.SUM,
-      }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
+    // Knowledge Base ingestion-failure alarm — only when vector stores/KBs exist.
+    const dashboardAlarms: cloudwatch.IAlarm[] = [apiErrorAlarm, proxyErrorAlarm, dlqAlarm];
+    if (config.enableVectorStores) {
+      const kbIngestionAlarm = new cloudwatch.Alarm(this, 'KbIngestionFailureAlarm', {
+        alarmDescription: 'Knowledge Base ingestion documents failed.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'IngestionDocumentFailed',
+          period: cdk.Duration.minutes(15),
+          statistic: cloudwatch.Stats.SUM,
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      dashboardAlarms.push(kbIngestionAlarm);
+    }
 
     const dashboard = new cloudwatch.Dashboard(this, 'PlatformDashboard', {
       dashboardName: `csub-platform-${appEnv}`,
@@ -795,7 +818,7 @@ export class PlatformStack extends cdk.Stack {
       }),
       new cloudwatch.AlarmStatusWidget({
         title: 'Alarms',
-        alarms: [apiErrorAlarm, proxyErrorAlarm, dlqAlarm, kbIngestionAlarm],
+        alarms: dashboardAlarms,
       }),
     );
 
@@ -848,11 +871,25 @@ export class PlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'EvidenceBucketName', { value: this.evidenceBucket.bucketName });
     new cdk.CfnOutput(this, 'EcrRepositoryUri', { value: this.ecrRepository.repositoryUri });
     new cdk.CfnOutput(this, 'AnalysisQueueUrl', { value: this.analysisQueue.queueUrl });
+    new cdk.CfnOutput(this, 'AgentCoreServicesEnabled', {
+      value: config.enableAgentCoreServices ? 'true' : 'false',
+      description: 'Whether AWS::BedrockAgentCore::* resources are synthesized.',
+    });
     new cdk.CfnOutput(this, 'AgentRuntimeConfigured', {
       value: this.agentRuntime ? 'true' : 'false',
+      description: 'Whether an AgentCore Runtime/Endpoint is synthesized (needs services + image URI).',
+    });
+    new cdk.CfnOutput(this, 'VectorStoresEnabled', {
+      value: config.enableVectorStores ? 'true' : 'false',
+      description: 'Whether AWS::S3Vectors::* resources are synthesized.',
     });
     new cdk.CfnOutput(this, 'KnowledgeBasesConfigured', {
-      value: config.embeddingModelArn ? 'true' : 'false',
+      value: knowledgeBasesConfigured ? 'true' : 'false',
+      description: 'Whether Knowledge Bases are synthesized (needs vector stores + embedding model ARN).',
+    });
+    new cdk.CfnOutput(this, 'GuardrailEnabled', {
+      value: config.enableGuardrail ? 'true' : 'false',
+      description: 'Whether the Bedrock Guardrail + version are synthesized.',
     });
   }
 }

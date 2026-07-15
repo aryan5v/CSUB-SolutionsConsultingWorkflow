@@ -16,11 +16,27 @@ export interface PlatformConfig {
   /** Finite retention period (days) applied to data, logs, and audit. */
   readonly retentionDays: number;
 
+  // ---- Master service gates (SCP-safe deployment defaults) -------------
+  /**
+   * Create AgentCore services (Runtime/Endpoint/Memory/Browser + their roles,
+   * policies, and alarms). Default false: some AWS Organizations SCPs explicitly
+   * deny `bedrock-agentcore:CreateMemory` (and related), which rolls the stack
+   * back. Enable only in an account where AgentCore is permitted.
+   */
+  readonly enableAgentCoreServices: boolean;
+  /**
+   * Create S3 Vector stores and Knowledge Bases (+ KB role and KB alarm).
+   * Default false: some SCPs explicitly deny `s3vectors:CreateVectorBucket`.
+   * Enable only in an account where S3 Vectors is permitted.
+   */
+  readonly enableVectorStores: boolean;
+
   // ---- AgentCore Runtime gate ------------------------------------------
   /**
    * Immutable, digest-pinned ECR image URI for the ARM64 HTTP AgentCore
-   * runtime. GATE: when omitted, the Runtime + RuntimeEndpoint are not
-   * created so synth succeeds before the image is published.
+   * runtime. GATE: the Runtime + RuntimeEndpoint are created only when
+   * `enableAgentCoreServices` is true AND this image URI is supplied. The image
+   * URI never bypasses the master AgentCore gate.
    */
   readonly agentCoreImageUri?: string;
   /**
@@ -31,9 +47,9 @@ export interface PlatformConfig {
 
   // ---- Retrieval (Knowledge Base) gate ---------------------------------
   /**
-   * Bedrock embedding model ARN (e.g. Titan Text Embeddings V2). GATE: when
-   * omitted, the two Knowledge Bases + data sources are not created (S3
-   * Vector scopes are always created). No model ID is ever hard-coded.
+   * Bedrock embedding model ARN (e.g. Titan Text Embeddings V2). GATE: the
+   * two Knowledge Bases are created only when `enableVectorStores` is true
+   * AND this ARN is supplied. No model ID is ever hard-coded.
    */
   readonly embeddingModelArn?: string;
   /** Embedding vector dimension for the S3 Vector indexes (Titan V2 = 1024). */
@@ -42,7 +58,7 @@ export interface PlatformConfig {
   readonly policyDocumentsPrefix?: string;
 
   // ---- Guardrail -------------------------------------------------------
-  /** Create the Bedrock Guardrail + pinned version (default true). */
+  /** Create the Bedrock Guardrail + pinned version (default false; separately gated). */
   readonly enableGuardrail: boolean;
 
   // ---- Secrets ---------------------------------------------------------
@@ -75,9 +91,13 @@ function ctx(app: cdk.App, key: string): string | undefined {
 }
 
 function boolCtx(app: cdk.App, key: string, envKey: string, fallback: boolean): boolean {
-  const raw = (app.node.tryGetContext(key) as string | undefined) ?? process.env[envKey];
+  const contextValue = app.node.tryGetContext(key) as unknown;
+  const raw = contextValue ?? process.env[envKey];
   if (raw === undefined) return fallback;
-  return raw === 'true' || raw === '1';
+  if (typeof raw === 'boolean') return raw;
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  throw new Error(`${key} must be a boolean (true/false or 1/0), got: ${String(raw)}`);
 }
 
 /**
@@ -122,13 +142,20 @@ export function resolvePlatformConfig(app: cdk.App): PlatformConfig {
   return {
     appEnv,
     retentionDays,
+    enableAgentCoreServices: boolCtx(
+      app,
+      'enableAgentCoreServices',
+      'ENABLE_AGENTCORE_SERVICES',
+      false,
+    ),
+    enableVectorStores: boolCtx(app, 'enableVectorStores', 'ENABLE_VECTOR_STORES', false),
     agentCoreImageUri: ctx(app, 'agentCoreImageUri') ?? process.env.AGENTCORE_IMAGE_URI,
     agentCoreNetworkMode: networkModeRaw,
     embeddingModelArn: ctx(app, 'embeddingModelArn') ?? process.env.EMBEDDING_MODEL_ARN,
     embeddingDimension,
     policyDocumentsPrefix:
       ctx(app, 'policyDocumentsPrefix') ?? process.env.POLICY_DOCUMENTS_PREFIX ?? 'policy/',
-    enableGuardrail: boolCtx(app, 'enableGuardrail', 'ENABLE_GUARDRAIL', true),
+    enableGuardrail: boolCtx(app, 'enableGuardrail', 'ENABLE_GUARDRAIL', false),
     slackSecretArn: ctx(app, 'slackSecretArn') ?? process.env.SLACK_SECRET_ARN,
     serviceNowTableName:
       ctx(app, 'serviceNowTableName') ?? process.env.SERVICE_NOW_TABLE_NAME ?? 'sc_req_item',

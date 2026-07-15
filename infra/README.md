@@ -88,17 +88,21 @@ customer-managed KMS key and `cases` table are passed by object reference
   (never forwarding Host/Authorization), and returns correlation-ID errors
   without bodies/tokens.
 - **Async boundary:** KMS-encrypted analysis SQS queue + DLQ.
-- **AgentCore:** least-privilege execution role, seven-day encrypted Memory,
-  a managed Browser for allowlisted research, plus a **gated** ARM64 HTTP
-  Runtime + Endpoint (`GET /ping`, `POST /invocations`, port 8080) created only
-  when an immutable image URI is supplied.
-- **Guardrail:** content + prompt-attack + PII + contextual-grounding policy,
-  with a pinned `GuardrailVersion` for application use (never DRAFT).
-- **Retrieval:** two S3 Vector scopes (campus policy, case/vendor evidence);
-  the two Bedrock Knowledge Bases + roles are **gated** on a configured
-  embedding-model ARN and never ingest data at synth.
-- **Observability:** KMS-encrypted log groups (finite retention), CloudWatch
-  alarms (API 5xx, proxy errors, DLQ depth, KB ingestion failures), a
+- **AgentCore (default off):** when `enableAgentCoreServices=true`, creates the
+  least-privilege execution role, seven-day encrypted Memory, managed Browser,
+  and — when an immutable image URI is also supplied — the ARM64 HTTP Runtime +
+  Endpoint (`GET /ping`, `POST /invocations`, port 8080). With the master gate
+  false, no `AWS::BedrockAgentCore::*` resource or AgentCore IAM is synthesized.
+- **Guardrail (default off, independent):** when `enableGuardrail=true`, creates
+  content + prompt-attack + PII + contextual-grounding policy with a pinned
+  `GuardrailVersion` (never DRAFT).
+- **Retrieval (default off):** when `enableVectorStores=true`, creates two S3
+  Vector scopes (campus policy, case/vendor evidence). The two Bedrock Knowledge
+  Bases additionally require `embeddingModelArn`; synth never ingests data.
+  With the master gate false, no `AWS::S3Vectors::*`, Knowledge Base, KB IAM, or
+  KB ingestion alarm is synthesized.
+- **Observability:** KMS-encrypted log groups (finite retention), core CloudWatch
+  alarms (API 5xx, proxy errors, DLQ depth), a conditional KB ingestion alarm,
   dashboard, and CloudTrail management auditing.
 - **Cost:** a parameterized monthly AWS Budget (optional email subscriber).
 
@@ -109,16 +113,39 @@ customer-managed KMS key and `cases` table are passed by object reference
 | `appEnv` | `APP_ENV` | `development` | Environment label and resource suffix. |
 | `retentionDays` | `RETENTION_DAYS` | `90` | Finite retention for data, logs, audit. |
 | `owner` | `PROJECT_OWNER` | `unspecified` | Owner tag. |
-| `agentCoreImageUri` | `AGENTCORE_IMAGE_URI` | *(unset)* | **Gate:** creates Runtime + Endpoint. |
+| `enableAgentCoreServices` | `ENABLE_AGENTCORE_SERVICES` | `false` | **Master gate:** AgentCore resources and AgentCore-specific IAM; image URI cannot bypass it. |
+| `agentCoreImageUri` | `AGENTCORE_IMAGE_URI` | *(unset)* | With AgentCore enabled, creates Runtime + Endpoint. |
 | `agentCoreNetworkMode` | `AGENTCORE_NETWORK_MODE` | `PUBLIC` | Sandbox `PUBLIC`; production `VPC`. |
-| `embeddingModelArn` | `EMBEDDING_MODEL_ARN` | *(unset)* | **Gate:** creates the two Knowledge Bases. |
+| `enableVectorStores` | `ENABLE_VECTOR_STORES` | `false` | **Master gate:** S3 Vectors, Knowledge Bases, KB IAM/alarm. |
+| `embeddingModelArn` | `EMBEDDING_MODEL_ARN` | *(unset)* | With vector stores enabled, creates the two Knowledge Bases. |
 | `embeddingDimension` | `EMBEDDING_DIMENSION` | `1024` | S3 Vector index dimension (Titan V2 = 1024). |
-| `enableGuardrail` | `ENABLE_GUARDRAIL` | `true` | Create Guardrail + pinned version. |
+| `enableGuardrail` | `ENABLE_GUARDRAIL` | `false` | Independent gate for Guardrail + pinned version. |
 | `slackSecretArn` | `SLACK_SECRET_ARN` | *(unset)* | **Import only** — no placeholder is ever generated. |
 | `serviceNowTableName` | `SERVICE_NOW_TABLE_NAME` | `sc_req_item` | Mock ServiceNow target (no credential). |
 | `budgetLimitUsd` | `BUDGET_LIMIT_USD` | `50` | Monthly budget limit. |
 | `budgetNotificationEmail` | `BUDGET_NOTIFICATION_EMAIL` | *(unset)* | Adds budget alert subscriber. |
 | `destroyOnRemoval` | `DESTROY_ON_REMOVAL` | `true` | Sandbox teardown-safe (`DESTROY`); set `false` to retain. |
+
+### AWS Organizations SCP compatibility
+
+The current deployment environment explicitly denies
+`s3vectors:CreateVectorBucket` and `bedrock-agentcore:CreateMemory` through AWS
+Organizations service control policies. Either resource causes CloudFormation
+creation to fail and the stack to roll back. The safe deployment profile is
+therefore:
+
+```bash
+-c enableAgentCoreServices=false \
+-c enableVectorStores=false \
+-c enableGuardrail=false
+```
+
+This profile preserves CloudFront, Cognito, API Gateway/Lambda, DynamoDB, S3,
+SQS/DLQ, CloudTrail, core CloudWatch monitoring, ECR, and the Budget. It emits
+no AgentCore resources or AgentCore-specific IAM, and no S3 Vectors, Knowledge
+Bases, KB IAM, or KB alarm. Use the `true` settings only after a different
+account's effective SCPs have been verified to allow the corresponding create
+APIs. No account or personal identity is required in configuration or source.
 
 ### Deployment gates (do not skip)
 

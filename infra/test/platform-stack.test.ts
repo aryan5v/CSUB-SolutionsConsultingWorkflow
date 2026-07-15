@@ -8,13 +8,22 @@ import { PlatformConfig, resolvePlatformConfig, toLogRetention } from '../lib/pl
 const baseConfig: PlatformConfig = {
   appEnv: 'test',
   retentionDays: 90,
+  enableAgentCoreServices: false,
+  enableVectorStores: false,
   agentCoreNetworkMode: 'PUBLIC',
   embeddingDimension: 1024,
   policyDocumentsPrefix: 'policy/',
-  enableGuardrail: true,
+  enableGuardrail: false,
   serviceNowTableName: 'sc_req_item',
   budgetLimitUsd: 50,
   destroyOnRemoval: true,
+};
+
+const enabledConfig: PlatformConfig = {
+  ...baseConfig,
+  enableAgentCoreServices: true,
+  enableVectorStores: true,
+  enableGuardrail: true,
 };
 
 function build(config: PlatformConfig): { platform: Template; foundation: Template } {
@@ -40,21 +49,28 @@ describe('PlatformStack — offline synthesis and core surface', () => {
     expect(() => build(baseConfig)).not.toThrow();
   });
 
-  test('provisions the required managed services', () => {
+  test('provisions the supported core while advanced services default off', () => {
     const { platform } = build(baseConfig);
     platform.resourceCountIs('AWS::Cognito::UserPool', 1);
     platform.resourceCountIs('AWS::CloudFront::Distribution', 1);
     platform.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
+    platform.resourceCountIs('AWS::Lambda::Function', 2);
+    platform.resourceCountIs('AWS::DynamoDB::Table', 10);
+    platform.resourceCountIs('AWS::S3::Bucket', 4);
+    platform.resourceCountIs('AWS::SQS::Queue', 2);
     platform.resourceCountIs('AWS::ECR::Repository', 1);
-    platform.resourceCountIs('AWS::Bedrock::Guardrail', 1);
-    platform.resourceCountIs('AWS::Bedrock::GuardrailVersion', 1);
-    platform.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
-    platform.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 1);
-    platform.resourceCountIs('AWS::S3Vectors::VectorBucket', 2);
-    platform.resourceCountIs('AWS::S3Vectors::Index', 2);
     platform.resourceCountIs('AWS::Budgets::Budget', 1);
     platform.resourceCountIs('AWS::CloudTrail::Trail', 1);
     platform.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
+    platform.resourceCountIs('AWS::Bedrock::Guardrail', 0);
+    platform.resourceCountIs('AWS::Bedrock::GuardrailVersion', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::Memory', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 0);
+    platform.resourceCountIs('AWS::S3Vectors::VectorBucket', 0);
+    platform.resourceCountIs('AWS::S3Vectors::Index', 0);
+    platform.resourceCountIs('AWS::Bedrock::KnowledgeBase', 0);
   });
 });
 
@@ -208,7 +224,7 @@ describe('IAM least privilege', () => {
   });
 
   test('agent runtime trust policy pins SourceAccount (confused-deputy guard)', () => {
-    const { platform } = build(baseConfig);
+    const { platform } = build(enabledConfig);
     platform.hasResourceProperties('AWS::IAM::Role', {
       AssumeRolePolicyDocument: {
         Statement: Match.arrayWith([
@@ -263,8 +279,8 @@ describe('Retention, budget, and encryption', () => {
     });
   });
 
-  test('seven-day AgentCore memory with a pinned guardrail version', () => {
-    const { platform } = build(baseConfig);
+  test('seven-day AgentCore memory with a separately enabled pinned guardrail version', () => {
+    const { platform } = build(enabledConfig);
     platform.hasResourceProperties('AWS::BedrockAgentCore::Memory', {
       EventExpiryDuration: 7,
     });
@@ -275,17 +291,52 @@ describe('Retention, budget, and encryption', () => {
 });
 
 describe('Deployment gates', () => {
-  test('AgentCore Runtime/Endpoint only synthesize with a configured image URI', () => {
-    const gated = build(baseConfig).platform;
-    gated.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
-    gated.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 0);
+  const imageUri =
+    '111111111111.dkr.ecr.us-west-2.amazonaws.com/csub-review-agent-test@sha256:' +
+    'a'.repeat(64);
+  const embeddingModelArn =
+    'arn:aws:bedrock:us-west-2::foundation-model/placeholder-embed';
+
+  test('default-off template contains no AgentCore resources, roles, policies, or endpoint env', () => {
+    const platform = build(baseConfig).platform;
+    platform.resourceCountIs('AWS::BedrockAgentCore::Memory', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 0);
+    const resources = platform.toJSON().Resources;
+    expect(JSON.stringify(resources).toLowerCase()).not.toContain('bedrock-agentcore');
+    expect(JSON.stringify(resources)).not.toContain('AGENT_RUNTIME_ENDPOINT_ARN');
+    platform.hasOutput('AgentCoreServicesEnabled', { Value: 'false' });
+    platform.hasOutput('AgentRuntimeConfigured', { Value: 'false' });
+  });
+
+  test('an image URI cannot bypass the disabled AgentCore master gate', () => {
+    const platform = build({ ...baseConfig, agentCoreImageUri: imageUri }).platform;
+    platform.resourceCountIs('AWS::BedrockAgentCore::Memory', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    platform.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 0);
+    expect(JSON.stringify(platform.toJSON().Resources).toLowerCase()).not.toContain(
+      'bedrock-agentcore',
+    );
+  });
+
+  test('explicit AgentCore enablement preserves Memory/Browser and gates Runtime on image URI', () => {
+    const servicesOnly = build({ ...baseConfig, enableAgentCoreServices: true }).platform;
+    servicesOnly.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
+    servicesOnly.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 1);
+    servicesOnly.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    servicesOnly.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 0);
+    servicesOnly.hasOutput('AgentCoreServicesEnabled', { Value: 'true' });
+    servicesOnly.hasOutput('AgentRuntimeConfigured', { Value: 'false' });
 
     const configured = build({
       ...baseConfig,
-      agentCoreImageUri:
-        '111111111111.dkr.ecr.us-west-2.amazonaws.com/csub-review-agent-test@sha256:' +
-        'a'.repeat(64),
+      enableAgentCoreServices: true,
+      agentCoreImageUri: imageUri,
     }).platform;
+    configured.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
+    configured.resourceCountIs('AWS::BedrockAgentCore::BrowserCustom', 1);
     configured.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
     configured.resourceCountIs('AWS::BedrockAgentCore::RuntimeEndpoint', 1);
     configured.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
@@ -295,15 +346,50 @@ describe('Deployment gates', () => {
         RequestHeaderAllowlist: Match.arrayWith(['X-Correlation-Id', 'Content-Type']),
       },
     });
+    configured.hasOutput('AgentRuntimeConfigured', { Value: 'true' });
   });
 
-  test('Knowledge Bases only synthesize when an embedding model ARN is configured', () => {
-    build(baseConfig).platform.resourceCountIs('AWS::Bedrock::KnowledgeBase', 0);
+  test('default-off template contains no S3 Vectors, Knowledge Bases, KB role/policy, or KB alarm', () => {
+    const platform = build({ ...baseConfig, embeddingModelArn }).platform;
+    platform.resourceCountIs('AWS::S3Vectors::VectorBucket', 0);
+    platform.resourceCountIs('AWS::S3Vectors::Index', 0);
+    platform.resourceCountIs('AWS::Bedrock::KnowledgeBase', 0);
+    const resources = JSON.stringify(platform.toJSON().Resources).toLowerCase();
+    expect(resources).not.toContain('s3vectors:');
+    expect(resources).not.toContain('kbingestionfailurealarm');
+    platform.hasOutput('VectorStoresEnabled', { Value: 'false' });
+    platform.hasOutput('KnowledgeBasesConfigured', { Value: 'false' });
+  });
+
+  test('explicit vector enablement preserves stores and gates Knowledge Bases on embedding ARN', () => {
+    const storesOnly = build({ ...baseConfig, enableVectorStores: true }).platform;
+    storesOnly.resourceCountIs('AWS::S3Vectors::VectorBucket', 2);
+    storesOnly.resourceCountIs('AWS::S3Vectors::Index', 2);
+    storesOnly.resourceCountIs('AWS::Bedrock::KnowledgeBase', 0);
+    storesOnly.hasOutput('VectorStoresEnabled', { Value: 'true' });
+    storesOnly.hasOutput('KnowledgeBasesConfigured', { Value: 'false' });
+
     const configured = build({
       ...baseConfig,
-      embeddingModelArn: 'arn:aws:bedrock:us-west-2::foundation-model/placeholder-embed',
+      enableVectorStores: true,
+      embeddingModelArn,
     }).platform;
+    configured.resourceCountIs('AWS::S3Vectors::VectorBucket', 2);
+    configured.resourceCountIs('AWS::S3Vectors::Index', 2);
     configured.resourceCountIs('AWS::Bedrock::KnowledgeBase', 2);
+    configured.hasOutput('KnowledgeBasesConfigured', { Value: 'true' });
+  });
+
+  test('Guardrail remains an independent default-off gate', () => {
+    const off = build(baseConfig).platform;
+    off.resourceCountIs('AWS::Bedrock::Guardrail', 0);
+    off.resourceCountIs('AWS::Bedrock::GuardrailVersion', 0);
+    off.hasOutput('GuardrailEnabled', { Value: 'false' });
+
+    const on = build({ ...baseConfig, enableGuardrail: true }).platform;
+    on.resourceCountIs('AWS::Bedrock::Guardrail', 1);
+    on.resourceCountIs('AWS::Bedrock::GuardrailVersion', 1);
+    on.hasOutput('GuardrailEnabled', { Value: 'true' });
   });
 
   test('no Slack secret is referenced or generated unless imported by ARN', () => {
@@ -329,11 +415,48 @@ describe('Foundation coordination', () => {
 });
 
 describe('platform-config resolver', () => {
+  test('master service and guardrail gates default false and accept explicit context opt-in', () => {
+    const keys = [
+      'ENABLE_AGENTCORE_SERVICES',
+      'ENABLE_VECTOR_STORES',
+      'ENABLE_GUARDRAIL',
+    ] as const;
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const key of keys) delete process.env[key];
+      const defaults = resolvePlatformConfig(new cdk.App());
+      expect(defaults.enableAgentCoreServices).toBe(false);
+      expect(defaults.enableVectorStores).toBe(false);
+      expect(defaults.enableGuardrail).toBe(false);
+
+      const enabled = resolvePlatformConfig(
+        new cdk.App({
+          context: {
+            enableAgentCoreServices: true,
+            enableVectorStores: true,
+            enableGuardrail: true,
+          },
+        }),
+      );
+      expect(enabled.enableAgentCoreServices).toBe(true);
+      expect(enabled.enableVectorStores).toBe(true);
+      expect(enabled.enableGuardrail).toBe(true);
+    } finally {
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   test('rejects invalid retention and enum values', () => {
     const app = new cdk.App({ context: { retentionDays: '-5' } });
     expect(() => resolvePlatformConfig(app)).toThrow(/retentionDays/);
     const app2 = new cdk.App({ context: { agentCoreNetworkMode: 'PRIVATE' } });
     expect(() => resolvePlatformConfig(app2)).toThrow(/agentCoreNetworkMode/);
+    const app3 = new cdk.App({ context: { enableVectorStores: 'sometimes' } });
+    expect(() => resolvePlatformConfig(app3)).toThrow(/enableVectorStores must be a boolean/);
   });
 
   test('maps day counts to supported CloudWatch retention', () => {
