@@ -22,6 +22,22 @@ Parameters:
     Type: String
     Default: development
     AllowedPattern: '[A-Za-z0-9_.-]+'
+  FoundationStackName:
+    Type: String
+    Default: ReviewFoundationStack
+    AllowedPattern: '[A-Za-z][-A-Za-z0-9]*'
+  PlatformStackName:
+    Type: String
+    Default: PlatformStack
+    AllowedPattern: '[A-Za-z][-A-Za-z0-9]*'
+  GitHubDeployRoleName:
+    Type: String
+    Default: vetted-github-deploy
+    AllowedPattern: '[A-Za-z0-9+=,.@_-]+'
+  DeploymentAlertTopicName:
+    Type: String
+    Default: vetted-deployment-alerts
+    AllowedPattern: '[A-Za-z0-9_-]+'
   FrontendBucketName:
     Type: String
   CloudFrontDistributionId:
@@ -47,7 +63,7 @@ Resources:
   DeploymentAlerts:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: vetted-deployment-alerts
+      TopicName: !Ref DeploymentAlertTopicName
       KmsMasterKeyId: alias/aws/sns
       Tags:
         - Key: project
@@ -56,7 +72,7 @@ Resources:
   GitHubDeployRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: vetted-github-deploy
+      RoleName: !Ref GitHubDeployRoleName
       Description: Main-only OIDC role for guarded VETTED deployments from GitHub.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
@@ -90,10 +106,9 @@ Resources:
                   - cloudformation:GetTemplateSummary
                   - cloudformation:ListStackResources
                   - cloudformation:DescribeStackResource
-                  - cloudformation:UpdateTerminationProtection
                 Resource:
-                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/ReviewFoundationStack/*
-                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/PlatformStack/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${FoundationStackName}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PlatformStackName}/*
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/vetted-*/*
               - Sid: ReadCloudFormationMetadata
                 Effect: Allow
@@ -175,17 +190,25 @@ Resources:
                   - lambda:UpdateFunctionConfiguration
                 Resource:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:csub-*
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:PlatformStack-*
-              - Sid: ReadExistingIamForTemplateEvaluation
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${PlatformStackName}-*
+              - Sid: ReadExistingRolesForTemplateEvaluation
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${FoundationStackName}-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${PlatformStackName}-*
+              - Sid: ReadExistingPoliciesForTemplateEvaluation
                 Effect: Allow
                 Action:
                   - iam:GetPolicy
                   - iam:GetPolicyVersion
-                  - iam:GetRole
-                  - iam:ListAttachedRolePolicies
                   - iam:ListPolicyVersions
-                  - iam:ListRolePolicies
-                Resource: '*'
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${FoundationStackName}-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PlatformStackName}-*
 
 Outputs:
   GitHubDeployRoleArn:

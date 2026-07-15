@@ -239,7 +239,7 @@ repository variables are:
 
 The `production` GitHub environment must retain its custom `main` deployment
 branch policy. The repository OIDC subject must retain the ordered immutable
-immutable `repo` identity plus the ordered custom claims `context` and
+`repo` identity plus the ordered custom claims `context` and
 `workflow_ref`. Changing the workflow filename, branch, repository, or
 environment requires an intentional trust-policy update through SSO.
 

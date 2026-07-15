@@ -247,6 +247,7 @@ The operator bootstraps GitHub OIDC once through the approved SSO profile:
 
 ```bash
 AWS_PROFILE=<approved-sso-profile> AWS_REGION=us-west-2 \
+  GITHUB_ORGANIZATION=<github-owner> GITHUB_REPOSITORY=<repository-name> \
   scripts/deploy/bootstrap_github_oidc.sh
 ```
 
