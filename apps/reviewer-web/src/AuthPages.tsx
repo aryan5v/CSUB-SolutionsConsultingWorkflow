@@ -21,15 +21,16 @@ function VettedMark() {
 function AuthShell({ mode, children }: { mode: Mode; children: React.ReactNode }) {
   return (
     <div className="vp vp-auth">
+      <a className="vp-skip" href="#main-content">Skip to main content</a>
       <div className="vp-band" aria-hidden="true" />
       <div className="vp-inner">
         <header className="vp-nav">
           <a className="vp-brand" href="/"><VettedMark />Vetted</a>
-          <div className="vp-nav-actions">
+          <nav className="vp-nav-actions" aria-label="Account">
             {mode === "login"
               ? <a className="vp-btn vp-btn-ink vp-btn-sm" href="/signup">Create account</a>
               : <a className="vp-btn vp-btn-ink vp-btn-sm" href="/login">Sign in</a>}
-          </div>
+          </nav>
         </header>
         <main className="vp-auth-main" id="main-content">{children}</main>
       </div>
@@ -49,7 +50,7 @@ function WorkspaceNote({ mode }: { mode: Mode }) {
       </p>
       <ul className="vp-auth-points">
         <li>Sign-in and account creation both go through campus single sign-on.</li>
-        <li>Reviewers see the queue, evidence, and packets for this workspace only.</li>
+        <li>Reviewers see security and accessibility findings, evidence, and packets for this workspace only.</li>
         <li>Deterministic rules set the risk route. People make the final decision.</li>
       </ul>
     </aside>

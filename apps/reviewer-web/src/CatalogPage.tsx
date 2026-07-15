@@ -88,9 +88,9 @@ export function CatalogPage({ notify }: { notify: Notify }) {
 
       {error && <div className="record-api-error" role="alert"><strong>Catalog request failed.</strong><span>{error}</span><small>{reviewApi.mode === "live" ? "Live failures are not replaced with fixture data." : "This failure occurred in the explicit fixture adapter."}</small></div>}
 
-      <div className="catalog-columns" aria-hidden="true"><span>Product</span><span>Vendor</span><span>Platform / audience</span><span>Support</span><span>License</span><span>Source</span></div>
+      <div className="catalog-columns" role="row"><span role="columnheader">Product</span><span role="columnheader">Vendor</span><span role="columnheader">Platform / audience</span><span role="columnheader">Support</span><span role="columnheader">License</span><span role="columnheader">Source</span></div>
 
-      <div className="catalog-list" role="list">
+      <div className="catalog-list" role="list" aria-label="Software catalog results">
         {loading && <div className="catalog-empty" role="status">Loading catalog records…</div>}
         {!loading && items.length === 0 && !error && <div className="catalog-empty"><Search size={18} /><strong>No catalog records match this search.</strong><span>Try a different product or vendor name.</span></div>}
         {!loading && items.map((item) => (

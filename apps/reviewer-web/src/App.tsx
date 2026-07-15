@@ -1179,7 +1179,7 @@ export default function App() {
   return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
-    <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
+    <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`} aria-label="Workspace navigation">
       <div className="brand">
         <img className="brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
         <span><strong>Vetted</strong><small>Reviewer workspace</small></span>
@@ -1191,8 +1191,8 @@ export default function App() {
         {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em>{badge}</em> : null; })()}</button>; })}</div>)}
       </nav>
       <div className="sidebar-spacer" />
-      <div className="boundary-card"><ShieldCheck size={17} /><div><strong>Human-controlled</strong><span>AI can draft and compare. It cannot set policy, approve, or write externally.</span></div></div>
-      <div className="profile"><Avatar name="Alex Reviewer" small /><div><strong>Alex Reviewer</strong><span>Information Security</span></div><span className="presence-dot" aria-label="Online" /></div>
+      <div className="boundary-card"><ShieldCheck size={17} aria-hidden="true" /><div><strong>Human-controlled</strong><span>AI can draft security and accessibility findings. It cannot set policy, approve, or write externally.</span></div></div>
+      <div className="profile"><Avatar name="Alex Reviewer" small /><div><strong>Alex Reviewer</strong><span>Information Security</span></div><span className="presence-dot" role="img" aria-label="Online" /></div>
     </aside>
 
     <div className="app-main">

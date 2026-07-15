@@ -171,11 +171,14 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
 
   return (
     <div className="vp">
+      <a className="vp-skip" href="#main-content">Skip to main content</a>
       <div className="vp-band" aria-hidden="true" />
       <div className="vp-inner">
         <header className="vp-nav">
           <a className="vp-brand" href="/"><PixelLogo />Vetted</a>
-          <div className="vp-nav-actions"><a className="vp-nav-login" href="/">Back to home</a></div>
+          <nav className="vp-nav-actions" aria-label="Account">
+            <a className="vp-nav-login" href="/">Back to home</a>
+          </nav>
         </header>
 
         <main className="vp-intake" id="main-content">
@@ -183,7 +186,8 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
             <p className="vp-eyebrow">SECURE VENDOR INTAKE</p>
             <h1 className="vp-h2">Share the evidence you already have.</h1>
             <p className="vp-hero-lead" style={{ marginTop: "0.75rem" }}>
-              Start with files and an official trust-center link. We will only show follow-up questions that remain unresolved for this review.
+              Start with files and an official trust-center link, including security and accessibility materials such as HECVAT, SOC 2, and VPAT/ACR.
+              We will only show follow-up questions that remain unresolved for this review.
             </p>
           </div>
 
