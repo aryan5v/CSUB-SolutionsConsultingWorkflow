@@ -433,6 +433,105 @@ class VendorBackend:
                 )
         return sorted(questions, key=lambda item: item["requirement_id"])
 
+    # Vendor-safe review-stage projection (issue #38): internal lifecycle states
+    # collapse to the few stages a vendor may see; reviewer-only states never
+    # leak through the vendor endpoints.
+    _VENDOR_REVIEW_STAGES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.DRAFT: "collecting_evidence",
+        CaseLifecycle.INVITED: "collecting_evidence",
+        CaseLifecycle.OPENED: "collecting_evidence",
+        CaseLifecycle.IN_PROGRESS: "collecting_evidence",
+        CaseLifecycle.SUBMITTED: "under_review",
+        CaseLifecycle.ANALYZING: "under_review",
+        CaseLifecycle.NEEDS_REVIEW: "under_review",
+        CaseLifecycle.CHANGES_REQUESTED: "changes_requested",
+        CaseLifecycle.APPROVED: "decided",
+        CaseLifecycle.DECLINED: "decided",
+        CaseLifecycle.WRITEBACK_COMPLETE: "decided",
+    }
+    _VENDOR_OUTCOMES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.APPROVED: "approved",
+        CaseLifecycle.WRITEBACK_COMPLETE: "approved",
+        CaseLifecycle.DECLINED: "declined",
+    }
+
+    def review_status(self, token: str) -> dict[str, Any]:
+        """Vendor-facing review status: received/outstanding checklist and stage.
+
+        Unlike the draft operations this stays readable after the submission is
+        finalized (the invite is SUBMITTED) so a vendor can track the review and
+        its outcome without contacting the campus team (issue #38). The
+        checklist is exposed only after intake analysis has run, consistent with
+        staged intake.
+        """
+        invite = self._status_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        case = self._require("case", invite.case_id, VendorCase)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return {
+            "invite": {
+                "invite_id": invite.invite_id,
+                "case_id": invite.case_id,
+                "status": invite.status.value,
+                "expires_at": invite.expires_at,
+            },
+            "vendor": {"vendor_id": vendor.vendor_id, "name": vendor.name},
+            "product": {"product_id": product.product_id, "name": product.name},
+            "submission_status": submission.status.value,
+            "intake_analysis_complete": submission.intake_analysis_complete,
+            "review_stage": self._VENDOR_REVIEW_STAGES[case.lifecycle],
+            "outcome": self._VENDOR_OUTCOMES.get(case.lifecycle),
+            "checklist": self._checklist(submission),
+        }
+
+    def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
+        """Active-profile requirements labeled received (covered/answered) or outstanding."""
+        if not submission.intake_analysis_complete:
+            # Staged intake: requirement names are exposed only after the
+            # deterministic analysis step, matching unresolved_questions.
+            return []
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items: list[dict[str, Any]] = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                received = criterion.requirement_id in covered or criterion.requirement_id in answered
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "question": criterion.question,
+                        "expected_evidence": list(criterion.expected_evidence),
+                        "status": "received" if received else "outstanding",
+                    }
+                )
+        return sorted(items, key=lambda item: item["requirement_id"])
+
+    def _status_invite(self, token: str) -> VendorInvite:
+        """Token lookup for the read-only status view; permits submitted invites."""
+        if not isinstance(token, str) or not token:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self.repository.find_invite_by_token_hash(
+            self._hash_token(token), workspace_id=self.workspace_id
+        )
+        if invite is None:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        if invite.status is InviteStatus.REVOKED:
+            raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        if invite.status is InviteStatus.SUBMITTED:
+            # A submitted invitation stays valid for status reads: the vendor's
+            # part is done but the review continues.
+            return invite
+        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        if self._now_datetime() >= expires:
+            self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
+        return invite
+
     def intake_stage(self, token: str) -> dict[str, Any]:
         """Return the current staged-intake position for the vendor UI."""
         invite = self._valid_invite(token)
@@ -648,20 +747,28 @@ class VendorBackend:
         return case.lifecycle.value if isinstance(case, VendorCase) else None
 
     def record_notification(
-        self, *, case_id: str | None, summary: str, delivery: dict[str, Any]
+        self,
+        *,
+        case_id: str | None,
+        summary: str,
+        delivery: dict[str, Any],
+        event_type: str = "slack.notification",
     ) -> IntegrationEvent:
         """Persist an auditable notification event with its truthful delivery mode."""
+        detail = {
+            "summary": summary,
+            "delivery": delivery.get("delivery"),
+            "simulated": delivery.get("simulated", True),
+            "channel": delivery.get("channel"),
+        }
+        if delivery.get("to"):
+            detail["recipient"] = delivery["to"]
         return self._event(
-            "slack.notification",
+            event_type,
             "notification",
             case_id or "workspace",
             case_id=case_id,
-            detail={
-                "summary": summary,
-                "delivery": delivery.get("delivery"),
-                "simulated": delivery.get("simulated", True),
-                "channel": delivery.get("channel"),
-            },
+            detail=detail,
         )
 
     # Immutable run versions --------------------------------------------------

@@ -8,6 +8,7 @@ import {
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
+  reviewStageLabel,
   suppressResolvedQuestions,
   type QueueItem,
   type ReviewState,
@@ -245,6 +246,38 @@ describe("vendor invitation security", () => {
     expect(url).not.toContain("raw-secret-token");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("fetches the vendor review status with the bearer token only", async () => {
+    const status = {
+      invite: { invite_id: "invite-1", case_id: "case-1", expires_at: "2026-07-20T00:00:00Z", status: "submitted" },
+      vendor: { vendor_id: "vendor-1", name: "Vendor" },
+      product: { product_id: "product-1", name: "Product" },
+      submission_status: "finalized",
+      intake_analysis_complete: true,
+      review_stage: "under_review",
+      outcome: null,
+      checklist: [
+        { requirement_id: "A11Y.VPAT.001", question: "Provide a current VPAT.", expected_evidence: ["VPAT"], status: "received" },
+        { requirement_id: "SEC.HECVAT.001", question: "Provide a HECVAT.", expected_evidence: ["HECVAT"], status: "outstanding" },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(status));
+    const reviewer = authProvider("must-not-leak");
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
+
+    const resolved = await client.getReviewStatus("raw-secret-token");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/vendor/invites/current/status");
+    expect(url).not.toContain("raw-secret-token");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
+    expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+    expect(resolved.checklist.map((item) => item.status)).toEqual(["received", "outstanding"]);
+    expect(reviewStageLabel(resolved)).toBe("Under campus review");
+    expect(reviewStageLabel({ review_stage: "decided", outcome: "approved" })).toBe("Review passed");
+    expect(reviewStageLabel({ review_stage: "decided", outcome: "declined" })).toBe("Review did not pass");
+    expect(reviewStageLabel({ review_stage: "changes_requested", outcome: null })).toBe("Changes requested");
   });
 
   it("never attaches the reviewer JWT to a presigned evidence upload", async () => {

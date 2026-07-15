@@ -16,7 +16,7 @@ _CASE_ROUTE = re.compile(r"^/cases/([^/]+)(?:/(.*))?$")
 _RESOURCE_ROUTE = re.compile(r"^/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?$")
 _INVITE_ROUTE = re.compile(r"^/invites/([^/]+)/(revoke|resend)$")
 _VENDOR_TOKEN_ROUTE = re.compile(
-    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize))?$"
+    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|status))?$"
 )
 _PROFILE_ROUTE = re.compile(r"^/review-profiles/([^/]+)(?:/(fixture-test|activate|rollback))?$")
 _CATALOG_CONFIRM_ROUTE = re.compile(r"^/catalog/matches/([^/]+)/confirm$")
@@ -254,6 +254,8 @@ def create_server(
                 result = application.vendor_run_intake_analysis(token)
             elif method == "GET" and action == "questions":
                 result = application.vendor_questions(token)
+            elif method == "GET" and action == "status":
+                result = application.vendor_review_status(token)
             elif method == "POST" and action == "finalize":
                 result = application.vendor_finalize(token)
             else:

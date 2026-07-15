@@ -98,7 +98,16 @@ class VendorHttpRouteTests(unittest.TestCase):
                 self.request(f"/vendor/invites/{token}/answers", "POST", {"answers": answers})[0],
                 200,
             )
+        status_code, review_status = self.request(f"/vendor/invites/{token}/status")
+        self.assertEqual(status_code, 200)
+        self.assertIn(review_status["review_stage"], {"collecting_evidence", "under_review"})
+        self.assertTrue(review_status["checklist"])
         self.assertEqual(self.request(f"/vendor/invites/{token}/finalize", "POST", {})[0], 200)
+        # The status projection stays readable after the submission is finalized.
+        status_code, submitted_status = self.request(f"/vendor/invites/{token}/status")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(submitted_status["submission_status"], "finalized")
+        self.assertEqual(submitted_status["review_stage"], "under_review")
         state = self.api._cases[self.case_id].state
         state.human_decision = cast(Any, object())
         state.write_preview = cast(Any, object())

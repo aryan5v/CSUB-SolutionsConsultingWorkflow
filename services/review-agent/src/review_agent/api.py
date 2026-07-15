@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .adapters.email import EmailSender, build_email_sender
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
 from .adapters.notifications import Notifier, build_notifier
 from .adapters.servicenow import (
@@ -34,7 +35,7 @@ from .contracts.packet import PacketSection
 from .contracts.schema import ContractValidationError, validate, validate_definition
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
-from .contracts.vendor import CaseLifecycle, SoftwareCatalogEntry
+from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
 from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
@@ -121,6 +122,7 @@ class LocalReviewApi:
         model_client: ModelClient | None = None,
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
+        email_sender: EmailSender | None = None,
         config: AppConfig | None = None,
     ) -> None:
         # Live-AI wiring: the model client is constructed from configuration so
@@ -131,6 +133,7 @@ class LocalReviewApi:
         self._model_client = model_client or build_model_client(self._config)
         self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
         self._notifier: Notifier = notifier or build_notifier(self._config)
+        self._email_sender: EmailSender = email_sender or build_email_sender(self._config)
         records = sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
@@ -434,6 +437,11 @@ class LocalReviewApi:
                 f"review.{lifecycle_target.value}",
                 f"Case {case_id} decision recorded: {action.value} (v{decision_version}).",
             )
+            self._email_vendor_outcome(
+                case_id,
+                lifecycle_target,
+                product_name=record.state.case_input.product_name,
+            )
         return self._case_payload(record)
 
     def preview_servicenow(self, case_id: str) -> dict[str, Any]:
@@ -686,6 +694,9 @@ class LocalReviewApi:
         return self._vendor_call(
             lambda: self._vendor.finalize_submission(token).to_vendor_dict()
         )
+
+    def vendor_review_status(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(lambda: self._vendor.review_status(token))
 
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
@@ -1113,6 +1124,68 @@ class LocalReviewApi:
             # case) must not mask the primary reviewer action; the workflow
             # state remains the source of truth for the write boundary.
             pass
+
+    # Deterministic outcome copy (issue #38). Recipients get the human decision
+    # verbatim; no model-generated text is sent to vendors.
+    _OUTCOME_EMAILS: dict[CaseLifecycle, tuple[str, str]] = {
+        CaseLifecycle.APPROVED: (
+            "passed",
+            "The campus technology review for {product} has passed. The campus "
+            "team will follow up with any remaining onboarding steps. Reply to "
+            "this email if you have questions.",
+        ),
+        CaseLifecycle.DECLINED: (
+            "did not pass",
+            "The campus technology review for {product} did not pass. Reply to "
+            "this email or contact your campus reviewer for details about the "
+            "decision.",
+        ),
+        CaseLifecycle.CHANGES_REQUESTED: (
+            "needs changes",
+            "The campus technology review for {product} needs additional "
+            "information before it can be completed. Open your invitation link "
+            "to see the outstanding items, or reply to this email if you are "
+            "unsure what is being requested.",
+        ),
+    }
+
+    def _email_vendor_outcome(
+        self, case_id: str, lifecycle: CaseLifecycle, *, product_name: str
+    ) -> None:
+        """Email the invited vendor contact when a human decision is recorded.
+
+        Best-effort: a case without a vendor invitation (no intake ran) sends
+        nothing, and a failed delivery never blocks the reviewer decision. The
+        truthful delivery mode is persisted on an integration event.
+        """
+        outcome = self._OUTCOME_EMAILS.get(lifecycle)
+        if outcome is None:
+            return
+        invites = [
+            invite
+            for invite in self._vendor.list_invites(case_id)
+            if invite.status is not InviteStatus.REVOKED
+        ]
+        if not invites:
+            return
+        invite = max(invites, key=lambda item: item.issued_at)
+        try:
+            contact = self._vendor.get_contact(invite.contact_id)
+        except VendorBackendError:
+            return
+        headline, body_template = outcome
+        subject = f"VETTED review outcome for {product_name}: {headline}"
+        body = body_template.format(product=product_name)
+        try:
+            delivery = self._email_sender.send(to=contact.email, subject=subject, body=body)
+        except Exception:  # noqa: BLE001 - never let notification block the decision
+            delivery = {"delivery": "failed", "simulated": False, "channel": "email"}
+        self._vendor.record_notification(
+            case_id=case_id,
+            summary=subject,
+            delivery=delivery,
+            event_type="email.notification",
+        )
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
         """Send/record a truthful notification (live Slack only when configured)."""

@@ -98,6 +98,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/vendor/invites/current/coverage"),
     ("POST", "/vendor/invites/current/analyze"),
     ("POST", "/vendor/invites/current/finalize"),
+    ("GET", "/vendor/invites/current/status"),
     ("GET", "/intake"),
     ("POST", "/intake"),
     ("POST", "/intake/evidence"),
@@ -107,6 +108,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/intake/analyze"),
     ("GET", "/intake/questions"),
     ("POST", "/intake/finalize"),
+    ("GET", "/intake/status"),
 }
 
 
@@ -932,6 +934,7 @@ def _dispatch_intake(
         "/vendor/invites/current/coverage": "/intake/coverage",
         "/vendor/invites/current/analyze": "/intake/analyze",
         "/vendor/invites/current/finalize": "/intake/finalize",
+        "/vendor/invites/current/status": "/intake/status",
     }
     path = aliases.get(path, path)
     if method == "GET" and path == "/intake":
@@ -946,6 +949,7 @@ def _dispatch_intake(
         ("POST", "/intake/analyze"): lambda: api.vendor_run_intake_analysis(token),
         ("GET", "/intake/questions"): lambda: api.vendor_questions(token),
         ("POST", "/intake/finalize"): lambda: api.vendor_finalize(token),
+        ("GET", "/intake/status"): lambda: api.vendor_review_status(token),
     }
     operation = operations.get((method, path))
     if operation is None:

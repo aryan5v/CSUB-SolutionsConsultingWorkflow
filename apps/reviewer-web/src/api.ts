@@ -239,6 +239,23 @@ export type VendorInviteView = {
   submission: VendorSubmission;
   questions: VendorQuestion[];
 };
+export type VendorChecklistItem = {
+  requirement_id: string;
+  question: string;
+  expected_evidence: string[];
+  status: "received" | "outstanding";
+};
+export type VendorReviewStage = "collecting_evidence" | "under_review" | "changes_requested" | "decided";
+export type VendorReviewStatus = {
+  invite: Pick<InviteProjection, "invite_id" | "case_id" | "expires_at" | "status">;
+  vendor: Pick<VendorRecord, "vendor_id" | "name">;
+  product: Pick<VendorProduct, "product_id" | "name">;
+  submission_status: "draft" | "finalized";
+  intake_analysis_complete: boolean;
+  review_stage: VendorReviewStage;
+  outcome: "approved" | "declined" | null;
+  checklist: VendorChecklistItem[];
+};
 export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string };
 export type EvidenceArtifact = EvidenceMetadata & {
   workspace_id: string;
@@ -631,6 +648,30 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/vendor/invites/current/coverage", { method: "POST", headers: authorization(token), body: JSON.stringify({ requirement_id: requirementId, evidence_artifact_ids: evidenceArtifactIds }) }, "vendor");
     },
+    getReviewStatus(token: string): Promise<VendorReviewStatus> {
+      if (mode === "fixture") {
+        const view = fixtureInviteView();
+        const checklist: VendorChecklistItem[] = fixture.questions.map((question) => ({
+          requirement_id: question.requirement_id,
+          question: question.question,
+          expected_evidence: [...question.expected_evidence],
+          status: fixture.covered.has(question.requirement_id) || fixture.submission.answers[question.requirement_id]?.trim()
+            ? "received"
+            : "outstanding",
+        }));
+        return fixtureOnly({
+          invite: view.invite,
+          vendor: view.vendor,
+          product: view.product,
+          submission_status: fixture.submission.status,
+          intake_analysis_complete: true,
+          review_stage: fixture.submission.status === "finalized" ? "under_review" as const : "collecting_evidence" as const,
+          outcome: null,
+          checklist,
+        });
+      }
+      return request("/vendor/invites/current/status", { headers: authorization(token) }, "vendor");
+    },
     finalizeVendorSubmission(token: string): Promise<VendorSubmission> {
       if (mode === "fixture") {
         const now = new Date().toISOString();
@@ -665,6 +706,13 @@ export function requiresReviewerConfirmation(candidate: Pick<SoftwareCandidate, 
 
 export function suppressResolvedQuestions(questions: VendorQuestion[], answers: Record<string, string>, coveredRequirementIds: ReadonlySet<string>): VendorQuestion[] {
   return questions.filter((question) => !answers[question.requirement_id]?.trim() && !coveredRequirementIds.has(question.requirement_id));
+}
+
+export function reviewStageLabel(status: Pick<VendorReviewStatus, "review_stage" | "outcome">): string {
+  if (status.review_stage === "decided") return status.outcome === "approved" ? "Review passed" : "Review did not pass";
+  if (status.review_stage === "changes_requested") return "Changes requested";
+  if (status.review_stage === "under_review") return "Under campus review";
+  return "Collecting evidence";
 }
 
 export function queueItemToSummary(item: QueueItem): ReviewSummary {

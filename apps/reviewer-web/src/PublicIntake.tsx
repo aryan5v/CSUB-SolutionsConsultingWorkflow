@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import {
   ReviewApiError,
   reviewApi,
+  reviewStageLabel,
   suppressResolvedQuestions,
   type EvidenceUploadResult,
   type VendorInviteView,
   type VendorQuestion,
+  type VendorReviewStatus,
 } from "./api";
 import "./landing.css";
 
@@ -35,8 +37,44 @@ function messageFor(error: unknown): string {
   return "The intake service could not complete this request.";
 }
 
+function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
+  return (
+    <section className="vp-intake-result vp-case-summary" aria-labelledby="review-status-heading">
+      <p className="vp-eyebrow">REVIEW STATUS</p>
+      <h2 id="review-status-heading">{reviewStageLabel(status)}</h2>
+      {status.outcome && (
+        <p role="status">
+          {status.outcome === "approved"
+            ? "This review passed. The campus team will follow up with any remaining steps."
+            : "This review did not pass. Contact your campus reviewer for details about the decision."}
+        </p>
+      )}
+      {status.checklist.length > 0 ? (
+        <ul className="vp-file-list">
+          {status.checklist.map((item) => (
+            <li key={item.requirement_id}>
+              <span>
+                <strong>{item.expected_evidence.join(", ") || item.requirement_id}</strong>
+                <small>{item.requirement_id}</small>
+              </span>
+              <b className={item.status === "received" ? "vp-file-saved" : "vp-file-ready"}>
+                {item.status === "received" ? "Received" : "Outstanding"}
+              </b>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="vp-field-hint">
+          The received/outstanding document checklist appears after intake analysis runs on your submission.
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function PublicIntake({ initialToken }: { initialToken: string | null }) {
   const [view, setView] = useState<VendorInviteView | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<VendorReviewStatus | null>(null);
   const [questions, setQuestions] = useState<VendorQuestion[]>([]);
   const [files, setFiles] = useState<IntakeFile[]>([]);
   const [trustCenterUrl, setTrustCenterUrl] = useState("");
@@ -53,6 +91,12 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
   useEffect(() => {
     if (!initialToken) return;
     let active = true;
+    const loadStatus = () =>
+      reviewApi.getReviewStatus(initialToken).then((status) => {
+        if (active) setReviewStatus(status);
+      }).catch(() => {
+        // Status is additive; the intake form remains usable without it.
+      });
     reviewApi.openInvite(initialToken).then((resolved) => {
       if (!active) return;
       setView(resolved);
@@ -62,8 +106,23 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
       setSavedAnswers(resolved.submission.answers);
       setFinalized(resolved.submission.status === "finalized");
       setLoading(false);
-    }).catch((reason) => {
+      void loadStatus();
+    }).catch(async (reason) => {
       if (!active) return;
+      if (reason instanceof ReviewApiError && reason.code === "invite_submitted") {
+        // The submission is finalized, so the draft view is gone, but the
+        // vendor can still track the review through the status projection.
+        try {
+          const status = await reviewApi.getReviewStatus(initialToken);
+          if (!active) return;
+          setReviewStatus(status);
+          setFinalized(true);
+        } catch (statusReason) {
+          if (active) setError(messageFor(statusReason));
+        }
+        if (active) setLoading(false);
+        return;
+      }
       setError(messageFor(reason));
       setLoading(false);
     });
@@ -94,6 +153,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
     ]);
     setView(resolved);
     setQuestions(nextQuestions);
+    await reviewApi.getReviewStatus(initialToken).then(setReviewStatus).catch(() => {});
   };
 
   const saveProgress = async (): Promise<boolean> => {
@@ -161,7 +221,9 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
       const submission = await reviewApi.finalizeVendorSubmission(initialToken);
       setFinalized(submission.status === "finalized");
       setNotice("Submission finalized. Your reviewer can now see the frozen evidence version and continue the review.");
-      await refresh();
+      // The draft view is closed once submitted; the status projection is the
+      // surface that remains readable.
+      await reviewApi.getReviewStatus(initialToken).then(setReviewStatus).catch(() => {});
     } catch (reason) {
       setError(messageFor(reason));
     } finally {
@@ -195,7 +257,18 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
           </div>
 
           {loading && <div className="vp-intake-result" role="status">Opening your case-scoped invitation…</div>}
-          {!loading && error && !view && <div className="vp-intake-result vp-intake-error" role="alert"><strong>We could not open this invitation.</strong><p>{error}</p></div>}
+          {!loading && error && !view && !reviewStatus && <div className="vp-intake-result vp-intake-error" role="alert"><strong>We could not open this invitation.</strong><p>{error}</p></div>}
+
+          {!loading && !view && reviewStatus && (
+            <div className="vp-intake-stack">
+              <section className="vp-intake-result vp-case-summary" aria-labelledby="submitted-heading">
+                <p className="vp-eyebrow">CASE {reviewStatus.invite.case_id}</p>
+                <h2 id="submitted-heading">{reviewStatus.product.name}</h2>
+                <p>{reviewStatus.vendor.name} · Submission {reviewStatus.submission_status}</p>
+              </section>
+              <ReviewStatusCard status={reviewStatus} />
+            </div>
+          )}
 
           {view && (
             <div className="vp-intake-stack">
@@ -205,6 +278,8 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
                 <p>{view.vendor.name} · Contact: {view.contact.name}</p>
                 <dl><div><dt>Invitation</dt><dd>{view.invite.status.replace("_", " ")}</dd></div><div><dt>Expires</dt><dd>{new Date(view.invite.expires_at).toLocaleDateString()}</dd></div><div><dt>Draft version</dt><dd>v{view.submission.version}</dd></div></dl>
               </section>
+
+              {reviewStatus && <ReviewStatusCard status={reviewStatus} />}
 
               <section className="vp-intake-card" aria-labelledby="evidence-heading">
                 <div><p className="vp-eyebrow">01 / FILES FIRST</p><h2 id="evidence-heading">Evidence files</h2><p className="vp-field-hint">Add multiple current documents. File names and metadata are registered before bytes use a presigned upload.</p></div>
