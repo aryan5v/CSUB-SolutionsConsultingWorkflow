@@ -1,46 +1,20 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import {
+  ReviewApiError,
+  reviewApi,
+  suppressResolvedQuestions,
+  type EvidenceUploadResult,
+  type VendorInviteView,
+  type VendorQuestion,
+} from "./api";
 import "./landing.css";
 
-/*
- * Public, file-first vendor intake route (`/intake`).
- *
- * This is a FRONTEND boundary only. The real intake and case-creation contract
- * is owned by backend issue #19 and is not yet available. The types below are a
- * local placeholder for that boundary so the public route can own its own shape
- * without editing any shared `packages/contracts` schema. Replace
- * `submitVendorIntake` with the generated client once issue #19 lands.
- *
- * Every path here is simulated. No request leaves the browser, and nothing is
- * approved or written to any external system.
- */
-
-export type VendorIntakeAttachment = {
-  name: string;
-  sizeBytes: number;
-  kind: "policy" | "security" | "accessibility" | "other";
+type IntakeFile = {
+  file: File;
+  status: "ready" | "saving" | "saved" | "error";
+  result?: EvidenceUploadResult;
+  error?: string;
 };
-
-export type VendorIntakeSubmission = {
-  productName: string;
-  vendorName: string;
-  requesterEmail: string;
-  useCase: string;
-  handlesStudentData: boolean;
-  attachments: VendorIntakeAttachment[];
-};
-
-export type VendorIntakeReceipt = {
-  simulated: true;
-  referenceId: string;
-  received: VendorIntakeSubmission;
-};
-
-/** Simulated boundary. Swap for the issue #19 client without changing callers. */
-async function submitVendorIntake(input: VendorIntakeSubmission): Promise<VendorIntakeReceipt> {
-  const stamp = new Date();
-  const referenceId = `SIM-${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, "0")}${String(stamp.getDate()).padStart(2, "0")}-${String(stamp.getHours()).padStart(2, "0")}${String(stamp.getMinutes()).padStart(2, "0")}`;
-  return { simulated: true, referenceId, received: input };
-}
 
 function PixelLogo() {
   return (
@@ -55,40 +29,144 @@ function PixelLogo() {
   );
 }
 
-export default function PublicIntake() {
-  const [receipt, setReceipt] = useState<VendorIntakeReceipt | null>(null);
-  const [error, setError] = useState<string>("");
+function messageFor(error: unknown): string {
+  if (error instanceof ReviewApiError) return error.message;
+  if (error instanceof Error) return error.message;
+  return "The intake service could not complete this request.";
+}
 
-  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+export default function PublicIntake({ initialToken }: { initialToken: string | null }) {
+  const [view, setView] = useState<VendorInviteView | null>(null);
+  const [questions, setQuestions] = useState<VendorQuestion[]>([]);
+  const [files, setFiles] = useState<IntakeFile[]>([]);
+  const [trustCenterUrl, setTrustCenterUrl] = useState("");
+  const [draftAnswers, setDraftAnswers] = useState<Record<string, string>>({});
+  const [savedAnswers, setSavedAnswers] = useState<Record<string, string>>({});
+  const [coverage, setCoverage] = useState<Record<string, string>>({});
+  const [savedCoverage, setSavedCoverage] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(Boolean(initialToken));
+  const [error, setError] = useState(initialToken ? "" : "This invitation link is missing its access token. Ask your reviewer for a new link.");
+  const [notice, setNotice] = useState("");
+  const [finalized, setFinalized] = useState(false);
+
+  useEffect(() => {
+    if (!initialToken) return;
+    let active = true;
+    reviewApi.openInvite(initialToken).then((resolved) => {
+      if (!active) return;
+      setView(resolved);
+      setQuestions(resolved.questions);
+      setTrustCenterUrl(resolved.submission.trust_center_url ?? "");
+      setDraftAnswers(resolved.submission.answers);
+      setSavedAnswers(resolved.submission.answers);
+      setFinalized(resolved.submission.status === "finalized");
+      setLoading(false);
+    }).catch((reason) => {
+      if (!active) return;
+      setError(messageFor(reason));
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [initialToken]);
+
+  const unresolved = useMemo(
+    () => suppressResolvedQuestions(questions, savedAnswers, savedCoverage),
+    [questions, savedAnswers, savedCoverage],
+  );
+  const savedFiles = files.filter((item) => item.result);
+  const simulatedFiles = savedFiles.filter((item) => item.result?.transfer === "simulated");
+
+  const chooseFiles = (event: ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(event.target.files ?? []);
+    setFiles((current) => [
+      ...current,
+      ...selected.map((file): IntakeFile => ({ file, status: "ready" })),
+    ]);
+    event.target.value = "";
+  };
+
+  const refresh = async () => {
+    if (!initialToken) return;
+    const [resolved, nextQuestions] = await Promise.all([
+      reviewApi.resolveInvite(initialToken),
+      reviewApi.getVendorQuestions(initialToken),
+    ]);
+    setView(resolved);
+    setQuestions(nextQuestions);
+  };
+
+  const saveProgress = async (): Promise<boolean> => {
+    if (!initialToken || finalized) return false;
+    setBusy(true);
     setError("");
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const productName = String(data.get("productName") ?? "").trim();
-    const vendorName = String(data.get("vendorName") ?? "").trim();
-    const requesterEmail = String(data.get("requesterEmail") ?? "").trim();
-    const useCase = String(data.get("useCase") ?? "").trim();
+    setNotice("");
+    try {
+      let currentFiles = [...files];
+      for (let index = 0; index < currentFiles.length; index += 1) {
+        const item = currentFiles[index];
+        if (item.status === "saved") continue;
+        currentFiles[index] = { ...item, status: "saving", error: undefined };
+        setFiles([...currentFiles]);
+        try {
+          const result = await reviewApi.uploadEvidence(initialToken, item.file);
+          currentFiles[index] = { ...item, status: "saved", result };
+        } catch (reason) {
+          currentFiles[index] = { ...item, status: "error", error: messageFor(reason) };
+          setFiles([...currentFiles]);
+          throw reason;
+        }
+        setFiles([...currentFiles]);
+      }
 
-    if (!productName || !vendorName || !requesterEmail) {
-      setError("Add the product name, the vendor, and a contact email so a reviewer can follow up.");
-      return;
+      if (trustCenterUrl.trim()) {
+        const parsed = new URL(trustCenterUrl.trim());
+        if (parsed.protocol !== "https:") throw new Error("Use an HTTPS trust-center URL.");
+        await reviewApi.saveTrustCenter(initialToken, parsed.toString());
+      }
+
+      const nextCovered = new Set(savedCoverage);
+      for (const [requirementId, artifactId] of Object.entries(coverage)) {
+        if (!artifactId || nextCovered.has(requirementId)) continue;
+        await reviewApi.addCoverage(initialToken, requirementId, [artifactId]);
+        nextCovered.add(requirementId);
+      }
+      setSavedCoverage(nextCovered);
+
+      const answers = Object.fromEntries(
+        Object.entries(draftAnswers).filter(([requirementId, value]) => value.trim() && !nextCovered.has(requirementId) && !savedAnswers[requirementId]?.trim()),
+      );
+      if (Object.keys(answers).length) await reviewApi.saveAnswers(initialToken, answers);
+      setSavedAnswers((current) => ({ ...current, ...answers }));
+      await refresh();
+      const hasSimulatedTransfer = currentFiles.some((item) => item.result?.transfer === "simulated");
+      setNotice(hasSimulatedTransfer
+        ? "Draft saved. Evidence metadata reached the intake API, but file bytes stayed in this browser because no presigned upload was available."
+        : "Draft saved. You can close this page and resume with the same invitation link.");
+      return true;
+    } catch (reason) {
+      setError(messageFor(reason));
+      return false;
+    } finally {
+      setBusy(false);
     }
+  };
 
-    const fileList = (form.elements.namedItem("attachments") as HTMLInputElement | null)?.files;
-    const attachments: VendorIntakeAttachment[] = fileList
-      ? Array.from(fileList).map((file) => ({ name: file.name, sizeBytes: file.size, kind: "other" }))
-      : [];
-
-    const submission: VendorIntakeSubmission = {
-      productName,
-      vendorName,
-      requesterEmail,
-      useCase,
-      handlesStudentData: data.get("handlesStudentData") === "on",
-      attachments,
-    };
-
-    setReceipt(await submitVendorIntake(submission));
+  const finalize = async () => {
+    if (!initialToken) return;
+    const saved = await saveProgress();
+    if (!saved) return;
+    setBusy(true);
+    try {
+      const submission = await reviewApi.finalizeVendorSubmission(initialToken);
+      setFinalized(submission.status === "finalized");
+      setNotice("Submission finalized. Your reviewer can now see the frozen evidence version and continue the review.");
+      await refresh();
+    } catch (reason) {
+      setError(messageFor(reason));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -96,92 +174,79 @@ export default function PublicIntake() {
       <div className="vp-band" aria-hidden="true" />
       <div className="vp-inner">
         <header className="vp-nav">
-          <a className="vp-brand" href="/">
-            <PixelLogo />
-            Vetted
-          </a>
-          <div className="vp-nav-actions">
-            <a className="vp-nav-login" href="/">
-              Back to home
-            </a>
-            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/app">
-              Open the workspace
-            </a>
-          </div>
+          <a className="vp-brand" href="/"><PixelLogo />Vetted</a>
+          <div className="vp-nav-actions"><a className="vp-nav-login" href="/">Back to home</a></div>
         </header>
 
-        <section className="vp-intake">
+        <main className="vp-intake" id="main-content">
           <div className="vp-header">
-            <p className="vp-eyebrow">VENDOR INTAKE</p>
-            <h2 className="vp-h2">Tell us what you want reviewed.</h2>
+            <p className="vp-eyebrow">SECURE VENDOR INTAKE</p>
+            <h1 className="vp-h2">Share the evidence you already have.</h1>
             <p className="vp-hero-lead" style={{ marginTop: "0.75rem" }}>
-              Start with the product and any documents you have. The evidence you attach shapes which follow-up
-              questions a reviewer asks. You do not need every file to begin.
+              Start with files and an official trust-center link. We will only show follow-up questions that remain unresolved for this review.
             </p>
           </div>
 
-          <div className="vp-sim-banner" role="note">
+          <div className={`vp-sim-banner ${reviewApi.mode === "live" ? "vp-live-banner" : ""}`} role="note">
             <span aria-hidden="true">●</span>
-            Demo intake. Nothing is submitted to a live system, and no file leaves your browser.
+            {reviewApi.mode === "fixture"
+              ? "Fixture mode is active. Records and transfers on this page are simulated."
+              : "Live API mode. Your invitation limits this page to one case; uploaded content is treated as untrusted evidence."}
           </div>
 
-          {receipt ? (
-            <div className="vp-intake-result" role="status" aria-live="polite">
-              <p style={{ marginTop: 0 }}>
-                <strong>Simulated intake recorded.</strong> Reference {receipt.referenceId}.
-              </p>
-              <p>
-                A reviewer would look up the approved-software export, run the deterministic policy rules, and open a
-                case for {receipt.received.productName} by {receipt.received.vendorName}. This prototype does not create
-                a real case or notify anyone.
-              </p>
-              <p style={{ marginBottom: 0 }}>
-                Attachments named: {receipt.received.attachments.length > 0 ? receipt.received.attachments.map((a) => a.name).join(", ") : "none"}.
-              </p>
-            </div>
-          ) : (
-            <form className="vp-intake-card" onSubmit={onSubmit} noValidate>
-              <div className="vp-field">
-                <label htmlFor="productName">Product name</label>
-                <input id="productName" name="productName" type="text" autoComplete="off" required />
-              </div>
-              <div className="vp-field">
-                <label htmlFor="vendorName">Vendor</label>
-                <input id="vendorName" name="vendorName" type="text" autoComplete="organization" required />
-              </div>
-              <div className="vp-field">
-                <label htmlFor="requesterEmail">Your campus email</label>
-                <input id="requesterEmail" name="requesterEmail" type="email" autoComplete="email" required />
-                <span className="vp-field-hint">A reviewer uses this to ask follow-up questions.</span>
-              </div>
-              <div className="vp-field">
-                <label htmlFor="useCase">What will it be used for?</label>
-                <textarea id="useCase" name="useCase" />
-              </div>
-              <div className="vp-field">
-                <label htmlFor="attachments">Evidence files</label>
+          {loading && <div className="vp-intake-result" role="status">Opening your case-scoped invitation…</div>}
+          {!loading && error && !view && <div className="vp-intake-result vp-intake-error" role="alert"><strong>We could not open this invitation.</strong><p>{error}</p></div>}
+
+          {view && (
+            <div className="vp-intake-stack">
+              <section className="vp-intake-result vp-case-summary" aria-labelledby="case-heading">
+                <p className="vp-eyebrow">CASE {view.invite.case_id}</p>
+                <h2 id="case-heading">{view.product.name}</h2>
+                <p>{view.vendor.name} · Contact: {view.contact.name}</p>
+                <dl><div><dt>Invitation</dt><dd>{view.invite.status.replace("_", " ")}</dd></div><div><dt>Expires</dt><dd>{new Date(view.invite.expires_at).toLocaleDateString()}</dd></div><div><dt>Draft version</dt><dd>v{view.submission.version}</dd></div></dl>
+              </section>
+
+              <section className="vp-intake-card" aria-labelledby="evidence-heading">
+                <div><p className="vp-eyebrow">01 / FILES FIRST</p><h2 id="evidence-heading">Evidence files</h2><p className="vp-field-hint">Add multiple current documents. File names and metadata are registered before bytes use a presigned upload.</p></div>
                 <div className="vp-dropzone">
-                  <input id="attachments" name="attachments" type="file" multiple />
-                  <p style={{ margin: "0.5rem 0 0" }}>Policy documents, HECVAT, SOC 2, VPAT, or anything you already have.</p>
+                  <label className="vp-btn vp-btn-outline" htmlFor="evidence-files">Choose files</label>
+                  <input id="evidence-files" className="vp-file-input" type="file" multiple onChange={chooseFiles} disabled={busy || finalized} />
+                  <p>HECVAT, SOC 2, penetration test, VPAT/ACR, or other product-specific evidence.</p>
                 </div>
+                {(files.length > 0 || view.submission.evidence_artifact_ids.length > 0) && <ul className="vp-file-list">
+                  {view.submission.evidence_artifact_ids.length > 0 && files.length === 0 && <li><span><strong>{view.submission.evidence_artifact_ids.length} previously saved evidence item(s)</strong><small>Names are not returned in the vendor-safe projection.</small></span><b>Saved</b></li>}
+                  {files.map((item, index) => <li key={`${item.file.name}-${index}`}><span><strong>{item.file.name}</strong><small>{Math.ceil(item.file.size / 1024)} KB · {item.file.type || "Unknown file type"}</small>{item.error && <small className="vp-file-error-message" role="alert">{item.error}</small>}</span><b className={`vp-file-${item.status}`}>{item.status}{item.result?.transfer === "simulated" ? " · metadata only" : ""}</b></li>)}
+                </ul>}
+                {simulatedFiles.length > 0 && <p className="vp-upload-fallback" role="status">No presigned upload was returned for {simulatedFiles.length} file(s). Metadata was saved, but the bytes did not leave this browser.</p>}
+              </section>
+
+              <section className="vp-intake-card" aria-labelledby="trust-heading">
+                <div><p className="vp-eyebrow">02 / OFFICIAL SOURCE</p><h2 id="trust-heading">Trust center</h2></div>
+                <div className="vp-field"><label htmlFor="trust-center">Public HTTPS trust-center URL</label><input id="trust-center" type="url" inputMode="url" value={trustCenterUrl} onChange={(event) => setTrustCenterUrl(event.target.value)} placeholder="https://trust.vendor.example" disabled={busy || finalized} /><span className="vp-field-hint">Saving the link does not browse it or treat vendor claims as campus policy.</span></div>
+              </section>
+
+              <section className="vp-intake-card" aria-labelledby="questions-heading">
+                <div><p className="vp-eyebrow">03 / WHAT REMAINS</p><h2 id="questions-heading">Unresolved questions</h2><p className="vp-field-hint">Saved answers and cited evidence are removed from this list. The active review profile determines what appears.</p></div>
+                {unresolved.length === 0 ? <div className="vp-intake-result"><strong>No unresolved questions are currently returned.</strong><p>Your reviewer will still verify scope, evidence, and any catalog candidate.</p></div> : unresolved.map((question) => (
+                  <fieldset className="vp-question" key={question.requirement_id} disabled={busy || finalized}>
+                    <legend>{question.question}</legend>
+                    <small>{question.requirement_id} · Expected: {question.expected_evidence.join(", ")}</small>
+                    <textarea aria-label={`Answer for ${question.requirement_id}`} value={draftAnswers[question.requirement_id] ?? ""} onChange={(event) => setDraftAnswers((current) => ({ ...current, [question.requirement_id]: event.target.value }))} placeholder="Answer only what the uploaded evidence does not cover." />
+                    {savedFiles.length > 0 && <label>Or cite a saved file<select value={coverage[question.requirement_id] ?? ""} onChange={(event) => setCoverage((current) => ({ ...current, [question.requirement_id]: event.target.value }))}><option value="">No file selected</option>{savedFiles.map((item) => <option key={item.result!.artifact_id} value={item.result!.artifact_id}>{item.file.name}</option>)}</select></label>}
+                  </fieldset>
+                ))}
+              </section>
+
+              {error && <p className="vp-form-alert" role="alert">{error}</p>}
+              {notice && <p className="vp-form-notice" role="status" aria-live="polite">{notice}</p>}
+              <div className="vp-intake-actions">
+                <button className="vp-btn vp-btn-outline" type="button" onClick={saveProgress} disabled={busy || finalized}>{busy ? "Saving…" : "Save progress"}</button>
+                <button className="vp-btn vp-btn-ink" type="button" onClick={finalize} disabled={busy || finalized}>{finalized ? "Submission finalized" : "Finalize submission"}</button>
               </div>
-              <div className="vp-field" style={{ flexDirection: "row", alignItems: "center", gap: "0.6rem" }}>
-                <input id="handlesStudentData" name="handlesStudentData" type="checkbox" style={{ width: 16, height: 16 }} />
-                <label htmlFor="handlesStudentData" style={{ fontWeight: 500 }}>
-                  This product will handle student or staff data
-                </label>
-              </div>
-              {error && (
-                <p role="alert" style={{ color: "#b43b42", fontSize: 13, margin: 0 }}>
-                  {error}
-                </p>
-              )}
-              <button className="vp-btn vp-btn-ink" type="submit">
-                Submit for review
-              </button>
-            </form>
+              <p className="vp-field-hint">Finalizing freezes this evidence version. It does not approve the product or make an external system change.</p>
+            </div>
           )}
-        </section>
+        </main>
       </div>
     </div>
   );

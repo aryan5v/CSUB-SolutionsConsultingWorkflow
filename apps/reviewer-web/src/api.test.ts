@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ReviewApiError,
+  consumeInviteTokenFromFragment,
+  createReviewApiClient,
   decisionVersion,
   packetEditSection,
   packetToDraft,
   queueItemToSummary,
+  requiresReviewerConfirmation,
   reviewApi,
+  suppressResolvedQuestions,
   type QueueItem,
   type ReviewState,
+  type VendorQuestion,
 } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -178,5 +183,70 @@ describe("review API client", () => {
         message: "approval required",
       }),
     );
+  });
+});
+
+
+describe("vendor invitation security", () => {
+  it("consumes an opaque fragment token and removes it from visible history", () => {
+    const replaceState = vi.fn();
+    const token = consumeInviteTokenFromFragment(
+      { hash: "#token=opaque%2Bvalue", pathname: "/intake", search: "?source=email" } as Location,
+      { replaceState } as unknown as History,
+    );
+
+    expect(token).toBe("opaque+value");
+    expect(replaceState).toHaveBeenCalledWith(null, "", "/intake?source=email");
+  });
+
+  it("uses a bearer header and never includes the raw token in the API path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      invite: { invite_id: "invite-1", case_id: "case-1", expires_at: "2026-07-20T00:00:00Z", status: "opened" },
+      vendor: { vendor_id: "vendor-1", name: "Vendor" },
+      product: { product_id: "product-1", name: "Product" },
+      contact: { contact_id: "contact-1", name: "Contact", email: "contact@example.com" },
+      submission: { workspace_id: "csub-demo", submission_id: "submission-1", invite_id: "invite-1", case_id: "case-1", product_id: "product-1", version: 1, status: "draft", trust_center_url: null, answers: {}, evidence_artifact_ids: [], coverage_ids: [], updated_at: null, finalized_at: null },
+      questions: [],
+    }));
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock });
+
+    await client.resolveInvite("raw-secret-token");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/vendor/invites/current");
+    expect(url).not.toContain("raw-secret-token");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
+  });
+});
+
+describe("live and adaptive behavior", () => {
+  it("surfaces a live transport failure without falling back to fixtures", async () => {
+    const failure = new TypeError("network unavailable");
+    const client = createReviewApiClient({ mode: "live", fetchImpl: vi.fn().mockRejectedValue(failure) });
+
+    await expect(client.listVendors()).rejects.toBe(failure);
+  });
+
+  it("suppresses questions already answered or covered by evidence", () => {
+    const questions: VendorQuestion[] = [
+      { requirement_id: "SEC.1", question: "Security?", expected_evidence: ["SOC 2"] },
+      { requirement_id: "A11Y.1", question: "Accessibility?", expected_evidence: ["VPAT"] },
+      { requirement_id: "PRIV.1", question: "Privacy?", expected_evidence: ["Policy"] },
+    ];
+
+    expect(suppressResolvedQuestions(questions, { "SEC.1": "Saved answer" }, new Set(["A11Y.1"]))).toEqual([questions[2]]);
+  });
+
+  it("requires explicit confirmation for fuzzy and semantic matches only", async () => {
+    expect(requiresReviewerConfirmation({ match_method: "fuzzy", requires_human_confirmation: true })).toBe(true);
+    expect(requiresReviewerConfirmation({ match_method: "semantic", requires_human_confirmation: true })).toBe(true);
+    expect(requiresReviewerConfirmation({ match_method: "exact", requires_human_confirmation: false })).toBe(false);
+
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ confirmed: true, approval_granted: false }));
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock });
+    await client.confirmCatalogMatch("row-17", "fuzzy", "reviewer@example.edu");
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/catalog/matches/row-17/confirm");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ match_method: "fuzzy", reviewer_id: "reviewer@example.edu" });
   });
 });

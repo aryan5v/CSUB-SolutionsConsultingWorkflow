@@ -12,9 +12,15 @@ One Vite build serves all surfaces. `src/main.tsx` selects the surface from the
 pathname without a router dependency:
 
 - `/` public landing (`src/Landing.tsx`), the Paper conveyor marketing page.
-- `/intake` public, file-first vendor intake (`src/PublicIntake.tsx`). Every
-  path is simulated; the typed boundary in that file is a local placeholder for
-  the backend intake contract owned by issue #19.
+- `/intake#token=<opaque>` public, file-first vendor intake (`src/PublicIntake.tsx`).
+  The route consumes the fragment before React mounts, removes it from visible
+  browser history, keeps it in memory, and sends it only as an Authorization
+  bearer value. The token is never placed in an API path. Intake supports
+  multiple evidence files, an HTTPS trust-center URL, adaptive unresolved
+  questions, save/resume, evidence coverage, and finalization. File metadata is
+  registered first; bytes use a presigned upload when the API returns one. If it
+  does not, the page explicitly says that only metadata was saved and the bytes
+  stayed in the browser.
 - `/app` and `/app/*` the authenticated reviewer workspace (`src/App.tsx`),
   themed with the Advent of Code dark terminal palette.
 
@@ -38,17 +44,31 @@ npm --prefix apps/reviewer-web run dev
 ```
 
 Vite serves the app at `http://127.0.0.1:5173` (landing at `/`, workspace at
-`/app`, intake at `/intake`) and proxies `/api` to the local backend. Set
-`VITE_API_BASE_URL` only when intentionally targeting another review API. Do not
-put credentials in frontend environment variables.
+`/app`, intake at `/intake`) and proxies `/api` to the local backend. Live API
+mode is the default. Set `VITE_REVIEW_DATA_MODE=fixture` only when you
+intentionally want the clearly labeled in-browser fixture adapter. Set
+`VITE_API_BASE_URL` only when intentionally targeting another review API. Do
+not put credentials or invitation tokens in frontend environment variables.
 
-The connected core flow loads the review queue, creates sanitized cases, pauses
-for fuzzy/semantic match confirmation, resumes deterministic analysis, displays
-the packet, records reviewer edits and decisions, requests a simulated
-ServiceNow preview, and performs the separately confirmed idempotent mock write.
-The broader PR #8 record/workflow pages remain sanitized local prototype
-surfaces. If the backend is unavailable, the shell visibly labels and retains
-its offline demo fallback; it does not pretend an external write succeeded.
+The connected core flow loads the review queue, creates vendor, product,
+contact, case, and tracked invitation records, pauses for fuzzy or semantic
+match confirmation, resumes deterministic analysis, displays the packet,
+records reviewer edits and decisions, requests a simulated ServiceNow preview,
+and performs the separately confirmed idempotent mock write. Broader PR #8
+record and workflow pages remain sanitized prototype surfaces. Live API
+failures stay visible and never switch to fixture records automatically.
+
+### Vendor bearer-route compatibility
+
+The browser intentionally calls token-free vendor paths under
+`/vendor/invites/current` and sends the opaque invitation in the
+`Authorization: Bearer` header. The shared OpenAPI file and current local Python
+server on this branch still define `/vendor/invites/{token}` path routes. The
+backend must add the bearer-token route before live vendor intake works. Do not
+work around that gap by putting the token back into a path, query string, log,
+or browser storage. The current backend also returns evidence metadata without
+a presigned upload; the UI labels that fallback and leaves file bytes in the
+browser.
 
 ## Verification
 

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import Landing from "./Landing";
 import PublicIntake from "./PublicIntake";
+import { consumeInviteTokenFromFragment } from "./api";
 
 /*
  * One React application owns every public and authenticated surface. Route
@@ -18,7 +19,10 @@ import PublicIntake from "./PublicIntake";
 function resolveRoute() {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path === "/app" || path.startsWith("/app/")) return <App />;
-  if (path === "/intake") return <PublicIntake />;
+  if (path === "/intake") {
+    const token = consumeInviteTokenFromFragment(window.location, window.history);
+    return <PublicIntake initialToken={token} />;
+  }
   return <Landing />;
 }
 

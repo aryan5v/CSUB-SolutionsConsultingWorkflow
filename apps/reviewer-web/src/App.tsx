@@ -57,10 +57,13 @@ import {
   packetEditSection,
   packetToDraft,
   queueItemToSummary,
+  requiresReviewerConfirmation,
   reviewApi,
+  type AuditEvent,
   type CaseActionResponse,
   type CaseIntakeInput,
   type QueueStatus,
+  type ReviewerRecordContext,
   type ReviewState,
   type ReviewSummary,
   type WritePreview,
@@ -73,10 +76,10 @@ import {
   RequestsPage,
   SettingsPage,
   TasksPage,
-  VendorsPage,
   WorkflowsPage,
   type RestoredPage,
 } from "./WorkspacePages";
+import { VendorRecordsPage } from "./VendorRecordsPage";
 import "./app.css";
 
 type Page = "dashboard" | "queue" | "review" | "evidence" | "audit" | RestoredPage;
@@ -217,26 +220,10 @@ const evidenceItems: EvidenceItem[] = [
   },
 ];
 
-const activityData = [
-  { day: "Wed", intake: 3, review: 1 },
-  { day: "Thu", intake: 5, review: 3 },
-  { day: "Fri", intake: 4, review: 3 },
-  { day: "Sat", intake: 2, review: 1 },
-  { day: "Sun", intake: 1, review: 1 },
-  { day: "Mon", intake: 7, review: 4 },
-  { day: "Tue", intake: 6, review: 5 },
-];
-
 const activityConfig = {
   intake: { label: "Entered review", color: "blue" },
   review: { label: "Ready for a decision", color: "purple" },
 } as const;
-
-const riskData = [
-  { route: "low", reviews: 24 },
-  { route: "medium", reviews: 18 },
-  { route: "escalated", reviews: 6 },
-];
 
 const riskConfig = {
   low: { label: "Low risk", color: "green" },
@@ -244,51 +231,20 @@ const riskConfig = {
   escalated: { label: "Safe escalation", color: "red" },
 } as const;
 
-const evidenceChartData = [
-  { scope: "Policy", verified: 12, review: 0 },
-  { scope: "Case", verified: 8, review: 1 },
-  { scope: "Vendor", verified: 6, review: 3 },
-];
-
 const evidenceChartConfig = {
-  verified: { label: "Verified", color: "blue" },
-  review: { label: "Needs review", color: "orange" },
+  verified: { label: "Completed", color: "blue" },
+  review: { label: "Needs evidence", color: "orange" },
 } as const;
-
-const radarCoverageData = [
-  { dimension: "Security", covered: 8, required: 9 },
-  { dimension: "Accessibility", covered: 6, required: 9 },
-  { dimension: "Evidence", covered: 7, required: 8 },
-  { dimension: "Policy", covered: 9, required: 9 },
-  { dimension: "Citations", covered: 8, required: 8 },
-];
 
 const radarCoverageConfig = {
-  required: { label: "Required", color: "orange" },
-  covered: { label: "Verified coverage", color: "blue" },
+  required: { label: "All loaded records", color: "orange" },
+  covered: { label: "Category count", color: "blue" },
 } as const;
-
-const outcomeChartData = [
-  { day: "Wed", approved: 1, escalated: 1 },
-  { day: "Thu", approved: 2, escalated: 0 },
-  { day: "Fri", approved: 2, escalated: 1 },
-  { day: "Sat", approved: 1, escalated: 0 },
-  { day: "Sun", approved: 0, escalated: 0 },
-  { day: "Mon", approved: 3, escalated: 1 },
-  { day: "Tue", approved: 2, escalated: 1 },
-];
 
 const outcomeChartConfig = {
-  approved: { label: "Approved by reviewer", color: "green" },
-  escalated: { label: "Safely escalated", color: "red" },
+  approved: { label: "Completed records", color: "green" },
+  escalated: { label: "Safe escalation routes", color: "red" },
 } as const;
-
-const metricTrends: Record<string, { data: number[]; color: DitherColor }> = {
-  attention: { data: [1, 2, 1, 3, 2, 2, 2], color: "orange" },
-  analysis: { data: [0, 1, 2, 1, 1, 1, 1], color: "blue" },
-  completed: { data: [0, 0, 1, 0, 1, 1, 1], color: "green" },
-  escalations: { data: [1, 0, 1, 0, 0, 1, 1], color: "red" },
-};
 
 type NavItem = { page: Page; label: string; icon: typeof LayoutDashboard; count?: number; queueMode?: QueueMode };
 const navGroups: Array<{ label: string; items: NavItem[] }> = [
@@ -401,30 +357,50 @@ function ReviewRow({ review, onOpen, compact = false }: { review: ReviewCase; on
 }
 
 function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases: ReviewCase[]; onNavigate: (page: Page) => void; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void }) {
-  const primaryCase = cases[0] ?? reviewCases[0];
+  const primaryCase = cases[0] ?? null;
   const actionCases = cases.filter((review) => review.status === "Ready for review" || review.status === "Needs evidence");
+  const attentionCount = actionCases.length;
+  const analyzingCount = cases.filter((review) => review.status === "Analyzing").length;
+  const completedCount = cases.filter((review) => review.status === "Completed").length;
+  const escalationCount = cases.filter((review) => review.route === "Safe escalation").length;
+  const currentTrend = (value: number, color: DitherColor) => ({ data: Array(7).fill(value) as number[], color });
+  const currentActivityData = [{ day: "Current", intake: cases.length, review: cases.filter((review) => review.status === "Ready for review").length }];
+  const currentRiskData = [
+    { route: "low", reviews: cases.filter((review) => review.route === "Low risk").length },
+    { route: "medium", reviews: cases.filter((review) => review.route === "Medium risk").length },
+    { route: "escalated", reviews: escalationCount },
+  ];
+  const currentEvidenceData = [{ scope: "Queue", verified: completedCount, review: cases.filter((review) => review.status === "Needs evidence").length }];
+  const currentCoverageData = [
+    { dimension: "Ready", covered: cases.filter((review) => review.status === "Ready for review").length, required: cases.length },
+    { dimension: "Analysis", covered: analyzingCount, required: cases.length },
+    { dimension: "Evidence", covered: cases.filter((review) => review.status === "Needs evidence").length, required: cases.length },
+    { dimension: "Complete", covered: completedCount, required: cases.length },
+    { dimension: "Escalated", covered: escalationCount, required: cases.length },
+  ];
+  const currentOutcomeData = [{ day: "Current", approved: completedCount, escalated: escalationCount }];
   return <div className="dashboard-page">
     <DitherGradient from="blue" to="transparent" direction="up" cell={4} opacity={0.16} className="dashboard-gradient" />
     <div className="dashboard-content-layer">
     <PageIntro
-      eyebrow="Reviewer workspace / Tuesday, July 14"
+      eyebrow="Reviewer workspace / Current queue"
       title="Good afternoon, Alex."
-      description="Two reviews need a human decision. Everything else is moving or safely paused."
-      actions={<><Button variant="secondary" icon={<Upload size={15} />} onClick={onNewRequest}>New request</Button><DitherButton color="orange" variant="solid" bloom="low" className="dashboard-dither-button" onClick={() => onOpenCase(primaryCase)}><ClipboardCheck size={15} /> Review {primaryCase.product}</DitherButton></>}
+      description={cases.length ? `${attentionCount} review${attentionCount === 1 ? "" : "s"} currently need a person.` : "No review records are loaded."}
+      actions={<><Button variant="secondary" icon={<Upload size={15} />} onClick={onNewRequest}>New request</Button>{primaryCase && <DitherButton color="orange" variant="solid" bloom="low" className="dashboard-dither-button" onClick={() => onOpenCase(primaryCase)}><ClipboardCheck size={15} /> Review {primaryCase.product}</DitherButton>}</>}
     />
 
     <section className="trust-strip" aria-label="Workspace safeguards">
       <span><UserCheck size={15} />Human decision required</span>
-      <span><ShieldCheck size={15} />Policy v2026.07.14</span>
+      <span><ShieldCheck size={15} />Versioned policy rules</span>
       <span><LockKeyhole size={15} />Scoped evidence</span>
       <span className="simulation-label"><CircleDashed size={15} />Simulated ServiceNow</span>
     </section>
 
     <section className="metric-grid" aria-label="Review queue summary">
-      <MetricCard label="Needs your attention" value="2" detail="1 decision · 1 evidence gap" icon={<Inbox size={18} />} tone="yellow" trend={metricTrends.attention} />
-      <MetricCard label="In analysis" value="1" detail="Specialists running in parallel" icon={<Activity size={18} />} tone="blue" trend={metricTrends.analysis} />
-      <MetricCard label="Completed today" value="1" detail="Human-reviewed outcome" icon={<CheckCircle2 size={18} />} tone="green" trend={metricTrends.completed} />
-      <MetricCard label="Safe escalations" value="1" detail="No automatic fast-path" icon={<AlertTriangle size={18} />} tone="red" trend={metricTrends.escalations} />
+      <MetricCard label="Needs your attention" value={String(attentionCount)} detail="Current loaded queue" icon={<Inbox size={18} />} tone="yellow" trend={currentTrend(attentionCount, "orange")} />
+      <MetricCard label="In analysis" value={String(analyzingCount)} detail="Current loaded queue" icon={<Activity size={18} />} tone="blue" trend={currentTrend(analyzingCount, "blue")} />
+      <MetricCard label="Completed" value={String(completedCount)} detail="Current loaded queue" icon={<CheckCircle2 size={18} />} tone="green" trend={currentTrend(completedCount, "green")} />
+      <MetricCard label="Safe escalations" value={String(escalationCount)} detail="Current loaded queue" icon={<AlertTriangle size={18} />} tone="red" trend={currentTrend(escalationCount, "red")} />
     </section>
 
     <div className="dashboard-grid">
@@ -440,12 +416,12 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
 
       <section className="panel activity-panel">
         <div className="panel-heading">
-          <div><p className="eyebrow">Last 7 days</p><h2>Review activity</h2><p>Local demo volume, not a performance score.</p></div>
-          <span className="ascii-note" aria-label="Trend is increasing">TREND +</span>
+          <div><p className="eyebrow">Current snapshot</p><h2>Review activity</h2><p>Counts from the records currently loaded in this workspace.</p></div>
+          <span className="ascii-note">QUEUE</span>
         </div>
-        <div className="chart-summary"><strong>28</strong><span>requests entered review</span><small>18 reached human review</small></div>
-        <div className="chart-frame" aria-label="Area chart of requests entering review and reaching human review over the last seven days">
-          <AreaChart data={activityData} config={activityConfig} bloom="low" animationDuration={700}>
+        <div className="chart-summary"><strong>{cases.length}</strong><span>records loaded</span><small>{cases.filter((review) => review.status === "Ready for review").length} ready for a decision</small></div>
+        <div className="chart-frame" aria-label="Area chart of currently loaded reviews and records ready for a decision">
+          <AreaChart data={currentActivityData} config={activityConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="day" />
             <YAxis />
             <Legend isClickable />
@@ -459,9 +435,9 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
 
     <div className="dashboard-insight-grid">
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Current portfolio</p><h2>Risk routes</h2><p>Calculated routes across the sanitized local review set.</p></div><span className="ascii-note">48 CASES</span></div>
-        <div className="dither-small-chart" aria-label="Pie chart showing low, medium, and safely escalated review routes">
-          <PieChart data={riskData} config={riskConfig} dataKey="reviews" nameKey="route" innerRadius={0.56} bloom="low">
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Risk routes</h2><p>Calculated routes on the records currently loaded.</p></div><span className="ascii-note">{cases.length} RECORDS</span></div>
+        <div className="dither-small-chart" aria-label="Pie chart showing routes on currently loaded review records">
+          <PieChart data={currentRiskData} config={riskConfig} dataKey="reviews" nameKey="route" innerRadius={0.56} bloom="low">
             <Legend isClickable align="right" />
             <Tooltip />
             <Pie variant="hatched" />
@@ -469,9 +445,9 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
         </div>
       </section>
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Retrieval boundaries</p><h2>Evidence readiness</h2><p>Verified sources and items requiring reviewer attention by scope.</p></div><Button variant="ghost" onClick={() => onNavigate("evidence")}>Inspect sources</Button></div>
-        <div className="dither-small-chart" aria-label="Bar chart of verified and review-needed evidence by retrieval scope">
-          <BarChart data={evidenceChartData} config={evidenceChartConfig} bloom="low" animationDuration={700}>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Evidence status</h2><p>Completed records and records currently waiting for evidence.</p></div><Button variant="ghost" onClick={() => onNavigate("evidence")}>Inspect sources</Button></div>
+        <div className="dither-small-chart" aria-label="Bar chart of completed records and records waiting for evidence in the loaded queue">
+          <BarChart data={currentEvidenceData} config={evidenceChartConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="scope" />
             <YAxis />
             <Legend isClickable />
@@ -485,9 +461,9 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
 
     <div className="dashboard-insight-grid">
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Coverage</p><h2>Evidence dimensions</h2><p>Verified coverage against required documents across the sanitized local set.</p></div><span className="ascii-note">DEMO DATA</span></div>
-        <div className="dither-small-chart" aria-label="Radar chart comparing required evidence and verified coverage across security, accessibility, evidence, policy, and citations">
-          <RadarChart data={radarCoverageData} config={radarCoverageConfig} nameKey="dimension" bloom="low" animationDuration={700}>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Queue shape</h2><p>Loaded records by review status and safe escalation route.</p></div><span className="ascii-note">API SNAPSHOT</span></div>
+        <div className="dither-small-chart" aria-label="Radar chart of loaded records by status and safe escalation route">
+          <RadarChart data={currentCoverageData} config={radarCoverageConfig} nameKey="dimension" bloom="low" animationDuration={700}>
             <Legend isClickable align="right" />
             <Tooltip />
             <Radar dataKey="required" variant="dotted" />
@@ -496,9 +472,9 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
         </div>
       </section>
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Last 7 days</p><h2>Decision outcomes</h2><p>Local demo volume by outcome, not a performance score.</p></div><span className="ascii-note">DEMO DATA</span></div>
-        <div className="dither-small-chart" aria-label="Bar chart of approved and safely escalated outcomes over the last seven days">
-          <BarChart data={outcomeChartData} config={outcomeChartConfig} bloom="low" animationDuration={700}>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Completion and escalation</h2><p>Completed records and safe escalation routes now loaded.</p></div><span className="ascii-note">API SNAPSHOT</span></div>
+        <div className="dither-small-chart" aria-label="Bar chart of completed records and safe escalation routes in the loaded queue">
+          <BarChart data={currentOutcomeData} config={outcomeChartConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="day" />
             <YAxis />
             <Legend isClickable />
@@ -511,7 +487,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
     </div>
 
     <div className="dashboard-lower-grid">
-      <section className="panel workflow-panel">
+      {primaryCase ? <section className="panel workflow-panel">
         <div className="panel-heading">
           <div><p className="eyebrow">{primaryCase.id}</p><h2>{primaryCase.product} · {primaryCase.stage}</h2><p>The workflow remains at its current deterministic or human checkpoint.</p></div>
           <StatusBadge>{primaryCase.status}</StatusBadge>
@@ -523,14 +499,14 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
           </li>)}
         </ol>
         <div className="panel-footer"><span><Sparkles size={14} />Specialists can draft and compare. They cannot approve.</span><Button variant="primary" onClick={() => onOpenCase(primaryCase)}>Open review <ArrowRight size={14} /></Button></div>
-      </section>
+      </section> : <section className="panel workflow-panel empty-state"><Inbox size={18} /><strong>No workflow record is loaded.</strong><span>Connect the live API or select explicit fixture mode.</span></section>}
 
       <section className="panel evidence-health-panel">
         <div className="panel-heading"><div><p className="eyebrow">Source boundaries</p><h2>Evidence health</h2></div><Button variant="ghost" onClick={() => onNavigate("evidence")}>Open library</Button></div>
         <div className="evidence-health-list">
-          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Campus policy</strong><small>3 verified sources</small></span><b>Scoped</b></div>
-          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Case evidence</strong><small>8 documents linked</small></span><b>Scoped</b></div>
-          <div><span className="health-symbol health-warn">!</span><span><strong>Vendor evidence</strong><small>VPAT version needs review</small></span><b>1 gap</b></div>
+          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Campus policy</strong><small>Separate retrieval scope</small></span><b>Scoped</b></div>
+          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Case evidence</strong><small>Limited to the current case</small></span><b>Scoped</b></div>
+          <div><span className="health-symbol health-warn">!</span><span><strong>Vendor evidence</strong><small>Coverage is shown on each connected review</small></span><b>Review</b></div>
         </div>
         <div className="scope-callout"><FolderLock size={17} /><span><strong>Retrieval scopes stay separate.</strong> Campus policy cannot be replaced by vendor claims, and evidence never crosses cases.</span></div>
       </section>
@@ -575,9 +551,13 @@ function SpecialistCard({ icon, title, status, summary, points }: { icon: ReactN
   </article>;
 }
 
-function ReviewOverview({ state, onOpenEvidence, matchConfirmed, onConfirmMatch }: { state: ReviewState | null; onOpenEvidence: () => void; matchConfirmed: boolean; onConfirmMatch: () => void }) {
+function ReviewOverview({ state, review, recordContext, recordContextError, onOpenEvidence, matchConfirmed, onConfirmMatch }: { state: ReviewState | null; review: ReviewCase; recordContext: ReviewerRecordContext | null; recordContextError: string; onOpenEvidence: () => void; matchConfirmed: boolean; onConfirmMatch: () => void }) {
   const intake = state?.case_input;
   const candidate = state?.software_candidates[0];
+  const latestInvite = recordContext?.invites[recordContext.invites.length - 1];
+  const contact = latestInvite ? recordContext?.contacts.find((item) => item.contact_id === latestInvite.contact_id) : recordContext?.contacts[0];
+  const profileVersions = recordContext?.profiles.filter((item) => item.status === "activated").map((item) => `${item.profile_key} v${item.version}`).join(", ");
+  const runVersions = recordContext?.runs.map((item) => `v${item.run_version}`).join(", ");
   const policy = state?.policy_result;
   const routeLabel = policy?.risk_route === "medium" ? "Medium risk" : policy?.risk_route === "low" || policy?.risk_route === "approved" ? "Low risk" : policy ? "Safe escalation" : "Route pending";
   const matchMethod = candidate?.match_method === "vendor_product" ? "Vendor + product" : candidate?.match_method ? `${candidate.match_method[0].toUpperCase()}${candidate.match_method.slice(1)} candidate` : "No candidate";
@@ -585,6 +565,20 @@ function ReviewOverview({ state, onOpenEvidence, matchConfirmed, onConfirmMatch 
   const security = state?.specialist_results.security as undefined | { summary?: string; required_evidence?: string[] };
   const accessibility = state?.specialist_results.accessibility as undefined | { summary?: string; vpat_required?: boolean };
   return <div className="review-sections">
+    <section className="content-card record-context-card">
+      <div className="card-heading"><div><p className="eyebrow">Record context</p><h2>Owner, invitation, and versions</h2></div><StatusBadge>{latestInvite ? latestInvite.status.replace("_", " ") : "No invite"}</StatusBadge></div>
+      {recordContextError && <p className="record-context-error" role="alert">{recordContextError} Live record details were not replaced with fixture data.</p>}
+      <dl className="detail-grid">
+        <div><dt>Vendor contact</dt><dd>{contact ? `${contact.name} · ${contact.email}` : "Not returned"}</dd></div>
+        <div><dt>Internal owner</dt><dd>{review.owner}</dd></div>
+        <div><dt>Next step</dt><dd>{review.stage}</dd></div>
+        <div><dt>Invitation</dt><dd>{latestInvite ? `${latestInvite.status.replace("_", " ")} · expires ${new Date(latestInvite.expires_at).toLocaleDateString()}` : "Not issued"}</dd></div>
+        <div><dt>Profile versions</dt><dd>{profileVersions || "No active profiles returned"}</dd></div>
+        <div><dt>Review runs</dt><dd>{runVersions || "No immutable run yet"}</dd></div>
+        <div><dt>Evidence coverage</dt><dd>{policy ? `${policy.citations.length} cited policy source(s); ${policy.required_evidence.length} required evidence item(s)` : "Pending deterministic routing"}</dd></div>
+        <div><dt>Catalog candidates</dt><dd>{recordContext?.catalog?.matches.length ?? state?.software_candidates.length ?? 0} returned · membership is not approval</dd></div>
+      </dl>
+    </section>
     <section className="review-section two-column-section">
       <article className="content-card">
         <div className="card-heading"><div><p className="eyebrow">01 / Intake</p><h2>Request context</h2></div><StatusBadge>Verified</StatusBadge></div>
@@ -687,7 +681,7 @@ function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecis
   </aside>;
 }
 
-function ReviewPage({ review, state, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence }: { review: ReviewCase; state: ReviewState | null; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void }) {
+function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void }) {
   const [tab, setTab] = useState<"overview" | "packet" | "writeback">("overview");
   const approvalAllowed = matchConfirmed && Boolean(state?.draft_packet) && state?.status !== "escalated";
   const approvalBlockReason = !matchConfirmed
@@ -732,7 +726,7 @@ function ReviewPage({ review, state, decision, matchConfirmed, onConfirmMatch, p
 
     <div className="review-workspace">
       <div className="review-main">
-        {tab === "overview" && <ReviewOverview state={state} onOpenEvidence={onOpenEvidence} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
+        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={onOpenEvidence} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
         {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the fuzzy or semantic software candidate before deterministic policy, specialist analysis, and packet composition continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
       </div>
@@ -763,19 +757,26 @@ function EvidencePage() {
   </>;
 }
 
-function AuditPage({ caseId, decision, written, matchConfirmed }: { caseId: string; decision: Decision; written: boolean; matchConfirmed: boolean }) {
+function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents }: { caseId: string; decision: Decision; written: boolean; matchConfirmed: boolean; apiEvents: AuditEvent[] }) {
   const events = useMemo(() => {
+    const connected = apiEvents.map((event) => ({
+      time: new Date(event.occurred_at).toLocaleString(),
+      actor: event.actor_id ?? event.actor_type,
+      action: event.event_type.split(".").join(" "),
+      detail: [event.workflow_version && `Workflow ${event.workflow_version}`, event.policy_version && `Policy ${event.policy_version}`, event.decision_version && `Decision v${event.decision_version}`].filter(Boolean).join(" · ") || event.event_id,
+    }));
+    if (connected.length) return connected;
     const dynamic = [];
     if (written) dynamic.push({ time: "Now", actor: "Mock connector", action: "Completed simulated ServiceNow write-back", detail: "Decision v1 · Packet attached once" });
     if (decision !== "Pending") dynamic.push({ time: written ? "1 min ago" : "Now", actor: "Alex Reviewer", action: `Recorded decision: ${decision}`, detail: "Packet v3 · Human checkpoint" });
     if (matchConfirmed) dynamic.push({ time: decision !== "Pending" ? "2 min ago" : "Now", actor: "Alex Reviewer", action: "Confirmed vendor + product candidate", detail: `${caseId} · reviewer-attributed confirmation` });
-    const demoEvents = caseId === "TR-260714-014" ? initialAuditEvents : [];
+    const demoEvents = reviewApi.mode === "fixture" && caseId === "TR-260714-014" ? initialAuditEvents : [];
     return [...dynamic, ...demoEvents];
-  }, [caseId, decision, written, matchConfirmed]);
+  }, [apiEvents, caseId, decision, written, matchConfirmed]);
   return <>
-    <PageIntro eyebrow="Sanitized local event visualization" title="Audit" description="Connected reviewer actions appear here during this browser session; durable production audit storage is deferred." />
+    <PageIntro eyebrow={reviewApi.mode === "fixture" ? "Sanitized fixture timeline" : "Connected audit timeline"} title="Audit" description={reviewApi.mode === "fixture" ? "Fixture events are simulated and remain in this browser." : "Structured reviewer and workflow events returned by the API, newest first."} />
     <section className="panel audit-panel">
-      <div className="audit-summary"><div><span className="audit-symbol">LOG</span><span><strong>{caseId}</strong><small>Sanitized demo events plus current-session actions · newest first</small></span></div><div><StatusBadge>Verified</StatusBadge><span className="hash-label">CHAIN / LOCAL-DEMO-014</span></div></div>
+      <div className="audit-summary"><div><span className="audit-symbol">LOG</span><span><strong>{caseId}</strong><small>{reviewApi.mode === "fixture" ? "Simulated fixture events · newest first" : "Events returned by the review API · newest first"}</small></span></div><div><StatusBadge>{reviewApi.mode === "fixture" ? "Fixture" : "Connected"}</StatusBadge><span className="hash-label">{reviewApi.mode === "fixture" ? "LOCAL FIXTURE" : "API EVENTS"}</span></div></div>
       <div className="audit-timeline">{events.map((event, index) => <article key={`${event.time}-${event.action}`}><div className="timeline-rail"><span>{index === 0 ? <Activity size={13} /> : String(events.length - index).padStart(2, "0")}</span></div><time>{event.time}</time><div><strong>{event.actor}</strong><p>{event.action}</p><small>{event.detail}</small></div></article>)}</div>
     </section>
   </>;
@@ -841,11 +842,15 @@ export default function App() {
   const [queueMode, setQueueMode] = useState<QueueMode>("inbox");
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("review-theme") === "light" ? "light" : "dark");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [cases, setCases] = useState<ReviewCase[]>(reviewCases);
+  const [cases, setCases] = useState<ReviewCase[]>(() => reviewApi.mode === "fixture" ? reviewCases : []);
   const [caseStates, setCaseStates] = useState<Record<string, ReviewState>>({});
   const [selectedReview, setSelectedReview] = useState(reviewCases[0]);
   const [activeState, setActiveState] = useState<ReviewState | null>(null);
   const [backendConnected, setBackendConnected] = useState(false);
+  const [apiFailure, setApiFailure] = useState("");
+  const [recordContext, setRecordContext] = useState<ReviewerRecordContext | null>(null);
+  const [recordContextError, setRecordContextError] = useState("");
+  const [auditEvents, setAuditEvents] = useState<Record<string, AuditEvent[]>>({});
   const [matchConfirmed, setMatchConfirmed] = useState(false);
   const [packetDraft, setPacketDraft] = useState(() => localStorage.getItem("review-packet-draft") ?? defaultPacketDraft);
   const [packetDirty, setPacketDirty] = useState(false);
@@ -861,6 +866,7 @@ export default function App() {
     setCaseStates((current) => ({ ...current, [summary.id]: response.state }));
     setSelectedReview(summary);
     setActiveState(response.state);
+    setAuditEvents((current) => ({ ...current, [response.state.case_id]: response.audit_events }));
     setPacketDirty(false);
     const candidate = response.state.software_candidates[0];
     setMatchConfirmed(Boolean(response.state.confirmed_match_id) || !candidate?.requires_confirmation);
@@ -871,26 +877,49 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (reviewApi.mode === "fixture") {
+      setBackendConnected(false);
+      return;
+    }
     let current = true;
     reviewApi.listQueue().then((items) => {
       if (!current) return;
       setBackendConnected(true);
-      if (items.length === 0) return;
+      setApiFailure("");
       const summaries = items.map(queueItemToSummary);
       const states = Object.fromEntries(items.map((item) => [item.case_id, item.state]));
-      const active = items.find((item) => item.case_id === "TR-260714-014") ?? items[0];
       setCases(summaries);
       setCaseStates(states);
+      if (items.length === 0) return;
+      const active = items.find((item) => item.case_id === "TR-260714-014") ?? items[0];
       setSelectedReview(queueItemToSummary(active));
       setActiveState(active.state);
       const candidate = active.state.software_candidates[0];
       setMatchConfirmed(Boolean(active.state.confirmed_match_id) || !candidate?.requires_confirmation);
       if (active.state.draft_packet) setPacketDraft(packetToDraft(active.state.draft_packet));
-    }).catch(() => {
-      if (current) setBackendConnected(false);
+    }).catch((error) => {
+      if (!current) return;
+      setBackendConnected(false);
+      setCases([]);
+      setApiFailure(error instanceof ReviewApiError ? error.message : "The live review API is unavailable.");
     });
     return () => { current = false; };
   }, []);
+
+  useEffect(() => {
+    if (!activeState) { setRecordContext(null); setRecordContextError(""); return; }
+    let current = true;
+    reviewApi.loadReviewerRecord(activeState.case_id, activeState.case_input.product_name, activeState.case_input.vendor_name).then((context) => {
+      if (!current) return;
+      setRecordContext(context);
+      setRecordContextError("");
+    }).catch((error) => {
+      if (!current) return;
+      setRecordContext(null);
+      setRecordContextError(error instanceof ReviewApiError ? error.message : "Related vendor records could not be loaded.");
+    });
+    return () => { current = false; };
+  }, [activeState?.case_id]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -947,6 +976,9 @@ export default function App() {
       return;
     }
     try {
+      if (requiresReviewerConfirmation(candidate)) {
+        await reviewApi.confirmCatalogMatch(candidate.record_id, candidate.match_method, "alex.reviewer@example.edu");
+      }
       const response = await reviewApi.analyzeCase(activeState.case_id, candidate.record_id);
       syncActionResponse(response, true);
       setToast(`${candidate.canonical_name ?? "Software"} confirmed by Alex Reviewer; deterministic analysis completed.`);
@@ -1021,6 +1053,10 @@ export default function App() {
     }
   };
   const submitRequest = async (input: CaseIntakeInput) => {
+    if (reviewApi.mode === "fixture") {
+      setToast("Fixture mode is read-only for review decisions. Switch to live API mode to create a durable case.");
+      return;
+    }
     try {
       const created = await reviewApi.createCase(input);
       const analyzed = await reviewApi.analyzeCase(created.case_id);
@@ -1045,7 +1081,7 @@ export default function App() {
         <span><strong>Technology Review</strong><small>Reviewer workspace</small></span>
         <button className="sidebar-close" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"><X size={18} /></button>
       </div>
-      <div className="workspace-chip"><span>CSUB</span><div><strong>Solutions Consulting</strong><small>{backendConnected ? "Local backend connected" : "Sanitized offline fallback"}</small></div></div>
+      <div className="workspace-chip"><span>CSUB</span><div><strong>Solutions Consulting</strong><small>{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : backendConnected ? "Live API connected" : "Live API unavailable"}</small></div></div>
       <nav className="primary-nav" aria-label="Primary navigation">
         {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} /><span>{item.label}</span>{item.count && <em>{item.count}</em>}</button>; })}</div>)}
       </nav>
@@ -1066,10 +1102,11 @@ export default function App() {
       </header>
 
       <main id="main-content" className={`content ${page === "review" ? "content-wide" : ""}`}>
+        {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span><small>No fixture records were substituted. Set <code>VITE_REVIEW_DATA_MODE=fixture</code> only when you intend to use the simulated demo.</small></div>}
         {page === "dashboard" && <DashboardPage cases={cases} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
         {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} mode={queueMode} />}
-        {page === "review" && <ReviewPage review={selectedReview} state={activeState} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} />}
-        {page === "vendors" && <VendorsPage notify={setToast} />}
+        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} />}
+        {page === "vendors" && <VendorRecordsPage notify={setToast} />}
         {page === "contacts" && <ContactsPage notify={setToast} />}
         {page === "requests" && <RequestsPage onOpenReview={() => navigate("review")} notify={setToast} />}
         {page === "tasks" && <TasksPage notify={setToast} />}
@@ -1079,7 +1116,7 @@ export default function App() {
         {page === "settings" && <SettingsPage notify={setToast} />}
         {page === "documentation" && <DocumentationPage notify={setToast} />}
         {page === "evidence" && <EvidencePage />}
-        {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} />}
+        {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} apiEvents={auditEvents[selectedReview.id] ?? []} />}
       </main>
     </div>
 
