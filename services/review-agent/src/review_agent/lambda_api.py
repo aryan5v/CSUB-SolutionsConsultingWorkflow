@@ -29,7 +29,13 @@ from urllib.parse import parse_qs
 from .adapters.model import DeterministicModelClient
 from .adapters.servicenow import MockServiceNowConnector, _Record
 from .adapters.storage import StorageClient
-from .api import LocalApiError, LocalReviewApi, _CaseRecord, _default_evidence_storage
+from .api import (
+    LocalApiError,
+    LocalReviewApi,
+    _CaseRecord,
+    _default_evidence_storage,
+    vendor_link_settings,
+)
 from .config import AppConfig
 from .audit.log import AuditLog, InMemoryAuditSink
 from .contracts.audit import ActorType, AuditEvent
@@ -65,6 +71,7 @@ from .contracts.vendor import (
     RenewalRecord,
     InviteStatus,
     ProfileStatus,
+    ReminderClaim,
     ReviewCriterion,
     ReviewProfileVersion,
     ReviewRun,
@@ -531,6 +538,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "renewal": lambda value: RenewalRecord(
         **{**value, "expired_evidence_types": tuple(value["expired_evidence_types"])}
     ),
+    "reminder_claim": lambda value: ReminderClaim(**value),
 }
 
 
@@ -660,12 +668,14 @@ def restore_api(
     api._vendor_repository = repository
     api._profiles = ReviewProfileService(repository)
     # The restored backend keeps the evidence storage/extractor seams so
-    # deployed content validation (issue #36) can read stored evidence bytes.
+    # deployed content validation (issue #36) can read stored evidence bytes,
+    # plus the vendor intake-link settings (issue #37) for reminder links.
     api._vendor = VendorBackend(
         repository,
         api._profiles,
         evidence_storage=api._evidence_storage,
         extractor=api._evidence_extractor,
+        **vendor_link_settings(),
     )
     api._software_index = ApprovedSoftwareIndex([_approved_record(entry) for entry in catalog])
     api._connector = _restore_connector(snapshot.get("connector"))
@@ -950,6 +960,12 @@ def _dispatch_case(
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
         return api.list_case_invites(case_id), 200, False
+    if method == "GET" and suffix == "reminders":
+        return api.reminder_history(case_id), 200, False
+    if method == "POST" and suffix == "reminders/pause":
+        return api.set_reminders_paused(case_id, True), 200, True
+    if method == "POST" and suffix == "reminders/resume":
+        return api.set_reminders_paused(case_id, False), 200, True
     if method == "POST" and suffix == "review-runs":
         return api.create_review_run(case_id, body), 201, True
     if method == "GET" and suffix == "review-runs":
@@ -1479,6 +1495,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "run": "run_id",
         "event": "event_id",
         "finding": "finding_id",
+        "reminder_claim": "dedupe_key",
     }
     key = keys.get(kind)
     if key is None:

@@ -5,6 +5,8 @@ import {
   createReviewApiClient,
   decisionVersion,
   packetEditSection,
+  checklistStatusLabel,
+  checklistStatusSettled,
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
@@ -259,6 +261,7 @@ describe("vendor invitation security", () => {
       outcome: null,
       checklist: [
         { requirement_id: "A11Y.VPAT.001", question: "Provide a current VPAT.", expected_evidence: ["VPAT"], status: "received" },
+        { requirement_id: "SEC.DATA.001", question: "Describe encryption controls.", expected_evidence: ["SOC 2"], status: "processing" },
         { requirement_id: "SEC.HECVAT.001", question: "Provide a HECVAT.", expected_evidence: ["HECVAT"], status: "outstanding" },
       ],
     };
@@ -273,7 +276,20 @@ describe("vendor invitation security", () => {
     expect(url).not.toContain("raw-secret-token");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
-    expect(resolved.checklist.map((item) => item.status)).toEqual(["received", "outstanding"]);
+    expect(resolved.checklist.map((item) => item.status)).toEqual(["received", "processing", "outstanding"]);
+    // An unvalidated free-text answer is never presented as received evidence.
+    expect(resolved.checklist.map((item) => checklistStatusLabel(item.status))).toEqual([
+      "Received",
+      "Processing",
+      "Outstanding",
+    ]);
+    expect(checklistStatusSettled("received")).toBe(true);
+    expect(checklistStatusSettled("accepted")).toBe(true);
+    expect(checklistStatusSettled("processing")).toBe(false);
+    expect(checklistStatusSettled("invalid")).toBe(false);
+    expect(checklistStatusSettled("stale")).toBe(false);
+    expect(checklistStatusLabel("invalid")).toBe("Needs attention");
+    expect(checklistStatusLabel("stale")).toBe("Out of date");
     expect(reviewStageLabel(resolved)).toBe("Under campus review");
     expect(reviewStageLabel({ review_stage: "decided", outcome: "approved" })).toBe("Review passed");
     expect(reviewStageLabel({ review_stage: "decided", outcome: "declined" })).toBe("Review did not pass");

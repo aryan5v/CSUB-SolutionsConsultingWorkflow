@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import {
   ReviewApiError,
+  checklistStatusLabel,
+  checklistStatusSettled,
   reviewApi,
   reviewStageLabel,
   suppressResolvedQuestions,
@@ -57,8 +59,8 @@ function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
                 <strong>{item.expected_evidence.join(", ") || item.requirement_id}</strong>
                 <small>{item.requirement_id}</small>
               </span>
-              <b className={item.status === "received" ? "vp-file-saved" : "vp-file-ready"}>
-                {item.status === "received" ? "Received" : "Outstanding"}
+              <b className={checklistStatusSettled(item.status) ? "vp-file-saved" : "vp-file-ready"}>
+                {checklistStatusLabel(item.status)}
               </b>
             </li>
           ))}

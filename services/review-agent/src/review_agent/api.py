@@ -13,7 +13,7 @@ import hashlib
 import math
 import os
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Callable
 
 from .adapters.email import EmailSender, build_email_sender
 from .adapters.extraction import EvidenceExtractor, build_evidence_extractor
@@ -95,6 +95,23 @@ def _default_evidence_storage(config: AppConfig) -> StorageClient:
     return InMemoryStorage()
 
 
+def vendor_link_settings() -> dict[str, Any]:
+    """Env-configured vendor intake-link settings, shared with the Lambda wiring.
+
+    ``VENDOR_INTAKE_BASE_URL`` is the public origin of the vendor intake page
+    (the simulated default mirrors the email adapter's non-routable sender
+    domain). ``VENDOR_LINK_SECRET`` keys the sealed invite tokens so reminder
+    emails can repeat the vendor's intake link across restarts; when unset each
+    backend instance uses a process-local secret.
+    """
+    secret = os.environ.get("VENDOR_LINK_SECRET") or None
+    return {
+        "intake_base_url": os.environ.get("VENDOR_INTAKE_BASE_URL")
+        or "https://vetted.invalid/intake",
+        "link_secret": secret.encode("utf-8") if secret else None,
+    }
+
+
 class LocalApiError(RuntimeError):
     """Expected application error with an HTTP-compatible status and code."""
 
@@ -147,6 +164,7 @@ class LocalReviewApi:
         evidence_storage: StorageClient | None = None,
         evidence_extractor: EvidenceExtractor | None = None,
         config: AppConfig | None = None,
+        clock: Callable[[], datetime.datetime] | None = None,
     ) -> None:
         # Live-AI wiring: the model client is constructed from configuration so
         # that USE_LOCAL_FAKES=false injects a live Bedrock client into the
@@ -175,7 +193,7 @@ class LocalReviewApi:
         self._writeback_config = writeback_config or LocalWritebackConfig()
         self._connector = MockServiceNowConnector()
         self._vendor_repository = InMemoryVendorRepository()
-        local_clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        local_clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
         # Evidence bytes live behind the storage seam; locally an in-memory
@@ -194,6 +212,7 @@ class LocalReviewApi:
             clock=local_clock,
             evidence_storage=self._evidence_storage,
             extractor=self._evidence_extractor,
+            **vendor_link_settings(),
         )
         catalog_entries = []
         for record in records:
@@ -736,14 +755,22 @@ class LocalReviewApi:
     def run_reminder_sweep(self) -> dict[str, Any]:
         """Email weekly reminders for missing or incomplete evidence (issue #37).
 
-        Idempotent within the reminder interval: the backend excludes invites
-        that were reminded less than ``reminder_interval`` ago, so the sweep is
-        safe to trigger from a scheduler, an operator, or a test at any time.
-        Every send is persisted as an auditable ``email.reminder`` event with
-        its truthful delivery mode.
+        Idempotent per case and cadence period: the backend claims the
+        deterministic ``reminder:{case_id}:{period}`` key **before** sending,
+        so a concurrent or retried sweep that loses the claim sends nothing.
+        A failed delivery marks the claim failed — the next sweep retries
+        (bounded) instead of waiting a full interval — and every attempt is
+        persisted as an auditable ``email.reminder`` event with its truthful
+        delivery mode.
         """
         sent: list[dict[str, Any]] = []
         for candidate in self._vendor_call(self._vendor.reminder_candidates):
+            if not self._vendor.claim_reminder(
+                dedupe_key=candidate["dedupe_key"],
+                case_id=candidate["case_id"],
+                invite_id=candidate["invite_id"],
+            ):
+                continue  # another sweep already claimed this period
             subject, body = self._reminder_email(candidate)
             try:
                 delivery = self._email_sender.send(
@@ -754,6 +781,7 @@ class LocalReviewApi:
             self._vendor.record_reminder(
                 invite_id=candidate["invite_id"],
                 case_id=candidate["case_id"],
+                dedupe_key=candidate["dedupe_key"],
                 summary=subject,
                 delivery=delivery,
             )
@@ -779,9 +807,17 @@ class LocalReviewApi:
             "",
         ]
         lines.extend(f"- {item['label']}: {item['detail']}" for item in candidate["missing"])
+        lines.append("")
+        if candidate.get("intake_url"):
+            lines.extend(
+                [
+                    "Continue your submission with your secure invitation link:",
+                    candidate["intake_url"],
+                    "",
+                ]
+            )
         lines.extend(
             [
-                "",
                 "If you are having trouble producing an item, reply to this email "
                 "with a status or an estimated date.",
                 "If you are not sure what we are looking for, reply and the campus "
@@ -927,6 +963,16 @@ class LocalReviewApi:
         return self._vendor_call(
             lambda: {"items": self._vendor.case_evidence_findings(case_id)}
         )
+
+    def reminder_history(self, case_id: str) -> dict[str, Any]:
+        """Reviewer-facing reminder attempts and pause state for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.reminder_history(case_id))
+
+    def set_reminders_paused(self, case_id: str, paused: bool) -> dict[str, Any]:
+        """Reviewer control: pause or resume automated reminders for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.set_reminders_paused(case_id, paused))
 
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
@@ -1384,12 +1430,23 @@ class LocalReviewApi:
     ) -> None:
         """Email the invited vendor contact when a human decision is recorded.
 
+        The recipient is the contact whose invitation carries the submitted
+        evidence (the SUBMITTED invite); a newer invitation issued to a
+        different contact never diverts the outcome. Only when no submission
+        was finalized does the newest non-revoked invitation apply. Delivery is
+        recorded idempotently: the same outcome for a case (a re-recorded
+        decision or a retried invocation) never sends or persists a duplicate.
         Best-effort: a case without a vendor invitation (no intake ran) sends
         nothing, and a failed delivery never blocks the reviewer decision. The
         truthful delivery mode is persisted on an integration event.
         """
         outcome = self._OUTCOME_EMAILS.get(lifecycle)
         if outcome is None:
+            return
+        dedupe_key = f"{case_id}:{lifecycle.value}"
+        if self._vendor.notification_recorded(
+            event_type="email.notification", dedupe_key=dedupe_key
+        ):
             return
         invites = [
             invite
@@ -1398,7 +1455,13 @@ class LocalReviewApi:
         ]
         if not invites:
             return
-        invite = max(invites, key=lambda item: item.issued_at)
+        submitted = [
+            invite for invite in invites if invite.status is InviteStatus.SUBMITTED
+        ]
+        if submitted:
+            invite = max(submitted, key=lambda item: item.submitted_at or item.issued_at)
+        else:
+            invite = max(invites, key=lambda item: item.issued_at)
         try:
             contact = self._vendor.get_contact(invite.contact_id)
         except VendorBackendError:
@@ -1415,6 +1478,7 @@ class LocalReviewApi:
             summary=subject,
             delivery=delivery,
             event_type="email.notification",
+            dedupe_key=dedupe_key,
         )
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
