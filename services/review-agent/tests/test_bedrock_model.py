@@ -84,6 +84,33 @@ class JsonParsingTests(unittest.TestCase):
         client = BedrockModelClient(model_id="m", region="r", client=fake)
         self.assertEqual(client.complete_json(system="s", prompt="p", context={}), {"a": 2})
 
+    def test_parses_object_then_prose_containing_braces(self) -> None:
+        # Regression: Claude returns a JSON object then explanatory prose that
+        # itself contains braces; the last '}' in the string is the wrong one.
+        reply = '{"summary": "ok", "findings": ["x"]}\n\nNote: replace {product} first.'
+        fake = _FakeConverse(reply)
+        client = BedrockModelClient(model_id="m", region="r", client=fake)
+        self.assertEqual(
+            client.complete_json(system="s", prompt="p", context={}),
+            {"summary": "ok", "findings": ["x"]},
+        )
+
+    def test_ignores_braces_inside_string_values(self) -> None:
+        reply = '{"summary": "use the {token} placeholder", "n": 1} trailing'
+        fake = _FakeConverse(reply)
+        client = BedrockModelClient(model_id="m", region="r", client=fake)
+        self.assertEqual(
+            client.complete_json(system="s", prompt="p", context={}),
+            {"summary": "use the {token} placeholder", "n": 1},
+        )
+
+    def test_rejects_truncated_object(self) -> None:
+        # An object cut off at the token limit is unbalanced -> clear error.
+        fake = _FakeConverse('{"summary": "half of a respon')
+        client = BedrockModelClient(model_id="m", region="r", client=fake)
+        with self.assertRaises(ValueError):
+            client.complete_json(system="s", prompt="p", context={})
+
     def test_rejects_non_object_reply(self) -> None:
         fake = _FakeConverse("no json here at all")
         client = BedrockModelClient(model_id="m", region="r", client=fake)

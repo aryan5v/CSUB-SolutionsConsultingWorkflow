@@ -53,6 +53,38 @@ class DeterministicModelClient:
         }
 
 
+def _first_balanced_object(text: str) -> str | None:
+    """Return the first brace-balanced ``{...}`` span, or ``None`` if none is
+    complete. String literals (and their escapes) are respected so braces inside
+    strings do not affect the depth count. Handles a JSON object followed by
+    trailing prose; returns ``None`` when the object is truncated (unbalanced).
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 _JSON_INSTRUCTION = (
     "Respond with a single JSON object and nothing else. No prose, no markdown "
     "fences. If you cannot answer, return a JSON object whose fields are empty "
@@ -82,7 +114,7 @@ class BedrockModelClient:
         region: str,
         guardrail_id: str | None = None,
         guardrail_version: str = "DRAFT",
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
         temperature: float = 0.0,
         client: Any | None = None,
     ) -> None:
@@ -144,14 +176,15 @@ class BedrockModelClient:
         try:
             parsed = json.loads(stripped)
         except json.JSONDecodeError:
-            # Fall back to the first balanced {...} span.
-            start = stripped.find("{")
-            end = stripped.rfind("}")
-            if start == -1 or end <= start:
+            # Real models often append prose after the JSON object (which may
+            # itself contain braces), so scan for the first *balanced* object
+            # rather than the last '}' in the string.
+            candidate = _first_balanced_object(stripped)
+            if candidate is None:
                 raise ValueError(
-                    f"model did not return a JSON object: {stripped[:200]!r}"
+                    f"model did not return a complete JSON object: {stripped[:200]!r}"
                 ) from None
-            parsed = json.loads(stripped[start : end + 1])
+            parsed = json.loads(candidate)
         if not isinstance(parsed, dict):
             raise ValueError(f"model returned non-object JSON: {type(parsed).__name__}")
         return parsed
