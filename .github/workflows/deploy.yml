@@ -1,0 +1,239 @@
+name: Deploy VETTED
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Guarded release operation
+        required: true
+        default: dry-run
+        type: choice
+        options: [dry-run, deploy, rollback]
+      target_sha:
+        description: Full commit SHA on main (required for rollback; blank deploys selected ref)
+        required: false
+        type: string
+
+permissions: {}
+
+# Deployments never overlap. GitHub safely coalesces queued pushes to the newest
+# main commit while allowing an in-progress release or rollback to finish.
+concurrency:
+  group: vetted-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify and seal release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    outputs:
+      operation: ${{ steps.release.outputs.operation }}
+      sha: ${{ steps.release.outputs.sha }}
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      APP_ENV: ${{ vars.APP_ENV }}
+      PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+      COGNITO_DOMAIN_PREFIX: ${{ vars.COGNITO_DOMAIN_PREFIX }}
+      RETENTION_DAYS: ${{ vars.RETENTION_DAYS }}
+      REVIEW_MODEL_ID: ${{ vars.REVIEW_MODEL_ID }}
+      BUDGET_LIMIT_USD: ${{ vars.BUDGET_LIMIT_USD }}
+      SERVICE_NOW_TABLE_NAME: ${{ vars.SERVICE_NOW_TABLE_NAME }}
+      DESTROY_ON_REMOVAL: ${{ vars.DESTROY_ON_REMOVAL }}
+      VITE_API_BASE_URL: ${{ vars.API_ENDPOINT }}
+      VITE_COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
+      VITE_COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
+      VITE_COGNITO_REDIRECT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
+      VITE_COGNITO_LOGOUT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve immutable main release
+        id: release
+        env:
+          REQUESTED_SHA: ${{ inputs.target_sha }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+        run: |
+          git fetch --no-tags origin main
+          operation="${REQUESTED_OPERATION:-deploy}"
+          target="${REQUESTED_SHA:-$GITHUB_SHA}"
+          if [[ "$operation" == "rollback" && -z "$REQUESTED_SHA" ]]; then
+            echo "rollback requires target_sha" >&2
+            exit 64
+          fi
+          target="$(git rev-parse --verify "${target}^{commit}")"
+          if ! git merge-base --is-ancestor "$target" origin/main; then
+            echo "Refusing a commit that is not on main: $target" >&2
+            exit 1
+          fi
+          echo "operation=$operation" >>"$GITHUB_OUTPUT"
+          echo "sha=$target" >>"$GITHUB_OUTPUT"
+
+      - name: Use supported Node.js
+        if: steps.release.outputs.operation != 'rollback'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: |
+            apps/reviewer-web/package-lock.json
+            infra/package-lock.json
+            services/auth-api/package-lock.json
+            services/case-api/package-lock.json
+
+      - name: Check out release source
+        if: steps.release.outputs.operation != 'rollback'
+        run: git checkout --detach "${{ steps.release.outputs.sha }}"
+
+      - name: Verify repository without cloud credentials
+        if: steps.release.outputs.operation != 'rollback'
+        run: make verify
+
+      - name: Build live frontend without cloud credentials
+        if: steps.release.outputs.operation != 'rollback'
+        run: scripts/deploy/build_frontend.sh "${{ steps.release.outputs.sha }}"
+
+      - name: Synthesize cloud assembly without cloud credentials
+        if: steps.release.outputs.operation != 'rollback'
+        env:
+          CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          CDK_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          npm --prefix infra ci --ignore-scripts
+          npm --prefix infra run synth -- \
+            --output "$RUNNER_TEMP/cdk.out" \
+            -c "appEnv=$APP_ENV" \
+            -c enableAgentCoreServices=false \
+            -c enableVectorStores=false \
+            -c enableGuardrail=false
+
+      - name: Create reproducible release bundle
+        if: steps.release.outputs.operation != 'rollback'
+        run: |
+          epoch="$(git show -s --format=%ct "${{ steps.release.outputs.sha }}")"
+          python3 scripts/deploy/package_release.py \
+            --sha "${{ steps.release.outputs.sha }}" --epoch "$epoch" \
+            --assembly "$RUNNER_TEMP/cdk.out" \
+            --frontend apps/reviewer-web/dist \
+            --output "$RUNNER_TEMP/release-bundle"
+
+      - name: Upload sealed bundle
+        if: steps.release.outputs.operation != 'rollback'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-${{ steps.release.outputs.sha }}
+          path: ${{ runner.temp }}/release-bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    name: Guard, deploy, verify, and recover
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: https://${{ vars.CLOUDFRONT_DOMAIN }}
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      APP_ENV: ${{ vars.APP_ENV }}
+      PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+      COGNITO_DOMAIN_PREFIX: ${{ vars.COGNITO_DOMAIN_PREFIX }}
+      RETENTION_DAYS: ${{ vars.RETENTION_DAYS }}
+      REVIEW_MODEL_ID: ${{ vars.REVIEW_MODEL_ID }}
+      BUDGET_LIMIT_USD: ${{ vars.BUDGET_LIMIT_USD }}
+      SERVICE_NOW_TABLE_NAME: ${{ vars.SERVICE_NOW_TABLE_NAME }}
+      DESTROY_ON_REMOVAL: ${{ vars.DESTROY_ON_REMOVAL }}
+      FOUNDATION_STACK: ${{ vars.FOUNDATION_STACK }}
+      PLATFORM_STACK: ${{ vars.PLATFORM_STACK }}
+      EXPECTED_CATALOG_ROWS: ${{ vars.EXPECTED_CATALOG_ROWS }}
+      ALERT_TOPIC_ARN: ${{ vars.ALERT_TOPIC_ARN }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      RELEASE_PARAMETER_PREFIX: /vetted/deploy/${{ vars.APP_ENV }}
+
+    steps:
+      - name: Check out trusted release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Use supported Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Install deployment runtime before credentials
+        run: npm --prefix infra ci --ignore-scripts
+
+      - name: Download sealed bundle
+        if: needs.build.outputs.operation != 'rollback'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-${{ needs.build.outputs.sha }}
+          path: ${{ runner.temp }}/release-bundle
+
+      - name: Verify bundle before requesting AWS credentials
+        if: needs.build.outputs.operation != 'rollback'
+        env:
+          RELEASE_SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          python3 scripts/deploy/verify_release.py \
+            --bundle "$RUNNER_TEMP/release-bundle" --sha "$RELEASE_SHA"
+
+      - name: Configure short-lived main-only AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: vetted-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Validate deployment boundary
+        run: |
+          test -n "$AWS_ACCOUNT_ID"
+          test -n "$AWS_REGION"
+          test -n "$APP_ENV"
+          test -n "$FOUNDATION_STACK"
+          test -n "$PLATFORM_STACK"
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+
+      - name: Run guarded release transaction
+        env:
+          OPERATION: ${{ needs.build.outputs.operation }}
+          RELEASE_SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          scripts/deploy/run_release.sh "$OPERATION" "$RELEASE_SHA" \
+            "$RUNNER_TEMP/release-bundle"
+          {
+            echo "## VETTED release completed"
+            echo "- Operation: \`$OPERATION\`"
+            echo "- Commit: \`$RELEASE_SHA\`"
+            echo "- Application: https://${{ vars.CLOUDFRONT_DOMAIN }}"
+            echo "- Safeguards: immutable bundle, all-stack preflight, canaries, last-known-good rollback"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Explain recovery boundary on failure
+        if: failure()
+        run: |
+          {
+            echo "## VETTED release failed"
+            echo "Automatic recovery was attempted when a distinct healthy release existed."
+            echo "Inspect the append-only records under \`_deployment-state/${{ needs.build.outputs.sha }}/\` and CloudFormation stack events."
+            echo "Do not retry an \`UPDATE_ROLLBACK_FAILED\` stack; recover through the documented SSO runbook."
+          } >>"$GITHUB_STEP_SUMMARY"

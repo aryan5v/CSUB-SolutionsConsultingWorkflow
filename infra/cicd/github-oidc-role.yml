@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Main-only GitHub OIDC role and release alerts for guarded VETTED delivery.
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  GitHubRepository:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  GitHubOwnerId:
+    Type: String
+    AllowedPattern: '[0-9]+'
+  GitHubRepositoryId:
+    Type: String
+    AllowedPattern: '[0-9]+'
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  ApplicationEnvironment:
+    Type: String
+    Default: development
+    AllowedPattern: '[A-Za-z0-9_.-]+'
+  FrontendBucketName:
+    Type: String
+  CloudFrontDistributionId:
+    Type: String
+  CanaryFunctionName:
+    Type: String
+  BootstrapAssetBucketName:
+    Type: String
+
+Resources:
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+      Tags:
+        - Key: project
+          Value: CSUB-SolutionsConsultingWorkflow
+        - Key: purpose
+          Value: continuous-delivery
+
+  DeploymentAlerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: vetted-deployment-alerts
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: project
+          Value: CSUB-SolutionsConsultingWorkflow
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vetted-github-deploy
+      Description: Main-only OIDC role for guarded VETTED deployments from GitHub.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubActionsOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # GitHub percent-encodes the colon inside the context claim.
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrganization}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:context:environment%3A${GitHubEnvironment}:workflow_ref:${GitHubOrganization}/${GitHubRepository}/.github/workflows/deploy.yml@refs/heads/main
+      Policies:
+        - PolicyName: GuardedVettedDeployment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PrepareAndExecuteOnlyVettedStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:UpdateTerminationProtection
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/ReviewFoundationStack/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/PlatformStack/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/vetted-*/*
+              - Sid: ReadCloudFormationMetadata
+                Effect: Allow
+                Action:
+                  - cloudformation:ListChangeSets
+                  - cloudformation:ListExports
+                  - cloudformation:ListStacks
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: ProtectDeliveryControlPlane
+                Effect: Deny
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/VettedGitHubOidc/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/CDKToolkit/*
+              - Sid: PublishCdkAssets
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${BootstrapAssetBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${BootstrapAssetBucketName}/*
+              - Sid: PublishFrontendAndImmutableReleases
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}/*
+              - Sid: NeverDeleteReleaseHistory
+                Effect: Deny
+                Action:
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}/_releases/*
+                  - !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}/_deployment-state/*
+              - Sid: InvalidateOnlyVettedDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}
+              - Sid: ManageReleasePointers
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vetted/deploy/${ApplicationEnvironment}/*
+              - Sid: InvokeReleaseCanary
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${CanaryFunctionName}
+              - Sid: PublishSanitizedFailureAlert
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref DeploymentAlerts
+              # Routine automatic infrastructure mutation is limited to existing
+              # application Lambda code/configuration. Other service changes use
+              # the reviewed SSO path after the change-set guard rejects them.
+              - Sid: UpdateVettedLambdaFunctions
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListTags
+                  - lambda:PublishVersion
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:csub-*
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:PlatformStack-*
+              - Sid: ReadExistingIamForTemplateEvaluation
+                Effect: Allow
+                Action:
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListPolicyVersions
+                  - iam:ListRolePolicies
+                Resource: '*'
+
+Outputs:
+  GitHubDeployRoleArn:
+    Description: Configure as the GitHub AWS_ROLE_TO_ASSUME repository variable.
+    Value: !GetAtt GitHubDeployRole.Arn
+  DeploymentAlertTopicArn:
+    Description: Subscribe operators and configure as ALERT_TOPIC_ARN.
+    Value: !Ref DeploymentAlerts

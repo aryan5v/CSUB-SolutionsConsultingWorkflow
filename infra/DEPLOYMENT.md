@@ -218,3 +218,34 @@ sandbox lease is the hard ceiling and the Budget provides an explicit alert.
 Teardown: `npm --prefix infra run destroy` (with `destroyOnRemoval=true`,
 buckets and the ECR repo self-empty). Delete the runtime/endpoint and any
 ingested Knowledge Base data first if those were enabled.
+
+## Main-to-AWS release runbook
+
+The guarded workflow is defined in `.github/workflows/deploy.yml`; its design
+record is `docs/decisions/0008-guarded-main-to-aws-delivery.md`. Required
+repository variables are:
+
+| Variable | Source |
+|---|---|
+| `AWS_ACCOUNT_ID`, `AWS_REGION`, `APP_ENV`, `PROJECT_OWNER` | Approved sandbox gate and deployed stack tags |
+| `AWS_ROLE_TO_ASSUME`, `ALERT_TOPIC_ARN` | `VettedGitHubOidc` outputs |
+| `FOUNDATION_STACK`, `PLATFORM_STACK` | `ReviewFoundationStack`, `PlatformStack` |
+| `API_ENDPOINT`, `COGNITO_DOMAIN`, `COGNITO_CLIENT_ID`, `CLOUDFRONT_DOMAIN` | Public `PlatformStack` outputs |
+| `CLOUDFRONT_DISTRIBUTION_ID` | Distribution resolved once by the SSO bootstrap |
+| `COGNITO_DOMAIN_PREFIX` | Existing deployed Cognito prefix; prevents replacement drift |
+| `RETENTION_DAYS`, `REVIEW_MODEL_ID`, `BUDGET_LIMIT_USD` | Approved live stack configuration |
+| `SERVICE_NOW_TABLE_NAME`, `DESTROY_ON_REMOVAL` | Approved connector and sandbox lifecycle posture |
+| `EXPECTED_CATALOG_ROWS` | `982` for the reconciled demo export |
+
+The `production` GitHub environment must retain its custom `main` deployment
+branch policy. The repository OIDC subject must retain the ordered immutable
+immutable `repo` identity plus the ordered custom claims `context` and
+`workflow_ref`. Changing the workflow filename, branch, repository, or
+environment requires an intentional trust-policy update through SSO.
+
+Normal merges deploy automatically. Use manual `dry-run` to create, inspect,
+and then delete guarded change sets without executing them. `rollback` accepts
+only a full main-branch SHA whose archive has a healthy marker. If a stack is
+`UPDATE_ROLLBACK_FAILED`, stop automatic retries, inspect stack events, recover
+through SSO, run the canaries, and record a new healthy release. SNS messages
+contain only stage, commit, workflow URL, and rollback status.
