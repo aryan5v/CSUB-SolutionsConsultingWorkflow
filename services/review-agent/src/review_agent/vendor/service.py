@@ -20,8 +20,10 @@ from ..contracts.vendor import (
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceExpiryRecord,
     EvidenceValidationFinding,
     IntegrationEvent,
+    RenewalRecord,
     InviteStatus,
     ReviewProfileVersion,
     ReviewRun,
@@ -34,7 +36,13 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
-from ..evidence.validation import RULE_SOURCE, classify_evidence_type, validate_evidence
+from ..evidence.validation import (
+    EXPIRY_RULE_SOURCE,
+    RULE_SOURCE,
+    classify_evidence_type,
+    compute_expires_on,
+    validate_evidence,
+)
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
 
@@ -66,6 +74,7 @@ class VendorBackend:
         reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
         evidence_storage: StorageClient | None = None,
         extractor: EvidenceExtractor | None = None,
+        expiry_lead_days: tuple[int, ...] = (60, 30, 7),
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
@@ -82,6 +91,9 @@ class VendorBackend:
         # no stored object and skip content validation (documented limitation).
         self._evidence_storage = evidence_storage
         self._extractor = extractor or DeterministicEvidenceExtractor()
+        if not expiry_lead_days or any(days <= 0 for days in expiry_lead_days):
+            raise ValueError("expiry_lead_days must be positive")
+        self.expiry_lead_days = tuple(sorted(set(expiry_lead_days)))
 
     # Reviewer-owned vendor/product/contact records ---------------------------
 
@@ -689,9 +701,10 @@ class VendorBackend:
                 evidence_type=evidence_type,
                 text=text,
             )
-            for failure in validate_evidence(
+            failures = validate_evidence(
                 evidence_type=evidence_type, fields=fields, today=today
-            ):
+            )
+            for failure in failures:
                 finding = EvidenceValidationFinding(
                     finding_id=self._id("finding", "finding"),
                     submission_id=submission.submission_id,
@@ -709,7 +722,47 @@ class VendorBackend:
                 )
                 self._put("finding", finding.finding_id, finding)
                 findings.append(finding)
+            if not failures:
+                self._record_expiry(submission, artifact, evidence_type, fields)
         return findings
+
+    def _record_expiry(
+        self,
+        submission: Submission,
+        artifact: EvidenceArtifact,
+        evidence_type: str,
+        fields: dict[str, Any],
+    ) -> None:
+        """Persist when a validated time-bound document stops being current (issue #53).
+
+        Next-check dates come only from validated fields; a document with no
+        validated date produced findings instead and is never monitored.
+        """
+        expires_on = compute_expires_on(evidence_type, fields)
+        if expires_on is None:
+            return
+        for existing in self._list("expiry", EvidenceExpiryRecord):
+            if (
+                existing.submission_id == submission.submission_id
+                and existing.artifact_id == artifact.artifact_id
+            ):
+                return
+        record = EvidenceExpiryRecord(
+            expiry_id=self._id("expiry", "expiry"),
+            case_id=submission.case_id,
+            submission_id=submission.submission_id,
+            artifact_id=artifact.artifact_id,
+            filename=artifact.filename,
+            evidence_type=evidence_type,
+            expires_on=expires_on.isoformat(),
+            source_citation={
+                **EXPIRY_RULE_SOURCE,
+                "filename": artifact.filename,
+                "sha256": artifact.sha256,
+            },
+            workspace_id=self.workspace_id,
+        )
+        self._put("expiry", record.expiry_id, record)
 
     def _evidence_text(self, artifact: EvidenceArtifact) -> str | None:
         if self._evidence_storage is None:
@@ -1029,6 +1082,204 @@ class VendorBackend:
         if not stamps:
             return None
         return datetime.datetime.fromisoformat(max(stamps))
+
+    # Post-approval expiry monitoring (issue #53) -------------------------------
+
+    _EXPIRY_EVENT = "evidence.expiry_notice"
+    # Only decided-and-approved cases are monitored; historical approvals are
+    # never mutated by monitoring, only projected as current/expiring/expired.
+    _MONITORED_LIFECYCLES = frozenset(
+        {CaseLifecycle.APPROVED, CaseLifecycle.WRITEBACK_COMPLETE}
+    )
+
+    def expiry_status(self) -> list[dict[str, Any]]:
+        """Per approved case and evidence type: the latest validated expiry.
+
+        Renewal cases roll up into their source case's chain, so replacement
+        evidence recomputes the next date (superseding the old record) without
+        touching the historical approval. States: ``current`` (beyond every
+        lead time), ``expiring`` (within the largest lead time), ``expired``.
+        """
+        today = self._now_datetime().date()
+        renewals = self._list("renewal", RenewalRecord)
+        renewals_by_source: dict[str, list[RenewalRecord]] = {}
+        for renewal in renewals:
+            renewals_by_source.setdefault(renewal.source_case_id, []).append(renewal)
+        renewal_case_ids = {renewal.renewal_case_id for renewal in renewals}
+        expiry_records = self._list("expiry", EvidenceExpiryRecord)
+        items: list[dict[str, Any]] = []
+        for case in self._list("case", VendorCase):
+            if case.lifecycle not in self._MONITORED_LIFECYCLES:
+                continue
+            if case.case_id in renewal_case_ids:
+                # A renewal case reports through its source case's chain.
+                continue
+            chain = {case.case_id} | {
+                renewal.renewal_case_id
+                for renewal in renewals_by_source.get(case.case_id, [])
+            }
+            records = [record for record in expiry_records if record.case_id in chain]
+            latest: dict[str, EvidenceExpiryRecord] = {}
+            for record in records:
+                current = latest.get(record.evidence_type)
+                if current is None or record.expires_on > current.expires_on:
+                    latest[record.evidence_type] = record
+            open_renewals = renewals_by_source.get(case.case_id, [])
+            renewal_case_id = open_renewals[-1].renewal_case_id if open_renewals else None
+            product = self._require("product", case.product_id, VendorProduct)
+            for evidence_type in sorted(latest):
+                record = latest[evidence_type]
+                expires = datetime.date.fromisoformat(record.expires_on)
+                days = (expires - today).days
+                if days < 0:
+                    state = "expired"
+                elif days <= max(self.expiry_lead_days):
+                    state = "expiring"
+                else:
+                    state = "current"
+                items.append(
+                    {
+                        "case_id": case.case_id,
+                        "product_name": product.name,
+                        "expiry_id": record.expiry_id,
+                        "artifact_id": record.artifact_id,
+                        "filename": record.filename,
+                        "evidence_type": evidence_type,
+                        "expires_on": record.expires_on,
+                        "days_until_expiry": days,
+                        "state": state,
+                        "renewal_case_id": renewal_case_id,
+                        "superseded_expiry_ids": sorted(
+                            item.expiry_id
+                            for item in records
+                            if item.evidence_type == evidence_type
+                            and item.expiry_id != record.expiry_id
+                        ),
+                    }
+                )
+        return sorted(items, key=lambda item: (item["case_id"], item["evidence_type"]))
+
+    def expiry_actions(self) -> list[dict[str, Any]]:
+        """Due, deduplicated monitoring actions: lead-time notices, expired
+        notices, and scoped renewal-case openings.
+
+        Each (expiry record, threshold) pair notifies once — recorded
+        ``evidence.expiry_notice`` events are the dedup ledger, so replacement
+        evidence (a new expiry record) re-arms the notices. Only the tightest
+        due lead time fires per sweep, so a first sweep at 5 days out sends one
+        7-day notice, not the whole ladder.
+        """
+        sent = {
+            (event.detail.get("expiry_id"), str(event.detail.get("threshold")))
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == self._EXPIRY_EVENT
+        }
+        actions: list[dict[str, Any]] = []
+        expired_by_case: dict[str, list[dict[str, Any]]] = {}
+        for item in self.expiry_status():
+            if item["state"] == "current":
+                continue
+            contact = self._monitoring_contact(item["case_id"])
+            base = {**item, **contact}
+            if item["state"] == "expired":
+                if (item["expiry_id"], "expired") not in sent:
+                    actions.append({"kind": "notice", "threshold": "expired", **base})
+                if item["renewal_case_id"] is None:
+                    expired_by_case.setdefault(item["case_id"], []).append(item)
+                continue
+            for lead in self.expiry_lead_days:
+                if item["days_until_expiry"] <= lead:
+                    if (item["expiry_id"], str(lead)) not in sent:
+                        actions.append({"kind": "notice", "threshold": lead, **base})
+                    break
+        for case_id, expired_items in sorted(expired_by_case.items()):
+            existing = [
+                renewal
+                for renewal in self._list("renewal", RenewalRecord)
+                if renewal.source_case_id == case_id
+            ]
+            actions.append(
+                {
+                    "kind": "open_renewal",
+                    "case_id": case_id,
+                    "product_name": expired_items[0]["product_name"],
+                    "renewal_case_id": f"{case_id}-R{len(existing) + 1:02d}",
+                    "expired_evidence_types": sorted(
+                        {item["evidence_type"] for item in expired_items}
+                    ),
+                    **self._monitoring_contact(case_id),
+                }
+            )
+        return actions
+
+    def record_expiry_notice(
+        self,
+        *,
+        expiry_id: str,
+        case_id: str,
+        threshold: str,
+        summary: str,
+        delivery: dict[str, Any],
+    ) -> IntegrationEvent:
+        """Persist one expiry notice; the sweep's dedup ledger."""
+        detail = {
+            "expiry_id": expiry_id,
+            "threshold": threshold,
+            "summary": summary,
+            "delivery": delivery.get("delivery"),
+            "simulated": delivery.get("simulated", True),
+            "channel": delivery.get("channel"),
+        }
+        if delivery.get("to"):
+            detail["recipient"] = delivery["to"]
+        return self._event(
+            self._EXPIRY_EVENT, "expiry", expiry_id, case_id=case_id, detail=detail
+        )
+
+    def record_renewal(
+        self,
+        *,
+        source_case_id: str,
+        renewal_case_id: str,
+        expired_evidence_types: list[str],
+    ) -> RenewalRecord:
+        """Link a newly opened scoped re-review case to its source approval."""
+        renewal = RenewalRecord(
+            renewal_id=self._id("renewal", "renewal"),
+            source_case_id=source_case_id,
+            renewal_case_id=renewal_case_id,
+            expired_evidence_types=tuple(expired_evidence_types),
+            opened_at=self._now(),
+            workspace_id=self.workspace_id,
+        )
+        self._put("renewal", renewal.renewal_id, renewal)
+        self._event(
+            "renewal.case_opened",
+            "renewal",
+            renewal.renewal_id,
+            case_id=source_case_id,
+            detail={
+                "renewal_case_id": renewal_case_id,
+                "expired_evidence_types": list(expired_evidence_types),
+            },
+        )
+        return renewal
+
+    def _monitoring_contact(self, case_id: str) -> dict[str, Any]:
+        """Vendor contact for expiry notices: the case's latest live invite."""
+        invites = [
+            invite
+            for invite in self.list_invites(case_id)
+            if invite.status is not InviteStatus.REVOKED
+        ]
+        if not invites:
+            return {"contact_name": None, "contact_email": None}
+        invite = max(invites, key=lambda item: item.issued_at)
+        try:
+            contact = self._require("contact", invite.contact_id, VendorContact)
+        except VendorBackendError:
+            return {"contact_name": None, "contact_email": None}
+        return {"contact_name": contact.name, "contact_email": contact.email}
 
     # Immutable run versions --------------------------------------------------
 

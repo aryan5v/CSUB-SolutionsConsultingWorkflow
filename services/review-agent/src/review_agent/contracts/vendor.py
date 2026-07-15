@@ -205,6 +205,49 @@ class EvidenceValidationFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceExpiryRecord:
+    """When a validated, time-bound evidence document stops being current (issue #53).
+
+    Created only from fields that passed content validation; documents without
+    a validated date are never monitored. ``expires_on`` is an ISO date.
+    """
+
+    expiry_id: str
+    case_id: str
+    submission_id: str
+    artifact_id: str
+    filename: str
+    evidence_type: str
+    expires_on: str
+    source_citation: dict[str, Any]
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RenewalRecord:
+    """A scoped re-review opened because approved evidence expired (issue #53).
+
+    Links the historical approval (never mutated) to the new immutable case
+    that collects refreshed evidence.
+    """
+
+    renewal_id: str
+    source_case_id: str
+    renewal_case_id: str
+    expired_evidence_types: tuple[str, ...]
+    opened_at: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["expired_evidence_types"] = list(self.expired_evidence_types)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageItem:
     coverage_id: str
     submission_id: str

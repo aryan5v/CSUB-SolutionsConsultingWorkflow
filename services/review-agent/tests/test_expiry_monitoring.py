@@ -1,0 +1,290 @@
+"""Post-approval expiry monitoring and scoped re-review tests (issue #53)."""
+
+from __future__ import annotations
+
+import datetime
+import hashlib
+import unittest
+import zoneinfo
+
+import _bootstrap  # noqa: F401
+
+from review_agent.adapters.email import SimulatedEmailSender
+from review_agent.adapters.storage import InMemoryStorage
+from review_agent.api import LocalReviewApi
+from review_agent.contracts.vendor import CaseLifecycle
+from review_agent.evidence.validation import compute_expires_on
+from review_agent.profiles.service import ReviewProfileService
+from review_agent.vendor.repository import InMemoryVendorRepository
+from review_agent.vendor.service import VendorBackend
+
+
+class MutableClock:
+    def __init__(self, value: datetime.datetime | None = None) -> None:
+        self.value = value or datetime.datetime(2026, 7, 14, 12, tzinfo=datetime.timezone.utc)
+
+    def __call__(self) -> datetime.datetime:
+        return self.value
+
+
+CRITERIA = [
+    {
+        "requirement_id": "INS.COI.001",
+        "question": "Provide a certificate of insurance listing cyber-liability coverage.",
+        "source_citation": {"source_id": "policy:insurance", "cell": "A1"},
+        "expected_evidence": ["COI"],
+        "output_fields": ["insurance_summary"],
+        "remediation_guidance": "Provide a current COI with cyber-liability coverage.",
+    },
+]
+
+# 2026-07-14 clock + 60-day window: expires 2026-09-12 is exactly 60 days out.
+COI_EXPIRING = """CERTIFICATE OF INSURANCE
+coverage: cyber liability
+expires_date: 2026-09-12
+"""
+
+COI_REFRESHED = """CERTIFICATE OF INSURANCE
+coverage: cyber liability
+expires_date: 2027-09-12
+"""
+
+
+class ExpiryComputationTests(unittest.TestCase):
+    def test_next_check_dates_derive_only_from_validated_fields(self) -> None:
+        self.assertEqual(
+            compute_expires_on("coi", {"expires_date": "2026-09-12"}),
+            datetime.date(2026, 9, 12),
+        )
+        self.assertEqual(
+            compute_expires_on("pentest", {"report_date": "2026-05-01"}),
+            datetime.date(2026, 5, 1) + datetime.timedelta(days=365),
+        )
+        self.assertEqual(
+            compute_expires_on("pci", {"assessment_date": "2026-03-01"}),
+            datetime.date(2026, 3, 1) + datetime.timedelta(days=365),
+        )
+        self.assertIsNone(compute_expires_on("coi", {"coverages": ["cyber liability"]}))
+        self.assertIsNone(compute_expires_on("pentest", {"report_date": "not a date"}))
+        self.assertIsNone(compute_expires_on("soc2", {"issued_date": "2026-01-01"}))
+
+
+class ExpiryMonitoringBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = MutableClock()
+        self.repository = InMemoryVendorRepository()
+        self.profiles = ReviewProfileService(self.repository, clock=self.clock)
+        profile = self.profiles.create_draft("insurance", CRITERIA)
+        self.profiles.fixture_test(profile.profile_version_id)
+        self.profiles.activate(profile.profile_version_id)
+        self.storage = InMemoryStorage()
+        tokens = iter([letter * 43 for letter in "ABCDEFGH"])
+        self.backend = VendorBackend(
+            self.repository,
+            self.profiles,
+            clock=self.clock,
+            token_factory=lambda: next(tokens),
+            evidence_storage=self.storage,
+        )
+        vendor = self.backend.create_vendor("Example Vendor", "vendor.example")
+        self.product = self.backend.create_product(vendor.vendor_id, "Example Product")
+        self.contact = self.backend.create_contact(
+            vendor.vendor_id, "Vendor Contact", "contact@vendor.example"
+        )
+        self.case_id = "CASE-1"
+        self.backend.register_case(
+            self.case_id, self.product.product_id, "Course scheduling", "public web scope"
+        )
+        self.token = self.approve_with_coi(self.case_id, COI_EXPIRING)
+
+    def upload(self, token: str, filename: str, text: str) -> None:
+        body = text.encode("utf-8")
+        digest = hashlib.sha256(body).hexdigest()
+        self.storage.put_object(key=f"evidence/{digest}", body=body)
+        self.backend.add_evidence(
+            token,
+            {
+                "filename": filename,
+                "content_type": "text/plain",
+                "size_bytes": len(body),
+                "sha256": digest,
+            },
+        )
+
+    def approve_with_coi(self, case_id: str, coi_text: str) -> str:
+        token = self.backend.issue_invite(case_id, self.contact.contact_id)["token"]
+        self.upload(token, "coi-acme.txt", coi_text)
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        self.backend.run_intake_analysis(token)
+        self.backend.finalize_submission(token)
+        self.backend.transition_case(case_id, CaseLifecycle.NEEDS_REVIEW)
+        self.backend.transition_case(case_id, CaseLifecycle.APPROVED)
+        return token
+
+    def notice_and_record(self) -> list[dict]:
+        """Run one sweep tick the way the API layer does: record every action."""
+        actions = self.backend.expiry_actions()
+        for action in actions:
+            if action["kind"] == "notice":
+                self.backend.record_expiry_notice(
+                    expiry_id=action["expiry_id"],
+                    case_id=action["case_id"],
+                    threshold=str(action["threshold"]),
+                    summary="notice",
+                    delivery={"delivery": "simulated", "simulated": True, "channel": "email"},
+                )
+            else:
+                self.backend.register_case(
+                    action["renewal_case_id"],
+                    self.product.product_id,
+                    "Scoped re-review",
+                    "renewal scope",
+                )
+                self.backend.record_renewal(
+                    source_case_id=action["case_id"],
+                    renewal_case_id=action["renewal_case_id"],
+                    expired_evidence_types=action["expired_evidence_types"],
+                )
+        return actions
+
+    def test_lead_time_notices_fire_once_each_at_60_30_7(self) -> None:
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["state"], "expiring")
+        self.assertEqual(item["days_until_expiry"], 60)
+
+        actions = self.notice_and_record()
+        self.assertEqual([a["threshold"] for a in actions], [60])
+        self.assertEqual(actions[0]["contact_email"], "contact@vendor.example")
+        # Retry the same day: deduplicated, nothing new fires.
+        self.assertEqual(self.backend.expiry_actions(), [])
+
+        self.clock.value += datetime.timedelta(days=31)  # 29 days out
+        self.assertEqual([a["threshold"] for a in self.notice_and_record()], [30])
+        self.clock.value += datetime.timedelta(days=23)  # 6 days out
+        self.assertEqual([a["threshold"] for a in self.notice_and_record()], [7])
+        self.assertEqual(self.backend.expiry_actions(), [])
+
+    def test_first_sweep_close_to_expiry_sends_only_the_tightest_notice(self) -> None:
+        self.clock.value += datetime.timedelta(days=55)  # 5 days out, nothing sent yet
+        actions = self.backend.expiry_actions()
+        self.assertEqual([a["threshold"] for a in actions], [7])
+
+    def test_expiration_opens_one_scoped_renewal_and_never_touches_the_approval(self) -> None:
+        self.clock.value += datetime.timedelta(days=61)  # expired yesterday
+        actions = self.notice_and_record()
+        kinds = sorted(a["kind"] for a in actions)
+        self.assertEqual(kinds, ["notice", "open_renewal"])
+        renewal = next(a for a in actions if a["kind"] == "open_renewal")
+        self.assertEqual(renewal["renewal_case_id"], "CASE-1-R01")
+        self.assertEqual(renewal["expired_evidence_types"], ["coi"])
+        # The historical approval is projected as expired, not revoked.
+        self.assertEqual(self.backend.get_case_lifecycle(self.case_id), "approved")
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["state"], "expired")
+        self.assertEqual(item["renewal_case_id"], "CASE-1-R01")
+        # Retry: no duplicate renewal, no duplicate expired notice.
+        self.assertEqual(self.backend.expiry_actions(), [])
+
+    def test_replacement_evidence_recomputes_and_stops_notices(self) -> None:
+        self.clock.value += datetime.timedelta(days=61)
+        self.notice_and_record()  # opens CASE-1-R01
+        # Vendor refreshes the COI on the renewal case.
+        renewal_token = self.backend.issue_invite("CASE-1-R01", self.contact.contact_id)["token"]
+        self.upload(renewal_token, "coi-acme-renewed.txt", COI_REFRESHED)
+        self.backend.set_trust_center_url(
+            renewal_token, "https://trust.vendor.example/security"
+        )
+        self.backend.run_intake_analysis(renewal_token)
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["state"], "current")
+        self.assertEqual(item["expires_on"], "2027-09-12")
+        self.assertTrue(item["superseded_expiry_ids"])
+        self.assertEqual(self.backend.expiry_actions(), [])
+
+    def test_unmonitored_cases_and_missing_dates_produce_nothing(self) -> None:
+        # A draft case with a dateless document is never monitored: the document
+        # fails validation, so no expiry record exists and the sweep is empty.
+        self.backend.register_case(
+            "CASE-2", self.product.product_id, "Second use", "internal scope"
+        )
+        token = self.backend.issue_invite("CASE-2", self.contact.contact_id)["token"]
+        self.upload(token, "penetration-test-report.txt", "PENETRATION TEST REPORT\nno dates\n")
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        self.backend.run_intake_analysis(token)
+        case_ids = {item["case_id"] for item in self.backend.expiry_status()}
+        self.assertEqual(case_ids, {self.case_id})
+
+    def test_timezone_aware_clock_is_normalized_to_utc_dates(self) -> None:
+        pacific = zoneinfo.ZoneInfo("America/Los_Angeles")
+        self.clock.value = datetime.datetime(2026, 7, 14, 18, 30, tzinfo=pacific)
+        [item] = self.backend.expiry_status()
+        # 18:30 Pacific is already 2026-07-15 UTC, so one day closer to expiry.
+        self.assertEqual(item["days_until_expiry"], 59)
+
+
+class ExpirySweepApiTests(unittest.TestCase):
+    def test_sweep_emails_notifies_and_opens_renewal_in_the_queue(self) -> None:
+        email = SimulatedEmailSender()
+        api = LocalReviewApi(email_sender=email)
+        backend = api._vendor
+        case_id = "TR-260714-018"
+        state = api._cases[case_id].state
+        vendor = next(
+            item
+            for item in api.list_vendors()["items"]
+            if item["name"].casefold() == state.case_input.vendor_name.casefold()
+        )
+        contact = api.create_vendor_contact(
+            {"vendor_id": vendor["vendor_id"], "name": "Expiry Contact", "email": "expiry@vendor.example"}
+        )
+        api.issue_vendor_invite(case_id, {"contact_id": contact["contact_id"]})
+        backend.transition_case(case_id, CaseLifecycle.NEEDS_REVIEW)
+        backend.transition_case(case_id, CaseLifecycle.APPROVED)
+        submission = next(
+            item
+            for item in api._vendor_repository.list("submission", workspace_id=backend.workspace_id)
+            if item.case_id == case_id
+        )
+        # Seed an already-expired validated record directly; the intake path is
+        # covered by the backend tests above.
+        from review_agent.contracts.vendor import EvidenceExpiryRecord
+
+        record = EvidenceExpiryRecord(
+            expiry_id="expiry-0001",
+            case_id=case_id,
+            submission_id=submission.submission_id,
+            artifact_id="evidence-0001",
+            filename="coi-expired.txt",
+            evidence_type="coi",
+            expires_on="2026-06-30",
+            source_citation={"source_id": "issue:53"},
+        )
+        api._vendor_repository.put(
+            "expiry", record.expiry_id, record, workspace_id=backend.workspace_id
+        )
+
+        result = api.run_expiry_sweep()
+        self.assertEqual(len(result["notices"]), 1)
+        self.assertEqual(result["notices"][0]["threshold"], "expired")
+        self.assertEqual(result["renewals_opened"][0]["renewal_case_id"], f"{case_id}-R01")
+        self.assertEqual(email.sent[0]["to"], "expiry@vendor.example")
+        self.assertIn("expired", email.sent[0]["subject"])
+        events = {item["event_type"] for item in api.integration_events()["items"]}
+        self.assertIn("evidence.expiry_notice", events)
+        self.assertIn("renewal.case_opened", events)
+        # The renewal case is a full case: it appears in the review queue and
+        # the reviewer can issue an invite for refreshed evidence.
+        queue_ids = {item["case_id"] for item in api.list_review_queue()["items"]}
+        self.assertIn(f"{case_id}-R01", queue_ids)
+        issued = api.issue_vendor_invite(
+            f"{case_id}-R01", {"contact_id": contact["contact_id"]}
+        )
+        self.assertIn("token", issued)
+        # Idempotent retry: nothing further happens.
+        second = api.run_expiry_sweep()
+        self.assertEqual(second["count"], 0)
+        self.assertEqual(len(email.sent), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

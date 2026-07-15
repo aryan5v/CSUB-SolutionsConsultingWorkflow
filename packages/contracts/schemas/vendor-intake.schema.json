@@ -115,6 +115,30 @@
         "checklist": {"type": "array", "items": {"$ref": "#/$defs/ReviewStatusChecklistItem"}}
       }
     },
+    "EvidenceExpiryRecord": {
+      "type": "object", "additionalProperties": false,
+      "description": "When a validated, time-bound evidence document stops being current (issue 53). Derived only from validated fields; drives post-approval monitoring.",
+      "required": ["workspace_id", "expiry_id", "case_id", "submission_id", "artifact_id", "filename", "evidence_type", "expires_on", "source_citation"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "expiry_id": {"type": "string"},
+        "case_id": {"type": "string"}, "submission_id": {"type": "string"}, "artifact_id": {"type": "string"},
+        "filename": {"type": "string"},
+        "evidence_type": {"enum": ["coi", "pentest", "pci"]},
+        "expires_on": {"type": "string", "format": "date"},
+        "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
+      }
+    },
+    "RenewalRecord": {
+      "type": "object", "additionalProperties": false,
+      "description": "A scoped re-review case opened for expired approved evidence (issue 53); the historical approval is never mutated.",
+      "required": ["workspace_id", "renewal_id", "source_case_id", "renewal_case_id", "expired_evidence_types", "opened_at"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "renewal_id": {"type": "string"},
+        "source_case_id": {"type": "string"}, "renewal_case_id": {"type": "string"},
+        "expired_evidence_types": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "opened_at": {"type": "string", "format": "date-time"}
+      }
+    },
     "EvidenceValidationFinding": {
       "type": "object", "additionalProperties": false,
       "description": "One failed content check on an evidence artifact (issue 36). Only failures are persisted; they keep the requirement unresolved instead of counting the document as received.",

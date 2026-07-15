@@ -57,8 +57,10 @@ from .contracts.vendor import (
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceExpiryRecord,
     EvidenceValidationFinding,
     IntegrationEvent,
+    RenewalRecord,
     InviteStatus,
     ProfileStatus,
     ReviewCriterion,
@@ -523,6 +525,10 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     ),
     "event": lambda value: IntegrationEvent(**value),
     "finding": lambda value: EvidenceValidationFinding(**value),
+    "expiry": lambda value: EvidenceExpiryRecord(**value),
+    "renewal": lambda value: RenewalRecord(
+        **{**value, "expired_evidence_types": tuple(value["expired_evidence_types"])}
+    ),
 }
 
 
@@ -779,6 +785,11 @@ def _dispatch(
     if method == "POST" and path == "/reminders/run":
         # Reviewer/scheduler-triggered sweep; requires reviewer auth (not public).
         return api.run_reminder_sweep(), 200, True
+    if method == "GET" and path == "/renewals":
+        return api.list_renewals(), 200, False
+    if method == "POST" and path == "/renewals/run":
+        # Reviewer/scheduler-triggered expiry sweep; requires reviewer auth.
+        return api.run_expiry_sweep(), 200, True
     if method == "GET" and path == "/catalog":
         query = _query(event)
         return (

@@ -30,6 +30,13 @@ RULE_SOURCE = {
 PENTEST_MAX_AGE_DAYS = 365  # issue #36: "flag if older than 1 year"
 PCI_MAX_AGE_DAYS = 365  # issue #36: AoC must be current; AoCs are annual
 
+# Post-approval monitoring (issue #53) derives next-check dates from the same
+# validated fields these rules check — never from unvalidated metadata.
+EXPIRY_RULE_SOURCE = {
+    "source_id": "issue:53",
+    "section": "expiring-evidence-monitoring",
+}
+
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
 
 # Ordered so the most specific token set wins; matching is a deterministic
@@ -57,6 +64,27 @@ def _parse_date(value: object) -> datetime.date | None:
         return datetime.date.fromisoformat(value.strip()[:10])
     except ValueError:
         return None
+
+
+def compute_expires_on(evidence_type: str, fields: dict[str, Any]) -> datetime.date | None:
+    """Derive when a validated document stops being current (issue #53).
+
+    COI carries its own policy expiration; penetration tests and PCI AoCs are
+    current for one year from their report/assessment date (the same windows
+    ``validate_evidence`` enforces at intake). Returns ``None`` when no
+    validated date exists — such documents cannot be monitored.
+    """
+    if evidence_type == "coi":
+        return _parse_date(fields.get("expires_date"))
+    if evidence_type == "pentest":
+        base = _parse_date(fields.get("report_date")) or _parse_date(fields.get("issued_date"))
+        return base + datetime.timedelta(days=PENTEST_MAX_AGE_DAYS) if base else None
+    if evidence_type == "pci":
+        base = _parse_date(fields.get("assessment_date")) or _parse_date(
+            fields.get("issued_date")
+        )
+        return base + datetime.timedelta(days=PCI_MAX_AGE_DAYS) if base else None
+    return None
 
 
 def validate_evidence(
