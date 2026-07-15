@@ -23,13 +23,19 @@ This project is being developed as part of the [CSU AI Summer Camp 2026](https:/
 └── .env.example          Environment variable template
 ```
 
-The first React/Vite reviewer workspace is now under `src/`. It uses the
-Twenty record-workspace and workspace-navigation patterns documented in
+The React/Vite reviewer workspace lives under `src/`. It adapts the Twenty
+record-workspace and navigation patterns documented in
 [`docs/decisions/0002-twenty-frontend-adaptation.md`](docs/decisions/0002-twenty-frontend-adaptation.md)
-and currently runs on local mock data. The shell includes review runs, vendor
-records, contact relationships, scoped evidence viewing, audit history, a
-dashboard, nested workflow pages, reviewer tasks and notes, chat, settings, and
-documentation.
+into a dashboard-first vendor-management prototype. The local sanitized demo
+preserves the full PR #8 workspace: Inbox and My work queues, Vendors,
+Contacts, Review requests, Tasks, Notes, a local workflow builder with runs and
+versions, grounded Chat, Settings, Documentation, scoped Evidence, Audit, and
+one detailed human-review workspace with two-step simulated ServiceNow
+write-back. The shell includes accessible light/dark themes and the original
+yellow/blue design language. Tailwind and shadcn configuration support locally
+owned Dither Kit charts, gradients, buttons, and generative record avatars. See
+[`docs/twenty-vendor-frontend-plan.md`](docs/twenty-vendor-frontend-plan.md) for
+the phased Twenty-to-vendor adaptation plan.
 
 ## Start here
 
