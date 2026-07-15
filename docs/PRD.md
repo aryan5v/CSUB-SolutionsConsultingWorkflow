@@ -12,7 +12,7 @@
 | Primary users | CSUB technology-review requesters and reviewers |
 | Data boundary | Supplied Box dataset plus sanitized case uploads |
 | System of record | ServiceNow-compatible mock for the prototype |
-| Last updated | July 14, 2026 |
+| Last updated | July 15, 2026 |
 
 ## 1. Product summary
 
@@ -20,7 +20,9 @@ CSUB staff currently evaluate proposed software using an approved-software expor
 
 The product will:
 
-- Check whether software is already present in the approved-software export.
+- Maintain a searchable catalog of software records without treating every export row as blanket approval.
+- Let reviewers issue tracked, case-scoped vendor intake links.
+- Let vendors submit evidence files and an official trust-center URL before answering only unresolved questions.
 - Calculate security and accessibility routing with source-linked deterministic rules.
 - Produce a low-risk recommendation or an editable medium-risk TAAP/security packet.
 - Escalate high-risk, contradictory, unsupported, and incomplete cases.
@@ -50,6 +52,10 @@ Filenames may be normalized for display, but each manifest entry must retain the
 
 Provides the product, vendor, intended users, use case, platform, data classification, integrations, estimated cost, accessibility context, official vendor domain, and available evidence.
 
+### Vendor contact
+
+Uses a case-scoped invitation to submit product evidence, a trust-center URL, and answers to unresolved review criteria. A vendor contact cannot view reviewer notes, policy configuration, findings, other cases, or approval actions.
+
 ### Reviewer
 
 Confirms possible approved-software matches, examines policy results and citations, edits the draft packet, requests missing information, and explicitly approves or rejects the proposed outcome and write-back.
@@ -60,23 +66,27 @@ Configures policy versions, approved ServiceNow tables and fields, AWS environme
 
 ### End-to-end journey
 
-1. A requester creates a case and uploads sanitized evidence.
-2. The system validates required fields and looks for approved-software candidates.
-3. A reviewer confirms any non-exact match.
-4. A deterministic policy engine calculates the risk route and required documents.
-5. Security and accessibility specialists analyze the case in parallel.
-6. Evidence and official-vendor research specialists fill supported gaps.
-7. A citation checker rejects unsupported or cross-vendor findings and permits one repair pass.
-8. The system drafts the appropriate low- or medium-risk packet.
-9. The reviewer edits and approves, rejects, or requests more information.
-10. An approved decision produces a ServiceNow update preview and, after a second explicit confirmation, writes to the mock connector and attaches the packet.
+1. A reviewer creates a minimal product-scoped case or imports a seeded mock ServiceNow request.
+2. The reviewer records the vendor contact and internal owner, then issues a tracked, expiring invitation.
+3. The vendor uploads sanitized evidence and supplies an HTTPS trust-center URL.
+4. The system extracts cited facts, researches only configured official domains, and asks deterministic follow-up questions only for unresolved active-profile criteria.
+5. Vendor submission freezes an evidence version and searches the complete software catalog; a reviewer confirms any fuzzy or semantic candidate.
+6. A deterministic policy engine calculates the risk route and required documents.
+7. Versioned security and accessibility profiles run in parallel against case-scoped evidence.
+8. A citation checker rejects unsupported or cross-vendor findings and permits one repair pass.
+9. The system drafts the appropriate low- or medium-risk packet.
+10. The reviewer edits, reruns, approves, rejects, or requests more information. A rerun creates an immutable review version and invalidates stale approval/write previews.
+11. Slack posts status/results and supports allowlisted case-grounded Q&A with an application deep link; Slack cannot approve or mutate a case.
+12. An approved decision produces a simulated ServiceNow preview and, after a second explicit in-app confirmation, writes to the mock connector and attaches the packet.
 
 ## 3. Scope and priorities
 
 ### Must deliver by Thursday
 
-- Guided intake and evidence upload metadata.
+- Reviewer-created, tracked, revocable vendor invitations with a file-first adaptive intake.
+- Guided intake, evidence upload metadata, and official trust-center URL capture.
 - Lossless approved-software workbook ingestion and searchable normalized records.
+- Explicit support/license flag preservation; no blanket approval inference from catalog membership.
 - Risk-review recommendation clause extraction with source coordinates.
 - Versioned flowchart and decision-tree rule representation.
 - Exact, alias, vendor/product, fuzzy, and semantic approved-software lookup with match-method disclosure.
@@ -86,7 +96,12 @@ Configures policy versions, approved ServiceNow tables and fields, AWS environme
 - Low-risk summary and full editable medium-risk TAAP/security packet.
 - Citation, conflict, missing-evidence, and prompt-injection checks.
 - Human pause, edit, resume, reject, and approve workflow.
+- Versioned, server-persisted security and accessibility review profiles with draft, test, activate, and rollback behavior.
+- Persistent vendor, product, contact, internal owner, status, timeline, and next-step records.
+- Real Slack sandbox notifications, case-grounded Q&A, and deep links with final approval remaining in the application.
+- Read-only seeded mock ServiceNow request import.
 - ServiceNow-compatible preview, mock update, work note, and packet attachment.
+- Secure AWS-hosted single-workspace demo using Cognito, CloudFront, API Gateway, Lambda, AgentCore, Bedrock, encrypted storage, and observability.
 - Audit trail covering workflow versions, reviewer decisions, and write actions.
 - Three polished demo scenarios: low/approved, medium, and safe escalation.
 
@@ -94,14 +109,15 @@ Configures policy versions, approved ServiceNow tables and fields, AWS environme
 
 Only begin these items when core acceptance gates are green by Thursday at 10:00 AM, in this order:
 
-1. Vendor document-upload link scoped to a case.
-2. Draft vendor evidence-request email that remains manually sent.
-3. Read-only ServiceNow ticket import.
-4. Reviewer metrics dashboard.
+1. Draft vendor evidence-request email that remains manually sent.
+2. Reviewer metrics dashboard beyond the operational demo dashboard.
+3. Microsoft Teams notification adapter.
+4. Self-service institution signup and broader multi-tenant administration.
 
 ### Non-goals
 
 - Production deployment or institution-wide rollout.
+- General-purpose arbitrary agent, prompt, code, or tool creation by administrators.
 - Treating the prototype as the official system of record.
 - Unreviewed approvals, signatures, risk-tier changes, or external writes.
 - Live ServiceNow integration during the three-day build.
@@ -232,7 +248,7 @@ The prototype implements `MockServiceNowConnector`. A future restricted Serac MC
 ## 6. Technical architecture
 
 - React/Vite TypeScript UI hosted on S3 and CloudFront.
-- Cognito requester and reviewer roles.
+- Cognito reviewer and administrator roles for one seeded `csub-demo` workspace; vendor access uses scoped invitation tokens.
 - API Gateway and small TypeScript Lambda APIs.
 - Python LangGraph agent on Amazon Bedrock AgentCore Runtime.
 - Latest region-approved Claude Sonnet model for reasoning/drafting; Nova Pro fallback.
@@ -240,6 +256,7 @@ The prototype implements `MockServiceNowConnector`. A future restricted Serac MC
 - DynamoDB, KMS-encrypted S3, S3 Vectors, and Bedrock Knowledge Bases.
 - AgentCore Browser with domain restrictions.
 - Bedrock Guardrails plus application-level injection, citation, and schema validation.
+- Slack Events API and bot notifications behind signature verification, reviewer allowlists, and Secrets Manager.
 - CloudWatch structured logs/metrics and CloudTrail write auditing.
 
 Exact model and inference-profile IDs are discovered in the approved AWS account and pinned in environment configuration. Provider-specific calls remain behind testable interfaces.
@@ -302,10 +319,14 @@ Detailed workstreams, gates, and agent ownership are defined in [`../PLAN.md`](.
 - ServiceNow write-back is simulated but contract-faithful.
 - Serac is a future integration option, not a Thursday dependency.
 - AWS deployment uses a team-approved account and region that will be recorded before provisioning.
+- The Thursday environment is a secured prototype deployment, not a production rollout or system of record.
+- Approval applies to a product, use case, evidence version, and review profile version rather than to every product from the vendor.
 
 ### Open questions
 
 - Which AWS account, profile, region, billing owner, budget, and expiration date are approved?
+- Does the supplied Box corpus contain PII or PHI, and which artifacts require redaction before Bedrock Knowledge Base ingestion?
+- Which Slack sandbox workspace, channel, bot identity, and reviewer allowlist are approved?
 - Which Box artifacts are authoritative versus examples or drafts?
 - What are the partner-confirmed values for conflicting insurance, cost, user-count, AI, and medium-control thresholds?
 - Who is authorized to act as the prototype reviewer?

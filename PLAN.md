@@ -9,14 +9,17 @@ This is the execution plan for the requirements in [`docs/PRD.md`](docs/PRD.md).
 - Keep institutional source files and generated artifacts outside Git.
 - Every behavior change includes tests and documentation.
 - Models may draft and analyze but cannot establish policy or approve/write externally.
-- Core medium-risk, human-review, and mock-write capabilities take priority over stretch work.
+- The vendor-to-approval golden path, human review, AWS deployment, Slack notification/Q&A, and mock ServiceNow boundaries are core demo work.
 - Merge checkpoints occur Tuesday midday/EOD, Wednesday midday/EOD, and Thursday at 10:00 AM.
 
 ## Target workflow
 
 ```mermaid
 flowchart LR
-    I["Guided intake"] --> L["Approved-software lookup"]
+    START["Reviewer creates case"] --> I["Tracked vendor invitation"]
+    I --> U["Files + trust-center URL"]
+    U --> Q["Only unresolved questions"]
+    Q --> L["982-row catalog lookup"]
     L --> R["Deterministic policy engine"]
     R --> S["Security specialist"]
     R --> A["Accessibility specialist"]
@@ -27,6 +30,8 @@ flowchart LR
     C -->|"One repair"| C
     C --> P["Packet composer"]
     P --> H["Human review and editing"]
+    H --> N["Slack result + grounded Q&A"]
+    N --> H
     H -->|"Approve"| W["Write-back preview and confirmation"]
     H -->|"Changes"| P
     H -->|"Reject"| X["Close without write-back"]
@@ -103,23 +108,31 @@ Before provisioning, record the approved AWS account/profile, region, owner, bud
 ### Build and integration
 
 - Deploy KMS-encrypted S3, DynamoDB, API Gateway, Cognito, CloudFront, Knowledge Base/S3 Vectors, Guardrails, AgentCore Runtime/Memory, and monitoring.
+- Add the reviewer-created vendor invitation, file-first intake, trust-center URL, adaptive question, and submission-tracking flow.
+- Import all 982 catalog records while preserving explicit support/license flags and requiring human confirmation for fuzzy/semantic matches.
 - Ingest and verify the approved source corpus.
 - Keep campus policy and vendor evidence in distinct retrieval scopes.
 - Connect the UI and API to the deployed LangGraph workflow.
 - Implement durable human interrupt, edit, reject, approve, and resume.
 - Complete low-risk summaries and editable medium-risk packets.
 - Connect ServiceNow preview, update, work note, and attachment operations to the mock connector.
+- Add deterministic read-only import from a seeded mock ServiceNow request.
+- Persist versioned security/accessibility profiles and surface draft, fixture-test, activate, and rollback actions.
+- Connect a real Slack sandbox for signed notifications, allowlisted case-grounded Q&A, and application deep links; keep approvals and mutations in the app.
 - Create at least 12 sanitized gold cases: four low, four medium, and four high/unknown.
 - Add metrics for analysis latency, model/tool failures, citations, escalation, approvals, and writes.
 
 ### Wednesday gate
 
+- A reviewer can create a case, issue a vendor link, observe open/submission status, and receive a complete vendor evidence submission.
+- The vendor sees only unresolved questions and cannot access reviewer-only data.
 - Low, medium, and safe-escalation cases run end to end in AWS.
 - Review can pause across a restart and resume from persisted state.
 - Packet citations resolve to the correct file and source location.
 - An approved decision can update and attach through the mock connector only.
 - Stale and failed writes surface clearly and retry without duplication.
 - Vendor evidence cannot cross case, vendor, or product boundaries.
+- Slack results and Q&A are live, while approval and ServiceNow confirmation remain app-only.
 
 ## Thursday, July 16 — Hardening and demo
 
@@ -148,10 +161,10 @@ The demo must show citations, human edits, explicit approval, before/after simul
 
 If all core acceptance criteria pass by 10:00 AM, add in order:
 
-1. Case-scoped vendor document-upload link.
-2. Manually sent vendor-request email draft.
-3. Read-only ServiceNow import.
-4. Reviewer metrics dashboard.
+1. Manually sent vendor-request email draft.
+2. Extended reviewer metrics dashboard.
+3. Microsoft Teams adapter.
+4. Self-service institution signup and broader multi-tenant administration.
 
 ## Agentic AI boundaries
 
