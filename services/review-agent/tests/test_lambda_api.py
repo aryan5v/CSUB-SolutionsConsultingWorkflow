@@ -10,13 +10,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import _bootstrap  # noqa: F401
 
+from review_agent.api import LocalReviewApi
+from review_agent.config import AppConfig
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
     InMemoryWorkspaceStore,
     SnapshotConflictError,
     create_handler,
+    restore_api,
     seed_workspace,
+    snapshot_api,
 )
+from review_agent.research import build_research_provider
 
 
 class FakeAwsError(Exception):
@@ -242,6 +247,55 @@ class LambdaApiTests(unittest.TestCase):
         allowed, payload = self.call("GET", "/review-queue")
         self.assertEqual(allowed["statusCode"], 200)
         self.assertEqual(len(payload["items"]), 3)
+
+    def test_reviewer_research_route_requires_auth_and_isolates_case_and_workspace(self) -> None:
+        unauthenticated, payload = self.call(
+            "GET", "/cases/TR-260714-014/research", authenticated=False
+        )
+        self.assertEqual(unauthenticated["statusCode"], 401)
+        self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
+
+        forbidden, payload = self.call(
+            "GET", "/cases/TR-260714-014/research", workspace="other-workspace"
+        )
+        self.assertEqual(forbidden["statusCode"], 403)
+        self.assertEqual(payload["error"]["code"], "workspace_forbidden")
+
+        allowed, payload = self.call("GET", "/cases/TR-260714-014/research")
+        self.assertEqual(allowed["statusCode"], 200)
+        self.assertEqual(
+            payload,
+            {"case_id": "TR-260714-014", "research_performed": False, "research": None},
+        )
+        missing, payload = self.call("GET", "/cases/UNKNOWN/research")
+        self.assertEqual(missing["statusCode"], 404)
+        self.assertEqual(payload["error"]["code"], "case_not_found")
+
+        invitation_secret = "must-never-appear-in-research-url-logs"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rejected, payload = self.call(
+                "GET",
+                "/cases/TR-260714-014/research",
+                query=f"token={invitation_secret}",
+            )
+        self.assertEqual(rejected["statusCode"], 400)
+        self.assertEqual(payload["error"]["code"], "token_in_url_forbidden")
+        self.assertNotIn(invitation_secret, output.getvalue())
+
+    def test_restore_preserves_research_provider_when_backend_is_rebuilt(self) -> None:
+        provider = build_research_provider(AppConfig(use_local_fakes=False))
+        assert provider is not None
+        api = LocalReviewApi(research_provider=provider)
+        snapshot = snapshot_api(api, workspace_id="csub-demo")
+        catalog = self.store.load_catalog("csub-demo")
+        from unittest.mock import patch
+
+        with patch("review_agent.lambda_api.LocalReviewApi", return_value=api):
+            restored = restore_api(snapshot, catalog, workspace_id="csub-demo")
+
+        self.assertIs(restored.research_provider, provider)
+        self.assertIs(restored._vendor.research_provider, provider)
 
     def test_blank_catalog_vendor_does_not_break_workspace_restore(self) -> None:
         catalog = self.store.load_catalog("csub-demo")
