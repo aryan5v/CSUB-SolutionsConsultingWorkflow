@@ -26,7 +26,7 @@ function resolveRoute() {
   if (path === "/login") return <LoginPage />;
   if (path === "/signup") return <SignupPage />;
   if (path === "/intake") {
-    const token = consumeInviteTokenFromFragment(window.location, window.history);
+    const token = consumeInviteTokenFromFragment(window.location, window.history, window.sessionStorage);
     return <PublicIntake initialToken={token} />;
   }
   return <Landing />;

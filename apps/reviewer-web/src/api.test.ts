@@ -203,14 +203,27 @@ describe("review API client", () => {
 
 describe("vendor invitation security", () => {
   it("consumes an opaque fragment token and removes it from visible history", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    };
     const replaceState = vi.fn();
     const token = consumeInviteTokenFromFragment(
       { hash: "#token=opaque%2Bvalue", pathname: "/intake", search: "?source=email" } as Location,
       { replaceState } as unknown as History,
+      storage,
     );
 
     expect(token).toBe("opaque+value");
     expect(replaceState).toHaveBeenCalledWith(null, "", "/intake?source=email");
+    expect(
+      consumeInviteTokenFromFragment(
+        { hash: "", pathname: "/intake", search: "?source=email" } as Location,
+        { replaceState } as unknown as History,
+        storage,
+      ),
+    ).toBe("opaque+value");
   });
 
   it("uses a bearer header and never includes the raw token in the API path", async () => {

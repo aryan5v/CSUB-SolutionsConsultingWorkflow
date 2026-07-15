@@ -689,11 +689,14 @@ export function decisionVersion(state: ReviewState, hasPacketEdits = false): num
 export function consumeInviteTokenFromFragment(
   location: Pick<Location, "hash" | "pathname" | "search">,
   history: Pick<History, "replaceState">,
+  storage?: Pick<Storage, "getItem" | "setItem">,
 ): string | null {
   const fragment = location.hash.replace(/^#/, "");
-  if (!fragment) return null;
+  const storageKey = "vetted.vendor.invite.token";
+  if (!fragment) return storage?.getItem(storageKey)?.trim() || null;
   const parameters = new URLSearchParams(fragment.includes("=") ? fragment : `token=${fragment}`);
   const token = parameters.get("token")?.trim() || parameters.get("invite")?.trim() || null;
+  if (token) storage?.setItem(storageKey, token);
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   return token;
 }
