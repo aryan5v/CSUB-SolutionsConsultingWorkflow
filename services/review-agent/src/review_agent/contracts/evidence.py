@@ -14,6 +14,7 @@ class EvidenceType(str, Enum):
     PCI = "pci"
     PENTEST = "pentest"
     VPAT_ACR = "vpat_acr"
+    COI = "coi"
     EMAIL = "email"
     TAAP = "taap"
     COMPLETED_REVIEW = "completed_review"

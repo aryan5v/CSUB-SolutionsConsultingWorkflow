@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .adapters.email import EmailSender, build_email_sender
+from .adapters.extraction import EvidenceExtractor, build_evidence_extractor
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
 from .adapters.notifications import Notifier, build_notifier
 from .adapters.servicenow import (
@@ -123,6 +124,8 @@ class LocalReviewApi:
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
         email_sender: EmailSender | None = None,
+        evidence_storage: StorageClient | None = None,
+        evidence_extractor: EvidenceExtractor | None = None,
         config: AppConfig | None = None,
     ) -> None:
         # Live-AI wiring: the model client is constructed from configuration so
@@ -155,10 +158,15 @@ class LocalReviewApi:
         local_clock = lambda: datetime.datetime.now(datetime.timezone.utc)
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
+        # Evidence bytes live behind the storage seam; locally an in-memory
+        # store lets deterministic tests exercise content validation.
+        self._evidence_storage: StorageClient = evidence_storage or InMemoryStorage()
         self._vendor = VendorBackend(
             self._vendor_repository,
             self._profiles,
             clock=local_clock,
+            evidence_storage=self._evidence_storage,
+            extractor=evidence_extractor or build_evidence_extractor(self._config),
         )
         catalog_entries = []
         for record in records:
@@ -758,6 +766,17 @@ class LocalReviewApi:
         )
         subject = f"Reminder: evidence still needed for {candidate['product_name']}"
         return subject, "\n".join(lines)
+
+    def vendor_evidence_findings(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(
+            lambda: {"items": self._vendor.submission_findings(token)}
+        )
+
+    def case_evidence_findings(self, case_id: str) -> dict[str, Any]:
+        self._require_case(case_id)
+        return self._vendor_call(
+            lambda: {"items": self._vendor.case_evidence_findings(case_id)}
+        )
 
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}

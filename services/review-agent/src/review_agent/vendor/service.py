@@ -12,12 +12,15 @@ from difflib import SequenceMatcher
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from ..adapters.extraction import DeterministicEvidenceExtractor, EvidenceExtractor
+from ..adapters.storage import StorageClient
 from ..contracts.vendor import (
     DEFAULT_WORKSPACE_ID,
     ApprovalScope,
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceValidationFinding,
     IntegrationEvent,
     InviteStatus,
     ReviewProfileVersion,
@@ -31,6 +34,7 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from ..evidence.validation import RULE_SOURCE, classify_evidence_type, validate_evidence
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
 
@@ -60,6 +64,8 @@ class VendorBackend:
         token_factory: Callable[[], str] | None = None,
         invite_ttl: datetime.timedelta = datetime.timedelta(days=7),
         reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
+        evidence_storage: StorageClient | None = None,
+        extractor: EvidenceExtractor | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
@@ -72,6 +78,10 @@ class VendorBackend:
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
         self.reminder_interval = reminder_interval
+        # Evidence bytes are optional: uploads that stayed in the browser have
+        # no stored object and skip content validation (documented limitation).
+        self._evidence_storage = evidence_storage
+        self._extractor = extractor or DeterministicEvidenceExtractor()
 
     # Reviewer-owned vendor/product/contact records ---------------------------
 
@@ -591,12 +601,21 @@ class VendorBackend:
             for item in self._list("coverage", CoverageItem)
             if item.submission_id == submission.submission_id
         }
+        # Content validation (issue #36): a COI/pentest/PCI document that fails
+        # its deterministic checks produces cited findings and must not count
+        # as received, so its artifact is excluded from auto-coverage below.
+        findings = self._validate_evidence_contents(submission, evidence)
+        failed_artifact_ids = {finding.artifact_id for finding in findings}
         auto_covered: list[str] = []
         for profile in self.profiles.active_profiles():
             for criterion in profile.criteria:
                 if criterion.requirement_id in already_covered:
                     continue
-                matched = self._extract_matches(criterion, evidence)
+                matched = [
+                    artifact_id
+                    for artifact_id in self._extract_matches(criterion, evidence)
+                    if artifact_id not in failed_artifact_ids
+                ]
                 if not matched:
                     continue
                 coverage = CoverageItem(
@@ -618,7 +637,7 @@ class VendorBackend:
         research_summary = (
             f"Reviewed trust-center host {host}; inventoried {len(evidence)} evidence "
             f"artifact(s); auto-covered {len(auto_covered)} requirement(s) by deterministic "
-            f"extraction."
+            f"extraction; recorded {len(findings)} content-validation finding(s)."
         )
         finished = replace(
             submission,
@@ -636,10 +655,98 @@ class VendorBackend:
                 "auto_covered_requirement_ids": auto_covered,
                 "evidence_count": len(evidence),
                 "trust_center_host": host,
+                "validation_findings": [
+                    {"artifact_id": finding.artifact_id, "check": finding.check}
+                    for finding in findings
+                ],
                 "simulated": True,
             },
         )
         return finished
+
+    def _validate_evidence_contents(
+        self, submission: Submission, evidence: list[EvidenceArtifact]
+    ) -> list[EvidenceValidationFinding]:
+        """Extract and check COI/pentest/PCI fields; persist and return failures.
+
+        Extraction is a swappable adapter (deterministic locally, model on AWS)
+        but every pass/fail decision is made by ``evidence.validation``'s pure
+        rules. Artifacts whose bytes never reached the evidence store are
+        skipped: with nothing to read there is nothing to validate.
+        """
+        today = self._now_datetime().date()
+        findings: list[EvidenceValidationFinding] = []
+        for artifact in evidence:
+            evidence_type = classify_evidence_type(artifact.filename, artifact.content_type)
+            if evidence_type is None:
+                continue
+            text = self._evidence_text(artifact)
+            if text is None:
+                continue
+            fields = self._extractor.extract_fields(
+                filename=artifact.filename,
+                content_type=artifact.content_type,
+                evidence_type=evidence_type,
+                text=text,
+            )
+            for failure in validate_evidence(
+                evidence_type=evidence_type, fields=fields, today=today
+            ):
+                finding = EvidenceValidationFinding(
+                    finding_id=self._id("finding", "finding"),
+                    submission_id=submission.submission_id,
+                    artifact_id=artifact.artifact_id,
+                    filename=artifact.filename,
+                    evidence_type=evidence_type,
+                    check=failure["check"],
+                    reason=failure["reason"],
+                    source_citation={
+                        **RULE_SOURCE,
+                        "filename": artifact.filename,
+                        "sha256": artifact.sha256,
+                    },
+                    workspace_id=self.workspace_id,
+                )
+                self._put("finding", finding.finding_id, finding)
+                findings.append(finding)
+        return findings
+
+    def _evidence_text(self, artifact: EvidenceArtifact) -> str | None:
+        if self._evidence_storage is None:
+            return None
+        key = f"evidence/{artifact.sha256}"
+        if not self._evidence_storage.exists(key=key):
+            return None
+        return self._evidence_storage.get_object(key=key).decode("utf-8", errors="replace")
+
+    def submission_findings(self, token: str) -> list[dict[str, Any]]:
+        """Vendor-visible content-validation findings for the invite's submission."""
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        return self._findings_for_submission(submission.submission_id)
+
+    def case_evidence_findings(self, case_id: str) -> list[dict[str, Any]]:
+        """Reviewer view: all content-validation findings across a case's submissions."""
+        submission_ids = {
+            item.submission_id
+            for item in self._list("submission", Submission)
+            if item.case_id == case_id
+        }
+        findings: list[dict[str, Any]] = []
+        for finding in self._list("finding", EvidenceValidationFinding):
+            if finding.submission_id in submission_ids:
+                findings.append(finding.to_dict())
+        return sorted(findings, key=lambda item: item["finding_id"])
+
+    def _findings_for_submission(self, submission_id: str) -> list[dict[str, Any]]:
+        return sorted(
+            (
+                finding.to_dict()
+                for finding in self._list("finding", EvidenceValidationFinding)
+                if finding.submission_id == submission_id
+            ),
+            key=lambda item: item["finding_id"],
+        )
 
     @staticmethod
     def _extract_matches(criterion, evidence: list[EvidenceArtifact]) -> list[str]:

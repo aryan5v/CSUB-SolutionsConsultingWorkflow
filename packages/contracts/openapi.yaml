@@ -308,6 +308,18 @@ paths:
       responses:
         "200": {description: Received/outstanding checklist, collapsed review stage, and outcome once decided., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
         "410": {description: Expired or revoked.}
+  /vendor/invites/{token}/findings:
+    get:
+      tags: [vendor-intake]
+      summary: Content-validation findings for this submission's evidence (issue 36).
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Failed deterministic checks (expired COI, stale pen test, stale PCI AoC) with cited reasons.}}
+  /cases/{id}/evidence-findings:
+    get:
+      tags: [cases]
+      summary: Reviewer view of content-validation findings across a case's submissions.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Cited validation findings; failed documents are not counted as received.}}
   /review-profiles:
     get:
       tags: [profiles]

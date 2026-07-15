@@ -182,6 +182,29 @@ class EvidenceArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceValidationFinding:
+    """One failed content check on a vendor evidence artifact (issue #36).
+
+    Only failures are persisted; a validated document simply covers its
+    requirement. Findings keep the affected requirement unresolved so the
+    reminder flow and the vendor checklist treat the document as not received.
+    """
+
+    finding_id: str
+    submission_id: str
+    artifact_id: str
+    filename: str
+    evidence_type: str
+    check: str
+    reason: str
+    source_citation: dict[str, Any]
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageItem:
     coverage_id: str
     submission_id: str

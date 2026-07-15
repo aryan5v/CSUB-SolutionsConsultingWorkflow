@@ -115,6 +115,19 @@
         "checklist": {"type": "array", "items": {"$ref": "#/$defs/ReviewStatusChecklistItem"}}
       }
     },
+    "EvidenceValidationFinding": {
+      "type": "object", "additionalProperties": false,
+      "description": "One failed content check on an evidence artifact (issue 36). Only failures are persisted; they keep the requirement unresolved instead of counting the document as received.",
+      "required": ["workspace_id", "finding_id", "submission_id", "artifact_id", "filename", "evidence_type", "check", "reason", "source_citation"],
+      "properties": {
+        "workspace_id": {"type": "string"}, "finding_id": {"type": "string"},
+        "submission_id": {"type": "string"}, "artifact_id": {"type": "string"},
+        "filename": {"type": "string"},
+        "evidence_type": {"enum": ["coi", "pentest", "pci"]},
+        "check": {"type": "string"}, "reason": {"type": "string"},
+        "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
+      }
+    },
     "Submission": {
       "type": "object", "additionalProperties": false,
       "required": ["workspace_id", "submission_id", "invite_id", "case_id", "product_id", "version", "status", "trust_center_url", "answers", "evidence_artifact_ids", "coverage_ids", "updated_at", "finalized_at"],

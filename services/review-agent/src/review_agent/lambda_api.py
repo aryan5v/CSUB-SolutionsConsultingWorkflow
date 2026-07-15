@@ -57,6 +57,7 @@ from .contracts.vendor import (
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceValidationFinding,
     IntegrationEvent,
     InviteStatus,
     ProfileStatus,
@@ -99,6 +100,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/vendor/invites/current/analyze"),
     ("POST", "/vendor/invites/current/finalize"),
     ("GET", "/vendor/invites/current/status"),
+    ("GET", "/vendor/invites/current/findings"),
     ("GET", "/intake"),
     ("POST", "/intake"),
     ("POST", "/intake/evidence"),
@@ -109,6 +111,7 @@ _PUBLIC_ROUTES = {
     ("GET", "/intake/questions"),
     ("POST", "/intake/finalize"),
     ("GET", "/intake/status"),
+    ("GET", "/intake/findings"),
 }
 
 
@@ -519,6 +522,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
         }
     ),
     "event": lambda value: IntegrationEvent(**value),
+    "finding": lambda value: EvidenceValidationFinding(**value),
 }
 
 
@@ -903,6 +907,8 @@ def _dispatch_case(
         return api.preview_servicenow(case_id), 200, True
     if method == "POST" and suffix == "servicenow/commit":
         return api.commit_servicenow(case_id, body), 200, True
+    if method == "GET" and suffix == "evidence-findings":
+        return api.case_evidence_findings(case_id), 200, False
     if method == "GET" and suffix == "packet":
         return api.get_packet(case_id), 200, False
     if method == "GET" and suffix == "packet/pdf":
@@ -938,6 +944,7 @@ def _dispatch_intake(
         "/vendor/invites/current/analyze": "/intake/analyze",
         "/vendor/invites/current/finalize": "/intake/finalize",
         "/vendor/invites/current/status": "/intake/status",
+        "/vendor/invites/current/findings": "/intake/findings",
     }
     path = aliases.get(path, path)
     if method == "GET" and path == "/intake":
@@ -953,6 +960,7 @@ def _dispatch_intake(
         ("GET", "/intake/questions"): lambda: api.vendor_questions(token),
         ("POST", "/intake/finalize"): lambda: api.vendor_finalize(token),
         ("GET", "/intake/status"): lambda: api.vendor_review_status(token),
+        ("GET", "/intake/findings"): lambda: api.vendor_evidence_findings(token),
     }
     operation = operations.get((method, path))
     if operation is None:

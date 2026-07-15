@@ -97,6 +97,13 @@ class VendorHttpRouteTests(unittest.TestCase):
         self.assertEqual(self.request(f"/vendor/invites/{token}/analyze", "POST", {})[0], 200)
         _, questions = self.request(f"/vendor/invites/{token}/questions")
         self.assertTrue(questions["intake_analysis_complete"])
+        # Content-validation findings routes (issue #36): none for this clean upload.
+        findings_status, findings = self.request(f"/vendor/invites/{token}/findings")
+        self.assertEqual(findings_status, 200)
+        self.assertEqual(findings["items"], [])
+        case_findings_status, case_findings = self.request(f"/cases/{self.case_id}/evidence-findings")
+        self.assertEqual(case_findings_status, 200)
+        self.assertEqual(case_findings["items"], [])
         answers = {item["requirement_id"]: "Sanitized answer" for item in questions["items"]}
         if answers:
             self.assertEqual(
