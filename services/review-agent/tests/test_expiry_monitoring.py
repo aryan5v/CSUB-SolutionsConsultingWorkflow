@@ -12,7 +12,12 @@ import _bootstrap  # noqa: F401
 from review_agent.adapters.email import SimulatedEmailSender
 from review_agent.adapters.storage import InMemoryStorage
 from review_agent.api import LocalReviewApi
-from review_agent.contracts.vendor import CaseLifecycle
+from review_agent.contracts.vendor import (
+    CaseLifecycle,
+    EvidenceExpiryRecord,
+    EvidenceValidationFinding,
+    RenewalRecord,
+)
 from review_agent.evidence.validation import compute_expires_on
 from review_agent.profiles.service import ReviewProfileService
 from review_agent.vendor.repository import InMemoryVendorRepository
@@ -121,19 +126,33 @@ class ExpiryMonitoringBackendTests(unittest.TestCase):
         self.backend.transition_case(case_id, CaseLifecycle.APPROVED)
         return token
 
-    def notice_and_record(self) -> list[dict]:
-        """Run one sweep tick the way the API layer does: record every action."""
+    def notice_and_record(
+        self, delivery: str = "simulated"
+    ) -> list[dict]:
+        """Run one sweep tick the way the API layer does: claim before each side
+        effect, then record every action (issue #37 claim pattern)."""
         actions = self.backend.expiry_actions()
         for action in actions:
             if action["kind"] == "notice":
+                if not self.backend.claim_expiry_notice(
+                    dedupe_key=action["dedupe_key"],
+                    case_id=action["case_id"],
+                    expiry_id=action["expiry_id"],
+                ):
+                    continue
                 self.backend.record_expiry_notice(
                     expiry_id=action["expiry_id"],
                     case_id=action["case_id"],
                     threshold=str(action["threshold"]),
                     summary="notice",
-                    delivery={"delivery": "simulated", "simulated": True, "channel": "email"},
+                    delivery={"delivery": delivery, "simulated": True, "channel": "email"},
+                    dedupe_key=action["dedupe_key"],
                 )
             else:
+                if not self.backend.claim_renewal(
+                    dedupe_key=action["renewal_dedupe_key"], case_id=action["case_id"]
+                ):
+                    continue
                 self.backend.register_case(
                     action["renewal_case_id"],
                     self.product.product_id,
@@ -144,6 +163,7 @@ class ExpiryMonitoringBackendTests(unittest.TestCase):
                     source_case_id=action["case_id"],
                     renewal_case_id=action["renewal_case_id"],
                     expired_evidence_types=action["expired_evidence_types"],
+                    sequence=action.get("renewal_sequence"),
                 )
         return actions
 
@@ -220,6 +240,190 @@ class ExpiryMonitoringBackendTests(unittest.TestCase):
         [item] = self.backend.expiry_status()
         # 18:30 Pacific is already 2026-07-15 UTC, so one day closer to expiry.
         self.assertEqual(item["days_until_expiry"], 59)
+
+    def refresh_coi_on(self, case_id: str, text: str) -> None:
+        token = self.backend.issue_invite(case_id, self.contact.contact_id)["token"]
+        self.upload(token, "coi-acme-renewed.txt", text)
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        self.backend.run_intake_analysis(token)
+
+    # Finding 2: failed sends are retried; only successful sends dedup.
+    def test_failed_notice_is_retried_next_sweep_then_success_dedups(self) -> None:
+        # First sweep delivers nothing (failed) — the cadence is NOT satisfied.
+        [action] = self.notice_and_record(delivery="failed")
+        self.assertEqual(action["threshold"], 60)
+        # Same-day retry re-issues the 60-day notice because the prior claim is
+        # failed with attempts remaining.
+        retried = self.backend.expiry_actions()
+        self.assertEqual([a["threshold"] for a in retried], [60])
+        # This time it succeeds and settles the claim as sent.
+        self.notice_and_record(delivery="simulated")
+        # Now it is deduplicated: nothing further fires.
+        self.assertEqual(self.backend.expiry_actions(), [])
+
+    # Finding 3: only OPEN renewals block; a completed R01 lets R02 open later.
+    def test_completed_renewal_allows_a_second_renewal_when_evidence_expires_again(
+        self,
+    ) -> None:
+        self.clock.value += datetime.timedelta(days=61)  # COI expired
+        self.notice_and_record()  # opens CASE-1-R01 (sequence 1)
+        r01 = next(
+            r for r in self.backend._list("renewal", RenewalRecord) if r.sequence == 1
+        )
+        self.assertEqual(r01.state, "open")
+        # Vendor refreshes on the renewal case → R01 completes.
+        self.refresh_coi_on("CASE-1-R01", COI_REFRESHED)
+        r01 = next(
+            r for r in self.backend._list("renewal", RenewalRecord) if r.sequence == 1
+        )
+        self.assertEqual(r01.state, "completed")
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["state"], "current")
+        # Advance past the refreshed COI's own expiry (2027-09-12).
+        self.clock.value = datetime.datetime(2027, 9, 13, 12, tzinfo=datetime.timezone.utc)
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["state"], "expired")
+        self.assertIsNone(item["renewal_case_id"])  # no OPEN renewal blocks it
+        self.notice_and_record()  # opens CASE-1-R02
+        sequences = sorted(r.sequence for r in self.backend._list("renewal", RenewalRecord))
+        self.assertEqual(sequences, [1, 2])
+        r02 = next(
+            r for r in self.backend._list("renewal", RenewalRecord) if r.sequence == 2
+        )
+        self.assertEqual(r02.renewal_case_id, "CASE-1-R02")
+        self.assertEqual(r02.state, "open")
+
+    # Finding 4: interleaved/repeated sweeps commit exactly one notice + case.
+    def test_interleaved_sweeps_send_one_notice_and_open_one_renewal(self) -> None:
+        self.clock.value += datetime.timedelta(days=61)  # expired
+        # Two concurrent sweeps each compute their work from the same snapshot,
+        # before either performs a side effect.
+        batch_a = self.backend.expiry_actions()
+        batch_b = self.backend.expiry_actions()
+        committed_notices = 0
+        committed_renewals = 0
+        for batch in (batch_a, batch_b):
+            for action in batch:
+                if action["kind"] == "notice":
+                    if self.backend.claim_expiry_notice(
+                        dedupe_key=action["dedupe_key"],
+                        case_id=action["case_id"],
+                        expiry_id=action["expiry_id"],
+                    ):
+                        self.backend.record_expiry_notice(
+                            expiry_id=action["expiry_id"],
+                            case_id=action["case_id"],
+                            threshold=str(action["threshold"]),
+                            summary="notice",
+                            delivery={"delivery": "simulated", "simulated": True},
+                            dedupe_key=action["dedupe_key"],
+                        )
+                        committed_notices += 1
+                else:
+                    if self.backend.claim_renewal(
+                        dedupe_key=action["renewal_dedupe_key"], case_id=action["case_id"]
+                    ):
+                        self.backend.register_case(
+                            action["renewal_case_id"],
+                            self.product.product_id,
+                            "Scoped re-review",
+                            "renewal scope",
+                        )
+                        self.backend.record_renewal(
+                            source_case_id=action["case_id"],
+                            renewal_case_id=action["renewal_case_id"],
+                            expired_evidence_types=action["expired_evidence_types"],
+                            sequence=action.get("renewal_sequence"),
+                        )
+                        committed_renewals += 1
+        self.assertEqual(committed_notices, 1)
+        self.assertEqual(committed_renewals, 1)
+        renewals = self.backend._list("renewal", RenewalRecord)
+        self.assertEqual(len(renewals), 1)
+
+    # Finding 5: renewal IDs never collide even after a chain record is removed.
+    def test_next_renewal_sequence_never_reuses_a_deleted_index(self) -> None:
+        for case_id, seq in (("CASE-1-R01", 1), ("CASE-1-R02", 2)):
+            self.backend.register_case(
+                case_id, self.product.product_id, "Scoped re-review", "renewal scope"
+            )
+            self.backend.record_renewal(
+                source_case_id=self.case_id,
+                renewal_case_id=case_id,
+                expired_evidence_types=["coi"],
+                sequence=seq,
+            )
+        r01 = next(
+            r for r in self.backend._list("renewal", RenewalRecord) if r.sequence == 1
+        )
+        self.backend.repository.delete(
+            "renewal", r01.renewal_id, workspace_id=self.backend.workspace_id
+        )
+        # len(existing)+1 would collide with the surviving R02; max+1 does not.
+        self.assertEqual(self.backend._next_renewal_sequence(self.case_id), 3)
+
+    # Finding 5: monitoring contact follows the active renewal chain's contact.
+    def test_monitoring_contact_follows_the_active_renewal_chain(self) -> None:
+        self.clock.value += datetime.timedelta(days=61)  # expired
+        self.notice_and_record()  # opens CASE-1-R01
+        renewal_contact = self.backend.create_contact(
+            self.product.vendor_id, "Renewal Contact", "renewal@vendor.example"
+        )
+        self.backend.issue_invite("CASE-1-R01", renewal_contact.contact_id)
+        contact = self.backend._monitoring_contact(self.case_id)
+        self.assertEqual(contact["contact_email"], "renewal@vendor.example")
+        self.assertEqual(contact["contact_id"], renewal_contact.contact_id)
+
+    # Finding 6: expiry records carry approval scope, contact, versions, state.
+    def test_expiry_record_carries_full_approval_context(self) -> None:
+        [record] = self.backend._list("expiry", EvidenceExpiryRecord)
+        self.assertEqual(record.approval_scope["product_id"], self.product.product_id)
+        self.assertTrue(record.profile_version_ids)
+        self.assertEqual(record.approval_scope["profile_version_ids"], list(record.profile_version_ids))
+        self.assertEqual(record.contact_id, self.contact.contact_id)
+        self.assertTrue(record.evidence_version)  # document SHA-256
+        self.assertEqual(record.state, "active")
+        [item] = self.backend.expiry_status()
+        self.assertEqual(item["contact_id"], self.contact.contact_id)
+        self.assertEqual(item["record_state"], "active")
+        self.assertTrue(item["profile_version_ids"])
+
+    # Finding 6: refreshed evidence marks the superseded record explicitly.
+    def test_superseded_record_state_is_persisted(self) -> None:
+        self.clock.value += datetime.timedelta(days=61)
+        self.notice_and_record()
+        self.refresh_coi_on("CASE-1-R01", COI_REFRESHED)
+        states = sorted(
+            r.state for r in self.backend._list("expiry", EvidenceExpiryRecord)
+        )
+        self.assertEqual(states, ["active", "superseded"])
+
+    # Finding 7: PCI evidence never yields a scheduled expiry; it routes to
+    # explicit manual review (issue #52 — no authoritative currency rule).
+    def test_pci_evidence_never_schedules_an_expiry(self) -> None:
+        self.backend.register_case(
+            "CASE-PCI", self.product.product_id, "PCI use", "scope"
+        )
+        token = self.backend.issue_invite("CASE-PCI", self.contact.contact_id)["token"]
+        self.upload(
+            token,
+            "pci-aoc.txt",
+            "ATTESTATION OF COMPLIANCE\nassessment_date: 2026-03-01\n",
+        )
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        self.backend.run_intake_analysis(token)
+        pci_expiry = [
+            r
+            for r in self.backend._list("expiry", EvidenceExpiryRecord)
+            if r.case_id == "CASE-PCI"
+        ]
+        self.assertEqual(pci_expiry, [])
+        checks = {
+            f.check
+            for f in self.backend._list("finding", EvidenceValidationFinding)
+            if f.evidence_type == "pci"
+        }
+        self.assertIn("pci.currency_unverified", checks)
 
 
 class ExpirySweepApiTests(unittest.TestCase):

@@ -837,16 +837,28 @@ class LocalReviewApi:
     def run_expiry_sweep(self) -> dict[str, Any]:
         """Notify on expiring approved evidence and open scoped re-reviews (issue #53).
 
-        Idempotent: each (expiry record, lead-time) pair notifies once and at
-        most one renewal case is opened per source approval, so the sweep is
-        safe to trigger from a scheduler or an operator at any time. The
-        historical approval is never mutated — expiration opens a new immutable
-        case for refreshed evidence and surfaces it to reviewers.
+        Safe under concurrency/retry: every notice and renewal opening claims a
+        persisted ledger record *before* its side effect (issue #37
+        ``ReminderClaim`` pattern), so interleaved or repeated sweeps send each
+        notice once and open each renewal case once (finding 4). Only successful
+        sends satisfy the cadence; a transient failure marks the claim failed
+        and is retried on a later sweep (finding 2). The historical approval is
+        never mutated — expiration opens a new immutable case for refreshed
+        evidence and surfaces it to reviewers.
         """
         notices: list[dict[str, Any]] = []
         renewals_opened: list[dict[str, Any]] = []
         for action in self._vendor_call(self._vendor.expiry_actions):
             if action["kind"] == "notice":
+                # Claim before sending so a concurrent/retried sweep cannot
+                # double-send; a lost claim (already pending/sent) skips.
+                claimed = self._vendor.claim_expiry_notice(
+                    dedupe_key=action["dedupe_key"],
+                    case_id=action["case_id"],
+                    expiry_id=action["expiry_id"],
+                )
+                if not claimed:
+                    continue
                 subject, body = self._expiry_email(action)
                 if action.get("contact_email"):
                     try:
@@ -863,6 +875,7 @@ class LocalReviewApi:
                     threshold=str(action["threshold"]),
                     summary=subject,
                     delivery=delivery,
+                    dedupe_key=action["dedupe_key"],
                 )
                 self._notify(action["case_id"], "evidence.expiring", subject)
                 notices.append(
@@ -875,6 +888,14 @@ class LocalReviewApi:
                     }
                 )
             else:
+                # Claim before creating the renewal case (one-shot) so a
+                # concurrent/retried sweep cannot open a duplicate.
+                claimed = self._vendor.claim_renewal(
+                    dedupe_key=action["renewal_dedupe_key"],
+                    case_id=action["case_id"],
+                )
+                if not claimed:
+                    continue
                 renewal_case_id = self._open_renewal_case(action)
                 renewals_opened.append(
                     {
@@ -944,6 +965,7 @@ class LocalReviewApi:
             source_case_id=source_case_id,
             renewal_case_id=renewal_case_id,
             expired_evidence_types=action["expired_evidence_types"],
+            sequence=action.get("renewal_sequence"),
         )
         self._notify(
             source_case_id,
