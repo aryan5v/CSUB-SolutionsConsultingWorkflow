@@ -21,6 +21,7 @@ from review_agent.lambda_api import (
     FileWorkspaceStore,
     InMemoryWorkspaceStore,
     SnapshotConflictError,
+    _packet,
     create_handler,
     restore_api,
     seed_workspace,
@@ -1549,3 +1550,25 @@ class LambdaApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PacketRestoreTests(unittest.TestCase):
+    def test_packet_section_with_empty_body_round_trips(self) -> None:
+        # Regression: a packet section body may be empty (e.g. security_summary
+        # with no findings). Restore must accept "" instead of raising, which
+        # previously 500'd every request that restored such a case.
+        packet = _packet(
+            {
+                "packet_id": "CASE-1-packet",
+                "case_id": "CASE-1",
+                "packet_version": 1,
+                "packet_type": "medium_risk",
+                "sections": [
+                    {"key": "security_summary", "title": "Security", "body": ""},
+                    {"key": "recommendation", "title": "Recommendation", "body": "Approve"},
+                ],
+            }
+        )
+        bodies = {section.key: section.body for section in packet.sections}
+        self.assertEqual(bodies["security_summary"], "")
+        self.assertEqual(bodies["recommendation"], "Approve")

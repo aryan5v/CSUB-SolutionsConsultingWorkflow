@@ -1827,7 +1827,10 @@ def _packet(value: dict[str, Any]) -> Packet:
             PacketSection(
                 key=_required_string(item, "key"),
                 title=_required_string(item, "title"),
-                body=_required_string(item, "body"),
+                # A packet section body may legitimately be empty (e.g. a
+                # security_summary with no findings yet). Persist/restore must
+                # round-trip that, so accept any string including "".
+                body=item["body"] if isinstance(item.get("body"), str) else "",
                 editable=item.get("editable") is True,
                 citations=[_citation(citation) for citation in _dict_list(item.get("citations", []))],
             )
