@@ -636,12 +636,19 @@ describe('Weekly vendor reminder scheduling', () => {
       ]),
     });
     const template = platform.toJSON();
-    const schedulerRole = Object.values(template.Resources).find(
-      (resource: any) =>
-        resource.Type === 'AWS::IAM::Role' &&
-        JSON.stringify(resource.Properties.AssumeRolePolicyDocument).includes(
-          'scheduler.amazonaws.com',
-        ),
+    const assumesService = (resource: any, service: string): boolean => {
+      if (resource.Type !== 'AWS::IAM::Role') return false;
+      const statements = resource.Properties.AssumeRolePolicyDocument?.Statement ?? [];
+      return statements.some((statement: any) => {
+        const principal = statement.Principal?.Service;
+        const services = Array.isArray(principal) ? principal : [principal];
+        // Exact service-principal match, not a substring of a stringified doc,
+        // so an attacker-controlled host cannot embed the expected principal.
+        return services.includes(service);
+      });
+    };
+    const schedulerRole = Object.values(template.Resources).find((resource: any) =>
+      assumesService(resource, 'scheduler.amazonaws.com'),
     ) as any;
     const invokeStatement = schedulerRole.Properties.Policies[0].PolicyDocument.Statement[0];
     expect(invokeStatement.Action).toBe('lambda:InvokeFunction');
