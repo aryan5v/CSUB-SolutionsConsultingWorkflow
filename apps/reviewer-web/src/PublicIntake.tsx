@@ -71,6 +71,12 @@ export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
           </ul>
         </div>
       )}
+      {status.adapted_to_intake && (
+        <div className="vp-intake-adaptive-note" role="note">
+          <strong>Tailored to this request</strong>
+          <p>Your campus contact's intake answers determine which documents apply here, so this list may be shorter than a full review.</p>
+        </div>
+      )}
       {status.checklist.length > 0 ? (
         <ul className="vp-file-list">
           {status.checklist.map((item) => (
@@ -86,9 +92,7 @@ export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
           ))}
         </ul>
       ) : (
-        <p className="vp-field-hint">
-          The received/outstanding document checklist appears after intake analysis runs on your submission.
-        </p>
+        <p className="vp-field-hint">The checklist appears after intake analysis.</p>
       )}
     </section>
   );
@@ -292,8 +296,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
             <p className="vp-eyebrow">SECURE VENDOR INTAKE</p>
             <h1 className="vp-h2">Share the evidence you already have.</h1>
             <p className="vp-hero-lead" style={{ marginTop: "0.75rem" }}>
-              Start with files and an official trust-center link, including security and accessibility materials such as HECVAT, SOC 2, and VPAT/ACR.
-              We will only show follow-up questions that remain unresolved for this review.
+              Add security and accessibility files, then answer any remaining questions.
             </p>
           </div>
 
@@ -301,7 +304,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
             <span aria-hidden="true">●</span>
             {reviewApi.mode === "fixture"
               ? "Fixture mode is active. Records and transfers on this page are simulated."
-              : "Live API mode. Your invitation limits this page to one case; uploaded content is treated as untrusted evidence."}
+              : "Live case-specific invitation"}
           </div>
 
           {loading && <div className="vp-intake-result" role="status">Opening your case-scoped invitation…</div>}
@@ -330,11 +333,11 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
               {reviewStatus && <ReviewStatusCard status={reviewStatus} />}
 
               <section className="vp-intake-card" aria-labelledby="evidence-heading">
-                <div><p className="vp-eyebrow">01 / FILES FIRST</p><h2 id="evidence-heading">Evidence files</h2><p className="vp-field-hint">Add multiple current documents. File names and metadata are registered before bytes use a presigned upload.</p></div>
+                <div><p className="vp-eyebrow">01 / FILES FIRST</p><h2 id="evidence-heading">Evidence files</h2><p className="vp-field-hint">Add current security and accessibility documents.</p></div>
                 <div className="vp-dropzone">
                   <label className="vp-btn vp-btn-outline" htmlFor="evidence-files">Choose files</label>
                   <input id="evidence-files" className="vp-file-input" type="file" multiple onChange={chooseFiles} disabled={busy || finalized} />
-                  <p>HECVAT, SOC 2, penetration test, VPAT/ACR, or other product-specific evidence.</p>
+                  <p>HECVAT, SOC 2, penetration test, VPAT/ACR, or similar evidence.</p>
                 </div>
                 <EvidenceProcessingList items={evidenceStatuses} emptyMessage="No evidence has been registered for this invitation yet." />
                 {files.length > 0 && <ul className="vp-file-list" aria-label="Browser upload transfers">
@@ -345,12 +348,12 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
 
               <section className="vp-intake-card" aria-labelledby="trust-heading">
                 <div><p className="vp-eyebrow">02 / OFFICIAL SOURCE</p><h2 id="trust-heading">Trust center</h2></div>
-                <div className="vp-field"><label htmlFor="trust-center">Public HTTPS trust-center URL</label><input id="trust-center" type="url" inputMode="url" value={trustCenterUrl} onChange={(event) => setTrustCenterUrl(event.target.value)} placeholder="https://trust.vendor.example" disabled={busy || finalized} /><span className="vp-field-hint">Saving the link does not browse it or treat vendor claims as campus policy.</span></div>
+                <div className="vp-field"><label htmlFor="trust-center">Public HTTPS trust-center URL</label><input id="trust-center" type="url" inputMode="url" value={trustCenterUrl} onChange={(event) => setTrustCenterUrl(event.target.value)} placeholder="https://trust.vendor.example" disabled={busy || finalized} /></div>
               </section>
 
               <section className="vp-intake-card" aria-labelledby="questions-heading">
-                <div><p className="vp-eyebrow">03 / WHAT REMAINS</p><h2 id="questions-heading">Unresolved questions</h2><p className="vp-field-hint">Saved answers and cited evidence are removed from this list. The active review profile determines what appears.</p></div>
-                {unresolved.length === 0 ? <div className="vp-intake-result"><strong>No unresolved questions are currently returned.</strong><p>Your reviewer will still verify scope, evidence, and any catalog candidate.</p></div> : unresolved.map((question) => (
+                <div><p className="vp-eyebrow">03 / WHAT REMAINS</p><h2 id="questions-heading">Unresolved questions</h2></div>
+                {unresolved.length === 0 ? <div className="vp-intake-result"><strong>No unresolved questions.</strong></div> : unresolved.map((question) => (
                   <fieldset className="vp-question" key={question.requirement_id} disabled={busy || finalized}>
                     <legend>{question.question}</legend>
                     <small>{question.requirement_id} · Expected: {question.expected_evidence.join(", ")}</small>
@@ -366,7 +369,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
                 <button className="vp-btn vp-btn-outline" type="button" onClick={saveProgress} disabled={busy || finalized}>{busy ? "Saving…" : "Save progress"}</button>
                 <button className="vp-btn vp-btn-ink" type="button" onClick={finalize} disabled={busy || finalized}>{finalized ? "Submission finalized" : "Finalize submission"}</button>
               </div>
-              <p className="vp-field-hint">Finalizing freezes this evidence version. It does not approve the product or make an external system change.</p>
+              <p className="vp-field-hint">Finalizing locks this evidence version for review.</p>
             </div>
           )}
         </main>

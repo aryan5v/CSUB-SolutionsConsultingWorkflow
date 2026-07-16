@@ -86,12 +86,75 @@ class SlackWebhookNotifier:
             }
 
 
+# Module-level cache so warm Lambda invocations resolve the Secrets Manager
+# webhook once per container rather than on every request. Keyed by secret ARN.
+_SECRET_WEBHOOK_CACHE: dict[str, str] = {}
+
+
+def _extract_webhook(secret_value: str) -> str | None:
+    """Accept either a raw webhook URL or a JSON envelope ``{"webhook_url": ...}``."""
+    text = secret_value.strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(parsed, dict):
+            candidate = parsed.get("webhook_url") or parsed.get("url")
+            return candidate.strip() if isinstance(candidate, str) and candidate.strip() else None
+        return None
+    return text
+
+
+def _resolve_secret_webhook(secret_arn: str, *, region: str | None) -> str | None:
+    """Resolve a Slack webhook from Secrets Manager. Any failure returns ``None``.
+
+    Never raises: a broken secret must degrade to the simulated fallback rather
+    than crashing the request path. Successful resolutions are cached per ARN
+    for warm-start reuse.
+    """
+    if secret_arn in _SECRET_WEBHOOK_CACHE:
+        return _SECRET_WEBHOOK_CACHE[secret_arn]
+    try:
+        import boto3  # lazy: only needed when resolving a live AWS secret
+
+        client = boto3.client("secretsmanager", region_name=region)
+        response = client.get_secret_value(SecretId=secret_arn)
+        raw = response.get("SecretString")
+        if not raw:
+            return None
+        webhook = _extract_webhook(raw)
+    except Exception:  # noqa: BLE001 - resolution failure degrades to simulated
+        return None
+    if webhook:
+        _SECRET_WEBHOOK_CACHE[secret_arn] = webhook
+    return webhook
+
+
 def build_notifier(config: AppConfig, *, webhook_url: str | None = None) -> Notifier:
-    """Live Slack when a webhook is configured; otherwise the simulated fallback."""
+    """Live Slack when a webhook is configured; otherwise the simulated fallback.
+
+    Resolution order for the webhook credential:
+
+    1. an explicit ``webhook_url`` argument (tests / local live-ping demo),
+    2. the ``SLACK_WEBHOOK_URL`` environment variable,
+    3. a Secrets Manager secret named by ``SLACK_SECRET_ARN`` (the deployed
+       path — the CDK stack injects this ARN and grants read access).
+
+    Any failure to resolve the secret falls back to :class:`SimulatedNotifier`
+    so a misconfigured or unreachable secret never crashes the request path.
+    """
     import os
 
-    url = webhook_url or os.environ.get("SLACK_WEBHOOK_URL") or None
     channel = os.environ.get("SLACK_CHANNEL", "reviewers")
+    url = webhook_url or os.environ.get("SLACK_WEBHOOK_URL") or None
+    if not url:
+        secret_arn = os.environ.get("SLACK_SECRET_ARN") or None
+        if secret_arn:
+            region = getattr(getattr(config, "aws", None), "region", None)
+            url = _resolve_secret_webhook(secret_arn, region=region)
     if url:
         return SlackWebhookNotifier(url, channel=channel)
     return SimulatedNotifier(channel=channel)

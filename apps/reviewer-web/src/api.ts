@@ -1,4 +1,4 @@
-import { reviewerAuth, type ReviewerAuthProvider } from "./auth";
+import { localReviewerAuthBypassEnabled, reviewerAuth, type ReviewerAuthProvider } from "./auth";
 
 export type QueueStatus = "Ready for review" | "Analyzing" | "Needs evidence" | "Completed";
 export type RiskRoute = "Low risk" | "Medium risk" | "Safe escalation" | "Pending route";
@@ -233,6 +233,13 @@ export type VendorSubmission = {
   finalized_at: string | null;
 };
 export type VendorQuestion = { requirement_id: string; question: string; expected_evidence: string[] };
+export type VendorInviteReviewStatus = {
+  review_stage: string;
+  reviewer_comment: string | null;
+  next_actions: string[];
+  required_evidence: string[];
+  adapted_to_intake: boolean;
+};
 export type VendorInviteView = {
   invite: Pick<InviteProjection, "invite_id" | "case_id" | "expires_at" | "status">;
   vendor: Pick<VendorRecord, "vendor_id" | "name">;
@@ -240,6 +247,7 @@ export type VendorInviteView = {
   contact: Pick<VendorContact, "contact_id" | "name" | "email">;
   submission: VendorSubmission;
   questions: VendorQuestion[];
+  review_status?: VendorInviteReviewStatus | null;
 };
 // received: evidence artifact linked to the requirement; processing: unvalidated
 // free-text answer only; accepted/invalid/stale: set by evidence validation
@@ -263,6 +271,8 @@ export type VendorReviewStatus = {
   vendor_visible_comment: string | null;
   next_actions: string[];
   checklist: VendorChecklistItem[];
+  required_evidence?: string[];
+  adapted_to_intake?: boolean;
 };
 export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
 // Reviewer-editable evidence-validation thresholds (issue #52). A null threshold
@@ -394,6 +404,22 @@ export type PacketPdfResponse = {
   pdf_sha256?: string | null;
   simulated?: boolean;
 };
+export type ServiceNowImportPreview = {
+  simulated: true;
+  mapping_version: string;
+  record_id: string;
+  record_version: number;
+  source: Record<string, unknown>;
+  field_mapping: Record<string, string>;
+  mapped_values: CaseIntakeInput;
+};
+export type ServiceNowImportCreateResponse = {
+  preview: ServiceNowImportPreview;
+  case: { case_id: string; state: ReviewState };
+  invite?: InviteProjection | null;
+  intake_url?: string | null;
+  invite_pending?: boolean;
+};
 export type ReviewerRecordContext = {
   invites: InviteProjection[];
   contacts: VendorContact[];
@@ -417,7 +443,7 @@ export class ReviewApiError extends Error {
 }
 
 type FetchLike = typeof fetch;
-type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike; authProvider?: ReviewerAuthProvider };
+type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike; authProvider?: ReviewerAuthProvider; authBypass?: boolean };
 
 function configuredMode(): ApiMode {
   return import.meta.env.VITE_REVIEW_DATA_MODE === "fixture" ? "fixture" : "live";
@@ -496,6 +522,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
   const mode = options.mode ?? configuredMode();
   const runFetch = (input: RequestInfo | URL, init?: RequestInit) => (options.fetchImpl ?? globalThis.fetch)(input, init);
   const authProvider = options.authProvider ?? reviewerAuth;
+  const authBypass = options.authBypass ?? localReviewerAuthBypassEnabled();
   const fixture = createFixtureAdapter();
 
   function fixtureInviteView(markOpen = false): VendorInviteView {
@@ -516,6 +543,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       contact: { contact_id: fixture.contacts[0].contact_id, name: fixture.contacts[0].name, email: fixture.contacts[0].email },
       submission: { ...fixture.submission, answers: { ...fixture.submission.answers }, evidence_artifact_ids: [...fixture.submission.evidence_artifact_ids], coverage_ids: [...fixture.submission.coverage_ids] },
       questions: suppressResolvedQuestions(fixture.questions, fixture.submission.answers, fixture.covered),
+      review_status: { review_stage: "vendor_intake", reviewer_comment: null, next_actions: [], required_evidence: ["security document", "vpat_acr"], adapted_to_intake: true },
     };
   }
 
@@ -541,7 +569,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...init?.headers,
     });
     if (!headers.has("X-Correlation-Id")) headers.set("X-Correlation-Id", secureCorrelationId());
-    if (audience === "reviewer") {
+    if (audience === "reviewer" && !authBypass) {
       const accessToken = authProvider.getAccessToken();
       if (!accessToken) {
         throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.", headers.get("X-Correlation-Id"));
@@ -554,7 +582,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     });
     const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string; correlation_id?: string } };
     if (!response.ok) {
-      if (audience === "reviewer" && response.status === 401) authProvider.handleUnauthorized();
+      if (audience === "reviewer" && !authBypass && response.status === 401) authProvider.handleUnauthorized();
       const correlationId = payload?.error?.correlation_id || response.headers.get("X-Correlation-Id") || headers.get("X-Correlation-Id");
       throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`, correlationId);
     }
@@ -584,15 +612,21 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/cases", { method: "POST", body: JSON.stringify(input) });
     },
-    analyzeCase(caseId: string, confirmedMatchId?: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: "alex.reviewer@example.edu" } : {}) });
+    previewServiceNowImport(externalId: string): Promise<ServiceNowImportPreview> {
+      return request(`/servicenow/imports/${encodeURIComponent(externalId)}/preview`);
+    },
+    createFromServiceNowImport(externalId: string): Promise<ServiceNowImportCreateResponse> {
+      return request(`/servicenow/imports/${encodeURIComponent(externalId)}/create`, { method: "POST" });
+    },
+    analyzeCase(caseId: string, confirmedMatchId?: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: reviewerId } : {}) });
     },
     getCaseResearch(caseId: string): Promise<CaseResearchResponse> {
       if (mode === "fixture") return fixtureOnly({ case_id: caseId, research_performed: false, research: null });
       return request(`/cases/${encodeURIComponent(caseId)}/research`);
     },
-    rerunAnalysis(caseId: string, customInstruction: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: "alex.reviewer@example.edu", rerun: true, custom_instruction: customInstruction }) });
+    rerunAnalysis(caseId: string, customInstruction: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: reviewerId, rerun: true, custom_instruction: customInstruction }) });
     },
     recordDecision(caseId: string, decision: ReviewDecisionInput): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/review`, { method: "POST", body: JSON.stringify({ case_id: caseId, ...decision }) });

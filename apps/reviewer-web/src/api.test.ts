@@ -91,6 +91,18 @@ describe("secure correlation identifiers", () => {
 });
 
 describe("review API client", () => {
+  it("omits reviewer authorization only when the caller explicitly enables the local bypass", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    const provider = authProvider("");
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: provider, authBypass: true });
+
+    await client.listQueue();
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Headers;
+    expect(headers.has("Authorization")).toBe(false);
+    expect(provider.getAccessToken).not.toHaveBeenCalled();
+  });
+
   it("loads and maps review queue items", async () => {
     const item: QueueItem = {
       case_id: "TR-260714-014",
@@ -192,7 +204,7 @@ describe("review API client", () => {
     await client.analyzeCase("TR-260714-014", "approved-row-172");
     await client.recordDecision("TR-260714-014", {
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "approve",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal reviewer note",
@@ -204,7 +216,7 @@ describe("review API client", () => {
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       confirmed_match_id: "approved-row-172",
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
     });
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
       case_id: "TR-260714-014",
@@ -230,7 +242,7 @@ describe("review API client", () => {
 
     await client.recordDecision("TR-260714-014", {
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "request_info",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal note",
@@ -241,7 +253,7 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       case_id: "TR-260714-014",
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "request_info",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal note",
@@ -271,7 +283,7 @@ describe("review API client", () => {
           human_decision: {
             case_id: "TR-260714-014",
             decision_version: 2,
-            reviewer_id: "alex.reviewer@example.edu",
+            reviewer_id: "reviewer@vetted.local",
             action: "approve",
           },
         }),
@@ -529,5 +541,52 @@ describe("live and adaptive behavior", () => {
     await expect(client.analyzeCase("fixture-case")).rejects.toMatchObject({ code: "fixture_network_blocked" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+  });
+});
+
+describe("vendor contacts live CRUD", () => {
+  it("lists contacts from the live /vendor-contacts endpoint", async () => {
+    const contact = {
+      workspace_id: "csub-demo",
+      contact_id: "contact-1",
+      vendor_id: "vendor-1",
+      name: "Jordan Vendor",
+      email: "jordan@vendor.example",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [contact] }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const contacts = await client.listContacts();
+
+    expect(contacts).toEqual([contact]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts", expect.any(Object));
+  });
+
+  it("scopes the live contact list by vendor id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await client.listContacts("vendor-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts?vendor_id=vendor-1", expect.any(Object));
+  });
+
+  it("creates a contact with a POST to /vendor-contacts", async () => {
+    const created = {
+      workspace_id: "csub-demo",
+      contact_id: "contact-2",
+      vendor_id: "vendor-1",
+      name: "Riley Vendor",
+      email: "riley@vendor.example",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(created));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.createContact({ vendor_id: "vendor-1", name: "Riley Vendor", email: "riley@vendor.example" });
+
+    expect(result).toEqual(created);
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts", expect.objectContaining({ method: "POST" }));
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ vendor_id: "vendor-1", name: "Riley Vendor", email: "riley@vendor.example" });
   });
 });

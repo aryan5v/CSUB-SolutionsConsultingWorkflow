@@ -132,23 +132,23 @@ function CheckMark() {
 const steps: Array<{ n: string; title: string; body: string; tile: TileVariant }> = [
   {
     n: "01",
-    title: "Security and accessibility specialists read the evidence",
+    title: "Specialists read the evidence",
     body:
-      "After intake and the catalog lookup, versioned security and accessibility profiles run in parallel against case-scoped evidence, including HECVAT, SOC 2, VPAT/ACR, and similar materials. Approved research on official vendor domains fills gaps that the evidence supports. A citation checker removes any claim the sources do not back.",
+      "Security and accessibility profiles review case-specific HECVAT, SOC 2, VPAT/ACR, and related evidence in parallel. Each finding keeps its source.",
     tile: "doc",
   },
   {
     n: "02",
     title: "Deterministic rules set the route",
     body:
-      "Ordinary code, not the model, applies the versioned flowchart and decision-tree rules. It returns the risk route, the required evidence, the conflicts, and the citations. A model can explain that result. It cannot change it.",
+      "Versioned rules return the risk route, required evidence, conflicts, and citations. The assistant can explain the result, but the rules set it.",
     tile: "spark",
   },
   {
     n: "03",
     title: "A person makes the decision",
     body:
-      "Reviewers see the merged security and accessibility findings and the drafted low or medium risk packet, confirm any fuzzy match, then approve, reject, or ask for more information. Write-back needs a second explicit confirmation and goes to a mock ServiceNow connector.",
+      "A reviewer checks the findings, confirms non-exact matches, and approves, rejects, or requests more information. Mock ServiceNow write-back needs a second confirmation.",
     tile: "check",
   },
 ];
@@ -157,7 +157,7 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
   {
     title: "Approved-software flag",
     body:
-      "If the product is already on the export, Vetted shows it as a candidate. If it is not, the case gets a flag for review rather than an automatic rejection. Fuzzy or semantic matches still need a reviewer to confirm them. Catalog membership is never blanket approval.",
+      "Vetted checks the approved-software export and shows possible matches. A missing entry is a review flag, not an automatic rejection. Reviewers confirm non-exact matches.",
     iconBg: "#F7DC6F",
     icon: (
       <path d="M3 10H9M9 10L13 5H17M9 10L13 15H17M15 3L17 5L15 7M15 13L17 15L15 17" fill="none" stroke="#333333" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -166,7 +166,7 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
   {
     title: "Security and accessibility specialists",
     body:
-      "Specialists extract and summarize security, accessibility, and evidence findings in parallel. The business-rules engine calculates the risk route and required documents from partner flowcharts and decision trees. The model drafts. The rules hold the policy.",
+      "Specialists extract and summarize findings in parallel. The rules engine calculates the route and required documents from versioned campus criteria.",
     iconBg: "#3178C6",
     icon: (
       <>
@@ -178,7 +178,7 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
   {
     title: "The reviewer decides",
     body:
-      "The reviewer gets a low-risk recommendation or an editable medium-risk TAAP and security packet that includes accessibility findings. High-risk, contradictory, unsupported, or incomplete cases escalate. Nothing is approved, signed, or written to ServiceNow without a recorded human decision.",
+      "The reviewer receives an editable packet with security and accessibility findings. High-risk, conflicting, unsupported, or incomplete cases escalate.",
     iconBg: "#333333",
     icon: (
       <>
@@ -190,9 +190,9 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
 ];
 
 const stats: Array<{ value: string; label: string }> = [
-  { value: "Extract", label: "security and accessibility specialists pull facts from policies, HECVAT, SOC 2, VPAT, and similar sources" },
-  { value: "Route", label: "deterministic rules set the risk path: low, medium, or escalate" },
-  { value: "Decide", label: "the reviewer approves, rejects, or asks for more information" },
+  { value: "Extract", label: "Specialists pull cited facts from the submitted evidence." },
+  { value: "Route", label: "Versioned rules set the risk path." },
+  { value: "Decide", label: "A reviewer makes the final call." },
 ];
 
 export default function Landing() {
@@ -208,11 +208,8 @@ export default function Landing() {
             Vetted
           </a>
           <nav className="vp-nav-actions" aria-label="Account">
-            <a className="vp-nav-login" href="/login">
-              Sign in
-            </a>
-            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/signup">
-              Create account
+            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/login">
+              Reviewer sign in
             </a>
           </nav>
         </header>
@@ -242,17 +239,16 @@ export default function Landing() {
               Decision out.
             </h1>
             <p className="vp-hero-lead land-fade-up-delay">
-              Requesters submit proposed software and vendor evidence. Vetted checks the approved-software export,
-              runs parallel security and accessibility specialists, applies deterministic policy rules, and drafts a cited packet.
-              A reviewer then makes the final call.
+              Vetted checks proposed software, reviews security and accessibility evidence, applies versioned rules,
+              and drafts a cited packet for a reviewer.
             </p>
             <div className="vp-cta-row land-fade-up-delay">
-              <a className="vp-btn vp-btn-ink" href="/signup">
-                Create account
+              <a className="vp-btn vp-btn-ink" href="/login">
+                Reviewer sign in
                 <ArrowIcon />
               </a>
-              <a className="vp-btn vp-btn-primary" href="/login">
-                Sign in
+              <a className="vp-btn vp-btn-primary" href="/intake">
+                Submit vendor evidence
               </a>
             </div>
             <ul className="vp-checks land-fade-up-delay-2">
@@ -287,7 +283,7 @@ export default function Landing() {
                   <circle cx="7.5" cy="7.5" r="7" fill="#3178C6" />
                   <path d="M4.5 7.8L6.6 9.9L10.5 5.5" fill="none" stroke="#FFFFFF" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                Flag only, still waiting on human review
+                Flagged for review
               </div>
             </div>
           </div>
@@ -328,7 +324,7 @@ export default function Landing() {
         <section className="vp-block" id="workflow" aria-labelledby="workflow-heading">
           <div className="vp-header">
             <p className="vp-eyebrow">HOW A REVIEW RUNS</p>
-            <h2 className="vp-h2" id="workflow-heading">You hand over the documents. Three layers finish the review.</h2>
+            <h2 className="vp-h2" id="workflow-heading">From evidence to a reviewer decision.</h2>
           </div>
           <div className="vp-steps">
             {steps.map((step) => (
@@ -409,10 +405,9 @@ export default function Landing() {
               <rect width="1056" height="320" fill="url(#ctaBlue)" />
             </svg>
             <div className="vp-cta-copy">
-              <h2 className="vp-cta-title" id="cta-heading">From request to mock ServiceNow, with a person in the middle.</h2>
+              <h2 className="vp-cta-title" id="cta-heading">Start a review with the evidence you have.</h2>
               <p className="vp-cta-lead">
-                The path runs frontend, APIs, storage, LangGraph security and accessibility specialists, business rules,
-                the reviewer workspace, and the mock ServiceNow connector, on AWS.
+                Track the request, evidence, policy route, reviewer decision, and mock ServiceNow handoff in one workspace.
               </p>
               <a className="vp-btn vp-btn-primary" href="/intake">
                 Submit a vendor for review
@@ -431,7 +426,6 @@ export default function Landing() {
           </div>
           <nav className="vp-footer-links" aria-label="Footer">
             <a href="/login">Sign in</a>
-            <a href="/signup">Create account</a>
             <a href="/intake">Submit a vendor</a>
             <span className="vp-footer-copy">CSU AI Summer Camp 2026</span>
           </nav>

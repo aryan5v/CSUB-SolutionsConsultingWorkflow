@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Building2, Package, Search, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Building2, Package, Search } from "lucide-react";
 import { ReviewApiError, reviewApi, type CatalogListItem } from "./api";
 import "./workspace.css";
-
-type Notify = (message: string) => void;
 
 function errorMessage(error: unknown): string {
   return error instanceof ReviewApiError || error instanceof Error ? error.message : "The catalog request failed.";
@@ -19,14 +17,13 @@ function flagTone(flag: string | null | undefined): string {
 
 const PAGE_SIZE = 20;
 
-export function CatalogPage({ notify }: { notify: Notify }) {
+export function CatalogPage() {
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<CatalogListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const notified = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -38,10 +35,6 @@ export function CatalogPage({ notify }: { notify: Notify }) {
         setItems(response.items);
         setTotal(response.total);
         setLoading(false);
-        if (!notified.current) {
-          notified.current = true;
-          notify("Catalog rows are lookup results. Membership is not blanket approval.");
-        }
       }).catch((reason) => {
         if (!active) return;
         setError(errorMessage(reason));
@@ -50,7 +43,7 @@ export function CatalogPage({ notify }: { notify: Notify }) {
       });
     }, 200);
     return () => { active = false; window.clearTimeout(handle); };
-  }, [query, offset, notify]);
+  }, [query, offset]);
 
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -66,7 +59,7 @@ export function CatalogPage({ notify }: { notify: Notify }) {
       <div>
         <p className="workspace-eyebrow">Records / Approved-software catalog</p>
         <h1>Software catalog</h1>
-        <p>Search the approved-software export. Each row shows the vendor, product, support, and license fields as recorded. A catalog row can support a review; it is not blanket approval for a product, use case, or evidence version.</p>
+        <p>Search the approved-software export.</p>
       </div>
       <div className={`record-mode record-mode-${reviewApi.mode}`}><i />{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : "Live API mode"}</div>
     </header>
@@ -79,14 +72,14 @@ export function CatalogPage({ notify }: { notify: Notify }) {
           <input
             value={query}
             onChange={(event) => { setOffset(0); setQuery(event.target.value); }}
-            placeholder="Search by product or vendor…"
+            placeholder="Search by product or vendor"
             type="search"
           />
         </label>
         <span className="catalog-range">{rangeLabel}</span>
       </div>
 
-      {error && <div className="record-api-error" role="alert"><strong>Catalog request failed.</strong><span>{error}</span><small>{reviewApi.mode === "live" ? "Live failures are not replaced with fixture data." : "This failure occurred in the explicit fixture adapter."}</small></div>}
+      {error && <div className="record-api-error" role="alert"><strong>Catalog request failed.</strong><span>{error}</span></div>}
 
       <div className="catalog-columns" aria-hidden="true"><span>Product</span><span>Vendor</span><span>Platform / audience</span><span>Support</span><span>License</span><span>Source</span></div>
 
@@ -109,7 +102,6 @@ export function CatalogPage({ notify }: { notify: Notify }) {
       </div>
 
       <div className="catalog-footer">
-        <div className="catalog-boundary"><ShieldCheck size={15} /><span>Catalog membership is a lookup result, never blanket approval. Fuzzy and semantic matches still need a reviewer to confirm them.</span></div>
         <div className="catalog-pagination">
           <button type="button" onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} disabled={loading || offset === 0}>Previous</button>
           <span>Page {page} of {pageCount}</span>
