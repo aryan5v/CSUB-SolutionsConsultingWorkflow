@@ -1,7 +1,8 @@
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; margin: -1px; padding: 0; border: 0; clip: rect(0 0 0 0); white-space: nowrap; }
 .workspace-intro { display:flex; align-items:flex-end; justify-content:space-between; gap:22px; margin-bottom:24px; }
 .workspace-intro h1 { margin-bottom:8px; }
 .workspace-intro > div:first-child > p:last-child { max-width:720px; margin:0; color:var(--text-muted); font-size:11px; line-height:1.6; }
-.workspace-eyebrow { margin:0 0 7px; color:var(--text-faint); font:700 13px/1.25 var(--mono); letter-spacing:.085em; text-transform:uppercase; }
+.workspace-eyebrow { margin:0 0 7px; color:var(--text-muted); font:700 13px/1.25 var(--mono); letter-spacing:.085em; text-transform:uppercase; }
 .workspace-actions { display:flex; gap:8px; }
 .workspace-panel { min-width:0; border:1px solid var(--border); border-radius:8px; background:var(--card); box-shadow:var(--shadow-sm); }
 .workspace-dither-button { display:inline-flex; min-height:34px; align-items:center; justify-content:center; gap:7px; padding:0 12px; border:1px solid color-mix(in srgb, var(--brand-yellow), #8a6415 25%); border-radius:6px; background:var(--brand-yellow); color:#172033; font-family:var(--sans); font-size:14px; font-weight:750; white-space:nowrap; }
@@ -41,7 +42,7 @@
 .workspace-detail-actions { display:flex; flex-wrap:wrap; gap:7px; margin:17px 0; }
 .workspace-definition-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin:0; border-top:1px solid var(--border); border-left:1px solid var(--border); }
 .workspace-definition-grid > div { padding:10px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); }
-.workspace-definition-grid dt, .workflow-version-grid dt, .chat-context dt { margin-bottom:4px; color:var(--text-faint); font:700 12px/1.2 var(--mono); text-transform:uppercase; }
+.workspace-definition-grid dt, .workflow-version-grid dt, .chat-context dt { margin-bottom:4px; color:var(--text-muted); font:700 12px/1.2 var(--mono); text-transform:uppercase; }
 .workspace-definition-grid dd, .workflow-version-grid dd, .chat-context dd { margin:0; color:var(--text-secondary); font-size:13px; font-weight:620; }
 .workspace-detail-section { padding:15px 0; border-bottom:1px solid var(--border); }
 .workspace-detail-section > p:last-child { margin:8px 0 0; color:var(--text-muted); font-size:13px; line-height:1.55; }

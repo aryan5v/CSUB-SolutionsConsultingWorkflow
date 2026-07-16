@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { LockKeyhole, LogOut, ShieldCheck } from "lucide-react";
 import { reviewerAuth, type ReviewerAuthProvider, type ReviewerAuthSnapshot } from "./auth";
+import "./app.css";
 
 export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolean {
   return mode === "live";
