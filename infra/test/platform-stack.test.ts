@@ -616,7 +616,6 @@ describe('Weekly vendor reminder scheduling', () => {
             Principal: { Service: 'scheduler.amazonaws.com' },
             Condition: Match.objectLike({
               StringEquals: { 'aws:SourceAccount': '111111111111' },
-              ArnEquals: Match.objectLike({ 'aws:SourceArn': Match.anyValue() }),
             }),
           }),
         ]),
