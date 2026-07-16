@@ -353,6 +353,18 @@ paths:
       summary: Run the weekly reminder sweep for missing or incomplete vendor evidence.
       description: At most one reminder per case per cadence period; a deterministic reminder:{case_id}:{period} claim is persisted before each send so concurrent or retried sweeps never duplicate one. Failed deliveries are retried (bounded) on later sweeps. Each attempt is recorded as an email.reminder integration event with its truthful delivery mode and a hashed recipient. Intended to be triggered weekly by a scheduler.
       responses: {"200": {description: Reminders sent this sweep (empty when none are due).}}
+  /renewals:
+    get:
+      tags: [review]
+      summary: Post-approval expiry monitoring projection (issue 53).
+      description: Latest validated expiry per approved case and evidence type, with current/expiring/expired state and any open renewal case. Historical approvals are projected, never mutated.
+      responses: {"200": {description: Expiry monitoring items.}}
+  /renewals/run:
+    post:
+      tags: [review]
+      summary: Run the expiry-monitoring sweep for approved evidence (issue 53).
+      description: Sends deduplicated lead-time (default 60/30/7 day) and expiration notices, and opens one scoped re-review case per approval whose evidence expired. Idempotent; intended to be triggered daily by a scheduler.
+      responses: {"200": {description: Notices sent and renewal cases opened this sweep.}}
   /cases/{id}/reminders:
     get:
       tags: [vendor-intake]

@@ -550,6 +550,66 @@ describe('API authorization boundaries', () => {
     expect(byKey.has('GET /intake/{token}')).toBe(false);
   });
 
+  test('registers the reviewer renewals routes under the JWT authorizer', () => {
+    const { platform } = build(baseConfig);
+    const routes = Object.values(platform.findResources('AWS::ApiGatewayV2::Route')).map(
+      (r: any) => r.Properties,
+    );
+    const byKey = new Map<string, any>(routes.map((r) => [r.RouteKey, r]));
+    for (const key of ['GET /renewals', 'POST /renewals/run']) {
+      expect(byKey.get(key)).toBeDefined();
+      expect(byKey.get(key).AuthorizationType).toBe('JWT');
+      expect(byKey.get(key).AuthorizerId).toBeDefined();
+    }
+  });
+
+  test('a durable EventBridge Scheduler invokes the daily expiry sweep', () => {
+    const { platform } = build(baseConfig);
+    // Two schedules: the weekly vendor-reminder sweep (issue #37) and this
+    // daily expiry-monitoring sweep (issue #53), asserted separately below.
+    platform.resourceCountIs('AWS::Scheduler::Schedule', 2);
+    const schedule = Object.values(
+      platform.findResources('AWS::Scheduler::Schedule'),
+    ).find((resource: any) => resource.Properties.ScheduleExpression === 'rate(1 day)') as any;
+    expect(schedule).toBeDefined();
+    expect(schedule.Properties.ScheduleExpression).toBe('rate(1 day)');
+    expect(schedule.Properties.State).toBe('ENABLED');
+    expect(schedule.Properties.FlexibleTimeWindow).toEqual({ Mode: 'OFF' });
+    // Fires the deterministic renewals sweep via a direct Lambda invoke.
+    expect(JSON.parse(schedule.Properties.Target.Input)).toEqual({
+      scheduled_task: 'renewals_run',
+    });
+    const proxyLambdaId = Object.keys(platform.findResources('AWS::Lambda::Function')).find(
+      (id) => id.startsWith('CaseProxyFunction'),
+    );
+    expect(JSON.stringify(schedule.Properties.Target.Arn)).toContain(proxyLambdaId);
+
+    // The Scheduler role may invoke only the case proxy function.
+    const policies = Object.values(platform.findResources('AWS::IAM::Policy')) as any[];
+    const invokeStatements = policies.flatMap((policy) =>
+      policy.Properties.PolicyDocument.Statement.filter((statement: any) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('lambda:InvokeFunction');
+      }),
+    );
+    const schedulerInvoke = invokeStatements.filter((statement: any) =>
+      JSON.stringify(statement.Resource).includes(proxyLambdaId ?? '__none__'),
+    );
+    expect(schedulerInvoke.length).toBeGreaterThan(0);
+    platform.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Principal: { Service: 'scheduler.amazonaws.com' },
+            Condition: Match.objectLike({
+              StringEquals: Match.objectLike({ 'aws:SourceAccount': '111111111111' }),
+            }),
+          }),
+        ]),
+      },
+    });
+  });
+
   test('uses one API-scoped Lambda invoke permission for all routes', () => {
     const { platform } = build(baseConfig);
     const permissions = Object.values(
@@ -590,7 +650,9 @@ describe('API authorization boundaries', () => {
 describe('Weekly vendor reminder scheduling', () => {
   test('invokes the case Lambda weekly in Pacific time with a fixed task and bounded retries', () => {
     const { platform } = build(baseConfig);
-    platform.resourceCountIs('AWS::Scheduler::Schedule', 1);
+    // Two schedules: this weekly vendor-reminder sweep (issue #37) and the
+    // daily expiry-monitoring sweep (issue #53), asserted separately above.
+    platform.resourceCountIs('AWS::Scheduler::Schedule', 2);
     platform.hasResourceProperties('AWS::Scheduler::Schedule', {
       Name: 'csub-vendor-reminders-test',
       ScheduleExpression: 'cron(0 9 ? * MON *)',

@@ -248,6 +248,82 @@ class EvidenceValidationFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceExpiryRecord:
+    """When a validated, time-bound evidence document stops being current (issue #53).
+
+    Created only from fields that passed content validation; documents without
+    a validated date are never monitored. ``expires_on`` is an ISO date.
+
+    Per issue #53 the record also carries the *approval context* needed to act
+    on an expiry without re-deriving it: the approval scope (product, use case,
+    scope), the owner and vendor contact, the profile/policy versions the
+    approval rested on, the evidence version (document SHA-256), and an explicit
+    ``state`` (``active`` while it is the current record for its chain,
+    ``superseded`` once refreshed evidence replaces it).
+    """
+
+    expiry_id: str
+    case_id: str
+    submission_id: str
+    artifact_id: str
+    filename: str
+    evidence_type: str
+    expires_on: str
+    source_citation: dict[str, Any]
+    # Approval context (issue #53: store scope, versions, owner, contact, state).
+    approval_scope: dict[str, Any] = field(default_factory=dict)
+    owner: str | None = None
+    contact_id: str | None = None
+    profile_version_ids: tuple[str, ...] = ()
+    evidence_version: str | None = None
+    state: str = "active"  # active | superseded
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["profile_version_ids"] = list(self.profile_version_ids)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class RenewalRecord:
+    """A scoped re-review opened because approved evidence expired (issue #53).
+
+    Links the historical approval (never mutated) to the new immutable case
+    that collects refreshed evidence.
+
+    ``state`` is an explicit lifecycle (issue #53: "mark ... current, expiring,
+    expired, superseded, or manual review"): a renewal is ``open`` while it is
+    awaiting refreshed evidence and only an ``open`` renewal blocks opening a
+    new one; it becomes ``completed`` when refreshed evidence is recorded on its
+    case, ``superseded`` if a newer renewal replaces it, or ``closed`` when a
+    reviewer stops it. ``sequence`` is a monotonic, collision-free index within
+    the source case's renewal chain (never ``len(existing)+1``). The record also
+    carries the approval scope, owner, and vendor contact so acting on it needs
+    no re-derivation.
+    """
+
+    renewal_id: str
+    source_case_id: str
+    renewal_case_id: str
+    expired_evidence_types: tuple[str, ...]
+    opened_at: str
+    sequence: int = 0
+    state: str = "open"  # open | completed | superseded | closed
+    approval_scope: dict[str, Any] = field(default_factory=dict)
+    owner: str | None = None
+    contact_id: str | None = None
+    closed_at: str | None = None
+    superseded_by: str | None = None
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["expired_evidence_types"] = list(self.expired_evidence_types)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageItem:
     coverage_id: str
     submission_id: str

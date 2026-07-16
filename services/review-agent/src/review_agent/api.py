@@ -12,7 +12,7 @@ import datetime
 import hashlib
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .adapters.email import EmailSender, build_email_sender
@@ -1091,6 +1091,148 @@ class LocalReviewApi:
         )
         subject = f"Reminder: evidence still needed for {candidate['product_name']}"
         return subject, "\n".join(lines)
+
+    def list_renewals(self) -> dict[str, Any]:
+        """Reviewer projection of post-approval evidence expiry (issue #53)."""
+        return {"items": self._vendor_call(self._vendor.expiry_status), "simulated": True}
+
+    def run_expiry_sweep(self) -> dict[str, Any]:
+        """Notify on expiring approved evidence and open scoped re-reviews (issue #53).
+
+        Safe under concurrency/retry: every notice and renewal opening claims a
+        persisted ledger record *before* its side effect (issue #37
+        ``ReminderClaim`` pattern), so interleaved or repeated sweeps send each
+        notice once and open each renewal case once (finding 4). Only successful
+        sends satisfy the cadence; a transient failure marks the claim failed
+        and is retried on a later sweep (finding 2). The historical approval is
+        never mutated — expiration opens a new immutable case for refreshed
+        evidence and surfaces it to reviewers.
+        """
+        notices: list[dict[str, Any]] = []
+        renewals_opened: list[dict[str, Any]] = []
+        for action in self._vendor_call(self._vendor.expiry_actions):
+            if action["kind"] == "notice":
+                # Claim before sending so a concurrent/retried sweep cannot
+                # double-send; a lost claim (already pending/sent) skips.
+                claimed = self._vendor.claim_expiry_notice(
+                    dedupe_key=action["dedupe_key"],
+                    case_id=action["case_id"],
+                    expiry_id=action["expiry_id"],
+                )
+                if not claimed:
+                    continue
+                subject, body = self._expiry_email(action)
+                if action.get("contact_email"):
+                    delivery = self._send_email(
+                        to=action["contact_email"], subject=subject, body=body
+                    )
+                else:
+                    delivery = {"delivery": "skipped", "simulated": True, "channel": "email"}
+                self._vendor.record_expiry_notice(
+                    expiry_id=action["expiry_id"],
+                    case_id=action["case_id"],
+                    threshold=str(action["threshold"]),
+                    summary=subject,
+                    delivery=delivery,
+                    dedupe_key=action["dedupe_key"],
+                )
+                self._notify(action["case_id"], "evidence.expiring", subject)
+                notices.append(
+                    {
+                        "case_id": action["case_id"],
+                        "evidence_type": action["evidence_type"],
+                        "threshold": action["threshold"],
+                        "expires_on": action["expires_on"],
+                        "delivery": delivery.get("delivery"),
+                    }
+                )
+            else:
+                # Claim before creating the renewal case (one-shot) so a
+                # concurrent/retried sweep cannot open a duplicate.
+                claimed = self._vendor.claim_renewal(
+                    dedupe_key=action["renewal_dedupe_key"],
+                    case_id=action["case_id"],
+                )
+                if not claimed:
+                    continue
+                renewal_case_id = self._open_renewal_case(action)
+                renewals_opened.append(
+                    {
+                        "source_case_id": action["case_id"],
+                        "renewal_case_id": renewal_case_id,
+                        "expired_evidence_types": action["expired_evidence_types"],
+                    }
+                )
+        return {
+            "notices": notices,
+            "renewals_opened": renewals_opened,
+            "count": len(notices) + len(renewals_opened),
+            "simulated": True,
+        }
+
+    _EVIDENCE_LABELS = {
+        "coi": "certificate of insurance",
+        "pentest": "penetration test report",
+        "pci": "PCI attestation of compliance",
+    }
+
+    def _expiry_email(self, action: dict[str, Any]) -> tuple[str, str]:
+        """Deterministic expiry-notice copy (issue #53)."""
+        label = self._EVIDENCE_LABELS.get(action["evidence_type"], action["evidence_type"])
+        product = action["product_name"]
+        if action["threshold"] == "expired":
+            headline = f"has expired ({action['expires_on']})"
+            subject = f"Evidence expired for {product}: {label}"
+        else:
+            headline = f"expires {action['expires_on']}"
+            subject = f"Evidence expiring for {product}: {label}"
+        greeting = f"Hello {action['contact_name']}," if action.get("contact_name") else "Hello,"
+        body = "\n".join(
+            [
+                greeting,
+                "",
+                f"The {label} on file for the approved review of {product} {headline}.",
+                "",
+                "Please prepare a refreshed document. The campus team will send a "
+                "new submission link for the update; reply to this email if you "
+                "have questions or need more time.",
+            ]
+        )
+        return subject, body
+
+    def _open_renewal_case(self, action: dict[str, Any]) -> str:
+        """Open the scoped re-review case for expired approved evidence.
+
+        A new immutable case collects the refreshed evidence; the historical
+        approval and its packet are never mutated. Invites stay reviewer-issued
+        (human-owned), so the case lands in the queue rather than auto-mailing
+        a new link.
+        """
+        source_case_id = action["case_id"]
+        record = self._require_case(source_case_id)
+        renewal_case_id = action["renewal_case_id"]
+        expired = ", ".join(action["expired_evidence_types"])
+        intake = replace(
+            record.state.case_input,
+            use_case=(
+                f"Scoped re-review of {source_case_id}: refresh expired evidence "
+                f"({expired}). Original approval remains recorded and unchanged."
+            ),
+        )
+        self._add_case(renewal_case_id, intake)
+        self._vendor.record_renewal(
+            source_case_id=source_case_id,
+            renewal_case_id=renewal_case_id,
+            expired_evidence_types=action["expired_evidence_types"],
+            sequence=action.get("renewal_sequence"),
+        )
+        self._notify(
+            source_case_id,
+            "renewal.case_opened",
+            f"Approved evidence expired for case {source_case_id} ({expired}); "
+            f"scoped re-review case {renewal_case_id} opened for refreshed evidence.",
+        )
+        return renewal_case_id
 
     def reminder_history(self, case_id: str) -> dict[str, Any]:
         """Reviewer-facing reminder attempts and pause state for one case."""
