@@ -57,6 +57,9 @@ scroll-only dropdown. Email delivery is `simulated` locally; the deployed
 Lambda sends live SES email when the stack is deployed with a verified sender
 (`-c vendorEmailSender=...` or `VENDOR_EMAIL_SENDER`), which also grants the
 scoped `ses:SendEmail` permission (issue #85 tracks requester notifications).
+Deployed emails link to the CloudFront `/intake` page (`VENDOR_INTAKE_BASE_URL`)
+and reuse a stable Secrets Manager sealed-link key (`VENDOR_LINK_SECRET_ARN`)
+so invitation and reminder emails repeat the same working link across restarts.
 The reviewer UI still shows a copyable intake link either way. Vendor
 `review_status` (`pending_review` / `accepted` / `declined`) is derived from
 linked case lifecycles — it is not a stored Vendor table key and does not

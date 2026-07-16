@@ -146,20 +146,55 @@ def _default_evidence_storage(config: AppConfig) -> StorageClient:
     return InMemoryStorage()
 
 
+# Warm-start cache so each Lambda container resolves the link secret once,
+# mirroring the Slack webhook secret cache in adapters.notifications.
+_LINK_SECRET_CACHE: dict[str, bytes] = {}
+
+
+def _resolve_link_secret(secret_arn: str) -> bytes | None:
+    """Resolve the sealed-link HMAC key from Secrets Manager; None on failure.
+
+    A resolution failure degrades to the process-local secret (links stay
+    functional within one container) rather than crashing the request path.
+    """
+    if secret_arn in _LINK_SECRET_CACHE:
+        return _LINK_SECRET_CACHE[secret_arn]
+    try:
+        import boto3  # lazy: only needed when resolving a live AWS secret
+
+        client = boto3.client("secretsmanager")
+        raw = client.get_secret_value(SecretId=secret_arn).get("SecretString")
+    except Exception:  # noqa: BLE001 - resolution failure degrades, never crashes
+        return None
+    if not raw:
+        return None
+    secret = raw.encode("utf-8")
+    _LINK_SECRET_CACHE[secret_arn] = secret
+    return secret
+
+
 def vendor_link_settings() -> dict[str, Any]:
     """Env-configured vendor intake-link settings, shared with the Lambda wiring.
 
     ``VENDOR_INTAKE_BASE_URL`` is the public origin of the vendor intake page
     (the simulated default mirrors the email adapter's non-routable sender
-    domain). ``VENDOR_LINK_SECRET`` keys the sealed invite tokens so reminder
-    emails can repeat the vendor's intake link across restarts; when unset each
-    backend instance uses a process-local secret.
+    domain). The sealed-token HMAC key resolves from ``VENDOR_LINK_SECRET``
+    (local/tests) or, when unset, from the Secrets Manager secret named by
+    ``VENDOR_LINK_SECRET_ARN`` (the deployed path — the CDK stack injects the
+    ARN and grants read). A stable key lets invitation and reminder emails
+    repeat the vendor's intake link across restarts; when neither source
+    yields a key each backend instance uses a process-local secret.
     """
     secret = os.environ.get("VENDOR_LINK_SECRET") or None
+    link_secret = secret.encode("utf-8") if secret else None
+    if link_secret is None:
+        secret_arn = os.environ.get("VENDOR_LINK_SECRET_ARN") or None
+        if secret_arn:
+            link_secret = _resolve_link_secret(secret_arn)
     return {
         "intake_base_url": os.environ.get("VENDOR_INTAKE_BASE_URL")
         or "https://vetted.invalid/intake",
-        "link_secret": secret.encode("utf-8") if secret else None,
+        "link_secret": link_secret,
     }
 
 

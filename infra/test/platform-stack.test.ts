@@ -168,7 +168,7 @@ describe('VETTED Better Auth same-origin session layer', () => {
 
   test('stores both auth secrets under a rotating KMS key and passes only secret IDs to Lambda', () => {
     const { platform } = build(baseConfig);
-    platform.resourceCountIs('AWS::SecretsManager::Secret', 2);
+    platform.resourceCountIs('AWS::SecretsManager::Secret', 3);
     platform.hasResourceProperties('AWS::SecretsManager::Secret', {
       Name: 'vetted/test/better-auth/session',
       KmsKeyId: Match.anyValue(),
@@ -848,6 +848,25 @@ describe('Retention, budget, and encryption', () => {
     });
   });
 
+  test('case proxy receives the CloudFront intake base URL and link-secret ARN', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'vetted/test/vendor/link-secret',
+      KmsKeyId: Match.anyValue(),
+      GenerateSecretString: Match.objectLike({ PasswordLength: 64 }),
+    });
+    const lambdas = platform.findResources('AWS::Lambda::Function');
+    const proxy = Object.values(lambdas).find(
+      (fn: any) => fn.Properties.FunctionName === 'csub-case-proxy-test',
+    ) as any;
+    const env = proxy.Properties.Environment.Variables;
+    expect(JSON.stringify(env.VENDOR_INTAKE_BASE_URL)).toContain('https://');
+    expect(JSON.stringify(env.VENDOR_INTAKE_BASE_URL)).toContain('/intake');
+    expect(env.VENDOR_LINK_SECRET_ARN).toBeDefined();
+    // Only the ARN reaches the environment; the generated value never does.
+    expect(env.VENDOR_LINK_SECRET).toBeUndefined();
+  });
+
   test('vendor email sender wiring only appears when a sender is configured', () => {
     const withoutSender = build(baseConfig).platform;
     const statementsWithout = Object.values(withoutSender.findResources('AWS::IAM::Policy'))
@@ -1014,7 +1033,7 @@ describe('Deployment gates', () => {
 
   test('Slack secret remains absent by default and gated env/IAM are restored when imported', () => {
     const { platform } = build(baseConfig);
-    platform.resourceCountIs('AWS::SecretsManager::Secret', 2);
+    platform.resourceCountIs('AWS::SecretsManager::Secret', 3);
     const lambdas = platform.findResources('AWS::Lambda::Function');
     const proxyEnvs = Object.values(lambdas)
       .map((l: any) => l.Properties.Environment?.Variables ?? {})
@@ -1026,7 +1045,7 @@ describe('Deployment gates', () => {
     const secretArn =
       'arn:aws:secretsmanager:us-west-2:111111111111:secret:csub/slack-test-AbCdEf';
     const withSlack = build({ ...baseConfig, slackSecretArn: secretArn }).platform;
-    withSlack.resourceCountIs('AWS::SecretsManager::Secret', 2);
+    withSlack.resourceCountIs('AWS::SecretsManager::Secret', 3);
     withSlack.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'python3.13',
       Environment: {
