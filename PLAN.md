@@ -2,6 +2,75 @@
 
 This is the execution plan for the requirements in [`docs/PRD.md`](docs/PRD.md). The schedule assumes intensive use of frontier coding agents with one human integration owner.
 
+## July 15 CSUB validation and completion plan
+
+The July 15 end-user review validated the product direction and exposed the
+remaining gap between a polished reviewer demo and a dependable vendor-to-
+decision product. The reviewer foundation from PR #16 is the baseline. Work is
+complete only after it is merged, deployed, and exercised through the live
+CloudFront/API path; opening a pull request or passing a fixture test is not a
+release gate.
+
+CSUB confirmed these workflow priorities:
+
+- ServiceNow initiates the request and remains the intended status/system of
+  record; the prototype keeps the contract-faithful mock until sandbox access
+  exists.
+- The largest operational cost is repeatedly chasing vendors for missing,
+  invalid, or stale evidence.
+- Vendors need a resumable workspace that says what was received, what is still
+  missing or invalid, which stage the review is in, and how to ask a question.
+- Evidence labels are insufficient: the system must inspect document contents,
+  dates, product identity, and required coverage before crediting a criterion.
+- Security and accessibility remain equal review tracks. Risk and approval are
+  product-, use-case-, evidence-, and profile-version-specific.
+- Vendor research stays on the official vendor domain or explicitly configured
+  standards sources and retains claim-level provenance.
+- Slack is the first notification surface. Approval and other mutations remain
+  in VETTED.
+
+### Dependency-ordered merge and delivery train
+
+| Gate | Issues | Deliverable | Exit condition |
+|---|---|---|---|
+| 0. Safe delivery and live golden path | #33, #43, #42, #51 | Guarded AWS CD, reliable tokenized invitations, WCAG AA remediation, and three live scenarios | `main` deploys automatically; rollback is proven; all three scenarios pass through live APIs in the Codex in-app browser |
+| 1. Trusted evidence and policy foundation | #49, #44, #52, #36 | Real evidence-byte ingestion, official-domain research, partner-confirmed policy versions, and content/date validation | Sanitized PDF/DOCX/XLSX/image evidence is extracted with source coordinates; unsafe URLs and document instructions fail closed; unknown criteria remain explicit TBDs; invalid evidence never satisfies a requirement |
+| 2. Durable review intelligence | #50 | Bedrock orchestration, citation gates, recovery, and evaluations | Twelve sanitized gold cases plus adversarial cases pass; every material claim resolves; malformed output and restart/retry behavior are explicit; no silent fixture fallback |
+| 3. Vendor collaboration | #40, #41, #37, #38 | Resume/revise, clarification thread, weekly reminders, status, and decision notification | Vendor state survives interruption; reminders are idempotent and auditable; vendor-safe status exposes no reviewer-only data |
+| 4. External integrations and lifecycle | #39, #35, #53 | Slack sandbox, future live ServiceNow adapter, and expiring-evidence re-review | External credentials/sandboxes exist; signatures, authorization, idempotency, and audit tests pass before enabling each adapter |
+
+Issue #52 is an external decision track that starts immediately. Unknown CSUB
+criteria remain `TBD` and force review/escalation; an agent must never fill them
+in. Issues #35 and #39 remain explicitly blocked until CSUB supplies the
+corresponding sandbox access and authorized identities.
+
+```mermaid
+flowchart LR
+    CD["#33 Guarded AWS CD"] --> LIVE["#43 + #51 live golden path"]
+    A11Y["#42 WCAG AA"] --> LIVE
+    POLICY["#52 Confirmed policy"] --> VALIDATE["#36 Evidence validation"]
+    INGEST["#49 Secure extraction"] --> VALIDATE
+    RESEARCH["#44 Scoped research"] --> REVIEW["#50 Durable Bedrock review"]
+    VALIDATE --> REVIEW
+    REVIEW --> COLLAB["#40/#41/#37/#38 vendor collaboration"]
+    COLLAB --> SLACK["#39 Slack"]
+    REVIEW --> SNOW["#35 ServiceNow"]
+    REVIEW --> RENEW["#53 Re-review monitoring"]
+```
+
+### Release discipline for every gate
+
+1. Land the smallest independently useful PR; partially delivered issue
+   acceptance criteria stay open and are called out in the merge comment.
+2. Require a teammate approval, current `Repository checks`, CodeQL, resolved
+   review threads, and the relevant focused tests.
+3. Let guarded CD deploy the reviewed `main` commit using short-lived AWS OIDC
+   credentials and an immutable release bundle.
+4. Run live API canaries and the affected reviewer/vendor flows. Do not
+   substitute fixtures for a failed live service.
+5. Close the issue only after deployed acceptance evidence is attached. Roll
+   back automatically when the live canary fails and open a follow-up incident.
+
 ## Delivery rules
 
 - Lock shared schemas and interfaces before parallel implementation begins.
