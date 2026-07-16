@@ -1048,20 +1048,17 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // Weekly vendor-evidence reminder sweep. Scheduler assumes a role that can
-    // invoke only this Lambda, and the trust policy is pinned to this account
-    // and exact schedule ARN to prevent confused-deputy use.
+    // invoke only this Lambda. Confused-deputy protection is scoped to this
+    // account via aws:SourceAccount. A self-referential aws:SourceArn condition
+    // cannot be used: EventBridge Scheduler validates the execution role at
+    // CreateSchedule time before the schedule exists, so that context key is
+    // absent and the role would be un-assumable ("must allow AWS EventBridge
+    // Scheduler to assume the role").
     const reminderScheduleName = `csub-vendor-reminders-${appEnv}`;
-    const reminderScheduleArn = cdk.Stack.of(this).formatArn({
-      service: 'scheduler',
-      resource: 'schedule',
-      resourceName: `default/${reminderScheduleName}`,
-      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
-    });
     const reminderSchedulerRole = new iam.Role(this, 'ReminderSchedulerRole', {
       assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
         conditions: {
           StringEquals: { 'aws:SourceAccount': this.account },
-          ArnEquals: { 'aws:SourceArn': reminderScheduleArn },
         },
       }),
       inlinePolicies: {
