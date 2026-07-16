@@ -12,7 +12,7 @@ import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 from urllib.parse import quote, urlsplit
 
 from ..adapters.extraction import (
@@ -73,7 +73,9 @@ class VendorBackendError(ValueError):
 
 
 class VendorBackend:
-    MAX_RUN_VERSION = 2
+    # Run 1 is the initial analysis, run 2 the post-resubmission rerun, and one
+    # spare so a request-changes loop (issue #64) cannot dead-end a demo case.
+    MAX_RUN_VERSION = 3
 
     def __init__(
         self,
@@ -242,7 +244,16 @@ class VendorBackend:
 
     # Case and invitation lifecycle ------------------------------------------
 
-    def register_case(self, case_id: str, product_id: str, use_case: str, scope: str) -> VendorCase:
+    def register_case(
+        self,
+        case_id: str,
+        product_id: str,
+        use_case: str,
+        scope: str,
+        *,
+        required_evidence: Sequence[str] = (),
+        policy_route: str | None = None,
+    ) -> VendorCase:
         product = self._require("product", product_id, VendorProduct)
         del product
         case = VendorCase(
@@ -250,6 +261,8 @@ class VendorBackend:
             product_id=product_id,
             use_case=self._text(use_case, "use_case"),
             scope=self._text(scope, "scope"),
+            required_evidence=tuple(required_evidence),
+            policy_route=policy_route,
             workspace_id=self.workspace_id,
         )
         self._put("case", case.case_id, case)
@@ -602,6 +615,51 @@ class VendorBackend:
         self._save_progress(invite, updated)
         return updated
 
+    # Deterministic policy evidence keys mapped to the review-profile domain
+    # they belong to (issue #63). The vendor checklist selects only the active
+    # profiles a case's stored ``required_evidence`` maps to; cases without a
+    # stored policy result keep the full active-profile behavior.
+    _EVIDENCE_PROFILE_KEYS: dict[str, str] = {
+        "hecvat": "security",
+        "soc2": "security",
+        "pci": "security",
+        "pentest": "security",
+        "vpat_acr": "accessibility",
+    }
+
+    def _case_profile_selection(self, case: VendorCase) -> list[Any] | None:
+        """Active profiles narrowed to the case's policy result, or ``None``.
+
+        ``None`` means no narrowing applies — the case has no stored policy
+        result, its evidence keys are unmapped, or no active profile matches —
+        and callers fail open to the full active-profile set, since narrowing
+        may only ever hide requirements when the mapping is known-good.
+        """
+        if not case.required_evidence:
+            return None
+        wanted = {
+            self._EVIDENCE_PROFILE_KEYS[key]
+            for key in case.required_evidence
+            if key in self._EVIDENCE_PROFILE_KEYS
+        }
+        if not wanted:
+            return None
+        selected = [
+            profile
+            for profile in self.profiles.active_profiles()
+            if profile.profile_key in wanted
+        ]
+        return selected or None
+
+    def _case_profiles(self, case_id: str | None) -> list[Any]:
+        if case_id is not None:
+            case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+            if isinstance(case, VendorCase):
+                selection = self._case_profile_selection(case)
+                if selection is not None:
+                    return selection
+        return self.profiles.active_profiles()
+
     def unresolved_questions(self, token: str) -> list[dict[str, Any]]:
         invite = self._valid_invite(token)
         submission = self._submission_for_invite(invite.invite_id)
@@ -617,7 +675,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         questions: list[dict[str, Any]] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(invite.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered or criterion.requirement_id in answered:
                     continue
@@ -686,6 +744,10 @@ class VendorBackend:
                 else []
             ),
             "checklist": self._checklist(submission),
+            # Vendor-visible honesty (issue #63): claim adaptation only when
+            # the checklist was actually narrowed, never on a fail-open case.
+            "required_evidence": list(case.required_evidence),
+            "adapted_to_intake": self._case_profile_selection(case) is not None,
         }
 
     def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
@@ -709,7 +771,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         items: list[dict[str, Any]] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered:
                     status = "received"
@@ -810,7 +872,7 @@ class VendorBackend:
         findings = self._validate_evidence_contents(submission, evidence)
         failed_artifact_ids = {finding.artifact_id for finding in findings}
         auto_covered: list[str] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(invite.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in already_covered:
                     continue
@@ -1178,6 +1240,60 @@ class VendorBackend:
         self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.SUBMITTED))
         self._event("submission.finalized", "submission", finalized.submission_id, case_id=case.case_id)
         return finalized
+
+    def reopen_submission(self, case_id: str) -> Submission | None:
+        """Reopen a finalized submission so the vendor can revise it (issue #64).
+
+        Called when a reviewer requests changes: the case's submitted invite
+        becomes usable again and the single existing submission returns to a
+        draft with a bumped version. Prior evidence, answers, coverage, and the
+        completed intake analysis are preserved, so the vendor supplements
+        rather than restarts. A case with no submitted invite is a benign
+        no-op, matching ``transition_case`` tolerance for non-vendor cases.
+        """
+        invites = [
+            item
+            for item in self._list("invite", VendorInvite)
+            if item.case_id == case_id and item.status is InviteStatus.SUBMITTED
+        ]
+        if not invites:
+            return None
+        invite = max(invites, key=lambda item: item.issued_at)
+        submission = self._submission_for_invite(invite.invite_id)
+        if submission.status is not SubmissionStatus.FINALIZED:
+            return None
+        now = self._now()
+        reopened = replace(
+            submission,
+            status=SubmissionStatus.DRAFT,
+            version=submission.version + 1,
+            finalized_at=None,
+            updated_at=now,
+        )
+        self._put("submission", reopened.submission_id, reopened)
+        # Give the vendor room to respond: a link about to lapse is extended by
+        # one full invite lifetime from now.
+        expires_at = invite.expires_at
+        if parse_utc_timestamp(expires_at) - self._now_datetime() < datetime.timedelta(hours=72):
+            expires_at = (self._now_datetime() + self.invite_ttl).isoformat()
+        self._put(
+            "invite",
+            invite.invite_id,
+            replace(
+                invite,
+                status=InviteStatus.IN_PROGRESS,
+                submitted_at=None,
+                expires_at=expires_at,
+            ),
+        )
+        self._event(
+            "submission.reopened",
+            "submission",
+            reopened.submission_id,
+            case_id=case_id,
+            detail={"version": reopened.version},
+        )
+        return reopened
 
     # Reviewer-driven lifecycle transitions ----------------------------------
 
@@ -1633,7 +1749,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         items = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered or criterion.requirement_id in answered:
                     continue
@@ -1666,12 +1782,13 @@ class VendorBackend:
         previous = (
             self._require("run", previous_id, ReviewRun) if previous_id is not None else None
         )
-        # Exactly one rerun per demo case: run 1 is the initial run, run 2 is the
-        # single permitted rerun with custom instructions (issue #27).
+        # Bounded reruns per demo case (issue #27, relaxed for the
+        # request-changes loop in issue #64): each rerun creates a new
+        # immutable version and invalidates stale decisions.
         if previous is not None and previous.run_version >= self.MAX_RUN_VERSION:
             raise VendorBackendError(
                 "rerun_limit_reached",
-                "only one rerun is permitted per demo case",
+                f"at most {self.MAX_RUN_VERSION} run versions are permitted per demo case",
                 status=409,
             )
         clean_instructions: str | None = None
@@ -1906,7 +2023,11 @@ class VendorBackend:
         if invite.status in {InviteStatus.ISSUED, InviteStatus.OPENED}:
             self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.IN_PROGRESS))
         case = self._require("case", invite.case_id, VendorCase)
-        self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
+        # A reopened changes-requested case keeps its truthful stage (and the
+        # reviewer comment/next actions with it) until the vendor re-finalizes;
+        # draft edits must not silently downgrade it to IN_PROGRESS (issue #64).
+        if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
+            self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
 
     def _valid_invite(self, token: str) -> VendorInvite:
         if not isinstance(token, str) or not token:
@@ -1958,7 +2079,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         questions = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id not in covered | answered:
                     questions.append({"requirement_id": criterion.requirement_id})

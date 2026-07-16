@@ -294,8 +294,12 @@ class ReRunLimitTests(unittest.TestCase):
         self.assertEqual(run_two.instructions, "Re-check accessibility with the new VPAT.")
         self.assertFalse(run_two.decision_valid)
         self.assertFalse(run_two.write_preview_valid)
+        # Version 3 accommodates the request-changes resubmission loop
+        # (issue #64); the bound still exists and rejects a fourth run.
+        run_three = backend.create_review_run(case_id, "Post-resubmission rerun.")
+        self.assertEqual(run_three.run_version, 3)
         with self.assertRaises(VendorBackendError) as limited:
-            backend.create_review_run(case_id, "second rerun should be rejected")
+            backend.create_review_run(case_id, "fourth run should be rejected")
         self.assertEqual(limited.exception.code, "rerun_limit_reached")
 
 

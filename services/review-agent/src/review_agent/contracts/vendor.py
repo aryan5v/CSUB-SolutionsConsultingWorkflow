@@ -130,12 +130,18 @@ class VendorCase:
     reminders_paused: bool = False
     vendor_visible_comment: str | None = None
     vendor_next_actions: tuple[str, ...] = ()
+    # Deterministic policy output captured at registration (issue #63). The
+    # vendor-facing checklist selects only the profiles these evidence keys map
+    # to; an empty tuple means "unknown" and keeps the full-profile behavior.
+    required_evidence: tuple[str, ...] = ()
+    policy_route: str | None = None
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["lifecycle"] = self.lifecycle.value
         data["vendor_next_actions"] = list(self.vendor_next_actions)
+        data["required_evidence"] = list(self.required_evidence)
         return data
 
 

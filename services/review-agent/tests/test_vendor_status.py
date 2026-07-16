@@ -133,6 +133,8 @@ class VendorReviewStatusTests(unittest.TestCase):
                 "vendor_visible_comment",
                 "next_actions",
                 "checklist",
+                "required_evidence",
+                "adapted_to_intake",
             },
         )
         self.assertIsNone(status["vendor_visible_comment"])

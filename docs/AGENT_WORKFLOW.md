@@ -20,8 +20,8 @@ AgentProp analysis of `planner_coder_tester_reviewer` selected `coder` and `test
 ## Parallelization boundaries
 
 - Reviewer web agent owns `apps/reviewer-web/`.
-- Case API agent owns `services/case-api/` and the mock ServiceNow adapter.
-- Review workflow agent owns LangGraph orchestration under `services/review-agent/`.
+- Integration agent owns the mock ServiceNow adapter and `services/auth-api/`.
+- Review workflow agent owns orchestration under `services/review-agent/`.
 - Data/policy agent owns ingestion and deterministic policy modules under `services/review-agent/`, coordinated with the workflow owner.
 - Contract owner controls `packages/contracts/`.
 - Infrastructure agent owns `infra/`.

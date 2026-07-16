@@ -27,7 +27,7 @@ CSUB confirmed these workflow priorities:
 - Vendor research stays on the official vendor domain or explicitly configured
   standards sources and retains claim-level provenance.
 - Slack is the first notification surface. Approval and other mutations remain
-  in VETTED.
+  in Vetted.
 
 ### Dependency-ordered merge and delivery train
 

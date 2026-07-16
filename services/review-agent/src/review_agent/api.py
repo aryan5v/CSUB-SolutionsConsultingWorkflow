@@ -38,12 +38,18 @@ from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
 from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
 from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
-from .ingestion.software_workbook import normalized_identity
+from .ingestion.software_workbook import (
+    XlsxWorkbookReader,
+    normalize_workbook,
+    normalized_identity,
+)
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
 from .orchestration.state import InMemoryCheckpointer
 from .packet import render_packet_pdf
 from .policy.conflicts import default_conflict_registry
+from .policy.engine import build_inputs as build_policy_inputs
+from .policy.engine import evaluate as evaluate_policy
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
 from .research import VendorResearchProvider, build_research_provider
@@ -62,6 +68,39 @@ class _UnsetResearchProvider:
 
 
 _RESEARCH_PROVIDER_UNSET = _UnsetResearchProvider()
+
+# Institutional approved-software export (issue #67). The workbook stays out of
+# Git (data/raw/ is ignored); when it is present locally — or named by the
+# environment override — the full catalog seeds instead of the synthetic rows.
+_CATALOG_XLSX_ENV = "APPROVED_SOFTWARE_XLSX"
+_CATALOG_XLSX_DEFAULT = "data/raw/SNOW Export_approved_software_database.xlsx"
+
+
+def _local_catalog_records() -> list[ApprovedSoftwareRecord]:
+    """Load the real approved-software export when available, else nothing.
+
+    Truthful fallback: any missing or unreadable workbook returns an empty
+    list so callers seed the labeled synthetic sample set instead. The file
+    itself never enters Git.
+    """
+    from pathlib import Path
+
+    path = Path(os.environ.get(_CATALOG_XLSX_ENV) or _CATALOG_XLSX_DEFAULT)
+    if not path.is_file():
+        return []
+    try:
+        result = normalize_workbook(
+            XlsxWorkbookReader(path), source_id="src:approved-software-export"
+        )
+    except (ValueError, OSError) as error:
+        print(f"[catalog] could not load {path.name}: {error}; using sample records")
+        return []
+    report = result.reconciliation
+    print(
+        f"[catalog] loaded {report.output_rows} approved-software rows from "
+        f"{path.name} ({len(report.warnings)} warning(s))"
+    )
+    return result.records
 
 
 def _default_packet_storage(config: AppConfig) -> StorageClient:
@@ -230,7 +269,7 @@ class LocalReviewApi:
         self._evidence_uploads: EvidenceUploadIssuer = (
             evidence_uploads or build_evidence_upload_issuer()
         )
-        records = sample_records() + [
+        records = _local_catalog_records() or sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
                 canonical_name="LabArchives ELN",
@@ -365,6 +404,8 @@ class LocalReviewApi:
                 "requested_for_name": "Sample Requester",
                 "requested_for_email": "requester@example.edu",
                 "requested_for_department": "Library",
+                "u_vendor_contact_name": "Vendor Contact",
+                "u_vendor_contact_email": "contact@vendor.example",
             },
         )
 
@@ -617,6 +658,10 @@ class LocalReviewApi:
                 vendor_visible_comment=vendor_visible_comment,
                 vendor_next_actions=vendor_next_actions,
             )
+            if action is ReviewAction.REQUEST_INFO:
+                # Requesting changes reopens the finalized submission so the
+                # vendor's existing link becomes editable again (issue #64).
+                self._vendor.reopen_submission(case_id)
             self._notify(
                 case_id,
                 f"review.{lifecycle_target.value}",
@@ -1217,6 +1262,23 @@ class LocalReviewApi:
 
     def create_from_servicenow_import(self, external_id: str) -> dict[str, Any]:
         preview = self.preview_servicenow_import(external_id)
+        # Idempotent ticket intake: repeated delivery of the same ticket must
+        # not create a second case (issue #65). The import audit event carries
+        # the external id, so it doubles as the durable dedupe record.
+        for case_id, existing in self._cases.items():
+            for event in existing.audit_sink.events:
+                if (
+                    event.event_type == "servicenow.imported"
+                    and event.detail.get("external_id") == external_id
+                ):
+                    return {
+                        "preview": preview,
+                        "case": {"case_id": case_id, "state": existing.state.to_dict()},
+                        "invite": None,
+                        "intake_url": None,
+                        "invite_pending": None,
+                        "already_imported": True,
+                    }
         created = self.create_case(preview["mapped_values"])
         record = self._require_case(created["case_id"])
         record.audit.record(
@@ -1232,7 +1294,65 @@ class LocalReviewApi:
                 "simulated": True,
             },
         )
-        return {"preview": preview, "case": created}
+        invite_dict, intake_url, invite_pending = self._issue_import_invite(
+            created["case_id"], preview
+        )
+        self._notify(
+            created["case_id"],
+            "servicenow.imported",
+            f"Ticket {external_id} created case {created['case_id']}"
+            + (" with a tracked vendor invitation." if intake_url else "."),
+        )
+        return {
+            "preview": preview,
+            "case": created,
+            "invite": invite_dict,
+            "intake_url": intake_url,
+            "invite_pending": invite_pending,
+            "already_imported": False,
+        }
+
+    def _issue_import_invite(
+        self, case_id: str, preview: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        """Issue the vendor invitation for an imported ticket (issue #65).
+
+        Returns ``(invite, intake_url, pending_reason)``. A ticket without
+        contact details creates the case only and states why no invitation
+        was issued; invitation failures degrade the same way rather than
+        failing the import.
+        """
+        contact_info = preview.get("vendor_contact") or {}
+        name = (contact_info.get("name") or "").strip()
+        email = (contact_info.get("email") or "").strip()
+        if not name or not email:
+            return None, None, "no vendor contact on ticket"
+        vendor_name = str(preview["mapped_values"].get("vendor_name", ""))
+        vendor = next(
+            (
+                item
+                for item in self._vendor.list_vendors()
+                if item.name.casefold() == vendor_name.casefold()
+            ),
+            None,
+        )
+        if vendor is None:
+            return None, None, "vendor record was not registered"
+        contact = next(
+            (
+                item
+                for item in self._vendor.list_contacts(vendor.vendor_id)
+                if item.email.casefold() == email.casefold()
+            ),
+            None,
+        )
+        try:
+            if contact is None:
+                contact = self._vendor.create_contact(vendor.vendor_id, name, email)
+            issued = self._vendor.issue_invite(case_id, contact.contact_id)
+        except VendorBackendError as error:
+            return None, None, f"invitation could not be issued: {error.code}"
+        return issued["invite"], f"/intake#token={issued['token']}", None
 
     def integration_events(self) -> dict[str, Any]:
         return {
@@ -1360,7 +1480,22 @@ class LocalReviewApi:
             f"data_classification={intake.data_classification.value};"
             f"platform={','.join(sorted(intake.platform))}"
         )
-        self._vendor.register_case(case_id, product.product_id, intake.use_case, scope)
+        # Deterministic policy evaluation over the intake so the vendor-facing
+        # checklist can adapt to this case (issue #63). Approved-software status
+        # is unknown at registration; the workflow re-evaluates with it later.
+        policy = evaluate_policy(
+            build_policy_inputs(intake),
+            default_ruleset(),
+            default_conflict_registry(),
+        )
+        self._vendor.register_case(
+            case_id,
+            product.product_id,
+            intake.use_case,
+            scope,
+            required_evidence=policy.required_evidence,
+            policy_route=policy.risk_route.value,
+        )
 
     def _case_payload(self, record: _CaseRecord) -> dict[str, Any]:
         response = {
@@ -1424,7 +1559,7 @@ class LocalReviewApi:
             "match_detail": match_detail,
             "stage": stage_labels.get(state.status, state.status.value.replace("_", " ").title()),
             "updated": "Local API",
-            "owner": "Alex Reviewer",
+            "owner": "Solutions Consulting",
             "state": state.to_dict(),
         }
 
