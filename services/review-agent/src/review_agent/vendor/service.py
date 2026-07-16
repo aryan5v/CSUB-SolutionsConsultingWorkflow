@@ -21,6 +21,7 @@ from ..contracts.vendor import (
     EvidenceArtifact,
     IntegrationEvent,
     InviteStatus,
+    PolicyCriteria,
     ReminderClaim,
     ReviewProfileVersion,
     ReviewRun,
@@ -1597,6 +1598,81 @@ class VendorBackend:
             "event_id": event.event_id,
             "approval_granted": False,
         }
+
+    # Evidence policy criteria (issue #52) ------------------------------------
+
+    def get_policy_criteria(self) -> PolicyCriteria:
+        """Active reviewer-editable evidence-validation criteria.
+
+        The highest persisted version is authoritative; before any edit the
+        provisional, non-authoritative default applies (issue #52 stays open
+        until CSUB confirms these values).
+        """
+        versions = self._list("policy_criteria", PolicyCriteria)
+        if not versions:
+            return PolicyCriteria.default(workspace_id=self.workspace_id)
+        return max(versions, key=lambda item: item.version)
+
+    def update_policy_criteria(
+        self,
+        *,
+        updated_by: str,
+        pentest_max_age_days: int | None,
+        pci_attestation_max_age_days: int | None,
+        coi_required_coverages: tuple[str, ...],
+        evidence_expiry_days: int | None,
+        provisional: bool = True,
+    ) -> PolicyCriteria:
+        """Record a new immutable criteria version with reviewer attribution.
+
+        Thresholds are validated positive-or-None (``None`` means "no confirmed
+        rule", which downstream validation treats as manual review rather than
+        an invented pass/fail). Every change is auditable.
+        """
+        current = self.get_policy_criteria()
+        version = current.version + 1
+        coverages = tuple(
+            dict.fromkeys(
+                self._text(item, "coi_required_coverages").lower()
+                for item in coi_required_coverages
+            )
+        )
+        criteria = PolicyCriteria(
+            criteria_version_id=f"policy-criteria-{self.workspace_id}-{version:03d}",
+            version=version,
+            updated_at=self._now(),
+            updated_by=self._text(updated_by, "updated_by"),
+            pentest_max_age_days=self._positive_or_none(pentest_max_age_days, "pentest_max_age_days"),
+            pci_attestation_max_age_days=self._positive_or_none(
+                pci_attestation_max_age_days, "pci_attestation_max_age_days"
+            ),
+            coi_required_coverages=coverages,
+            evidence_expiry_days=self._positive_or_none(evidence_expiry_days, "evidence_expiry_days"),
+            provisional=provisional,
+            workspace_id=self.workspace_id,
+        )
+        self._put("policy_criteria", criteria.criteria_version_id, criteria)
+        self._event(
+            "policy.criteria_updated",
+            "policy_criteria",
+            criteria.criteria_version_id,
+            detail={
+                "version": version,
+                "provisional": provisional,
+                "updated_by": criteria.updated_by,
+            },
+        )
+        return criteria
+
+    @staticmethod
+    def _positive_or_none(value: int | None, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise VendorBackendError(
+                "invalid_policy_criteria", f"{field_name} must be a positive integer or null"
+            )
+        return value
 
     # Internal helpers --------------------------------------------------------
 

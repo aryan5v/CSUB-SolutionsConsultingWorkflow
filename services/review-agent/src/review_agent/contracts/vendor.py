@@ -299,6 +299,97 @@ class ReviewProfileVersion:
         }
 
 
+# Provisional evidence-policy defaults (issue #52 external decision track).
+# These are NOT CSUB-confirmed authoritative policy: they are safe starting
+# values a reviewer can adjust from app settings. A ``None`` threshold means
+# "no confirmed rule" and forces manual review instead of an invented pass/fail
+# (PLAN.md: an agent must never fill in unknown CSUB criteria). ``pentest`` is
+# defaulted to the one-year freshness check confirmed in the 2026-07-15 feedback
+# call (issue #36); PCI currency stays ``None`` until CSUB confirms it (a human
+# may still set it here) so it is never an agent-invented threshold.
+_DEFAULT_PENTEST_MAX_AGE_DAYS = 365
+_DEFAULT_EVIDENCE_EXPIRY_DAYS = 365
+_DEFAULT_COI_REQUIRED_COVERAGES = ("cyber",)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyCriteria:
+    """Reviewer-editable, versioned evidence-validation thresholds (issue #52).
+
+    Every edit creates a new immutable version with attribution so decisions
+    remain reproducible against the criteria that were active when they ran.
+    Values remain ``provisional`` until CSUB confirms them; the flag is surfaced
+    in the UI and audit so a provisional threshold is never mistaken for
+    authoritative policy.
+    """
+
+    criteria_version_id: str
+    version: int
+    updated_at: str
+    updated_by: str
+    pentest_max_age_days: int | None = _DEFAULT_PENTEST_MAX_AGE_DAYS
+    pci_attestation_max_age_days: int | None = None
+    coi_required_coverages: tuple[str, ...] = _DEFAULT_COI_REQUIRED_COVERAGES
+    evidence_expiry_days: int | None = _DEFAULT_EVIDENCE_EXPIRY_DAYS
+    provisional: bool = True
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    @classmethod
+    def default(cls, *, workspace_id: str = DEFAULT_WORKSPACE_ID) -> "PolicyCriteria":
+        """The provisional, non-authoritative baseline used before any edit."""
+        return cls(
+            criteria_version_id=f"policy-criteria-{workspace_id}-000",
+            version=0,
+            updated_at="",
+            updated_by="system:default",
+            workspace_id=workspace_id,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "criteria_version_id": self.criteria_version_id,
+            "version": self.version,
+            "updated_at": self.updated_at,
+            "updated_by": self.updated_by,
+            "pentest_max_age_days": self.pentest_max_age_days,
+            "pci_attestation_max_age_days": self.pci_attestation_max_age_days,
+            "coi_required_coverages": list(self.coi_required_coverages),
+            "evidence_expiry_days": self.evidence_expiry_days,
+            "provisional": self.provisional,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PolicyCriteria":
+        return cls(
+            criteria_version_id=str(value["criteria_version_id"]),
+            version=int(value["version"]),
+            updated_at=str(value.get("updated_at", "")),
+            updated_by=str(value.get("updated_by", "")),
+            pentest_max_age_days=_optional_positive_int(value.get("pentest_max_age_days")),
+            pci_attestation_max_age_days=_optional_positive_int(
+                value.get("pci_attestation_max_age_days")
+            ),
+            coi_required_coverages=tuple(
+                str(item) for item in (value.get("coi_required_coverages") or ())
+            ),
+            evidence_expiry_days=_optional_positive_int(value.get("evidence_expiry_days")),
+            provisional=bool(value.get("provisional", True)),
+            workspace_id=str(value.get("workspace_id", DEFAULT_WORKSPACE_ID)),
+        )
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    """Coerce a stored/submitted threshold to a positive int, or None for TBD."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("threshold must be a positive integer or null")
+    if value < 1:
+        raise ValueError("threshold must be a positive integer or null")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalScope:
     product_id: str

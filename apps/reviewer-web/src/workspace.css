@@ -207,3 +207,17 @@
 .catalog-pagination button:disabled { opacity: .5; cursor: not-allowed; }
 .catalog-pagination span { color: var(--text-muted); font: 600 14px/1 var(--mono); }
 @media (max-width: 820px) { .catalog-columns { display: none; } .catalog-row { grid-template-columns: 1fr 1fr; gap: 6px; } }
+
+/* Evidence policy criteria settings (issue #52) */
+.policy-criteria { display: flex; flex-direction: column; gap: 16px; }
+.policy-provisional { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid #b58900; border-radius: 8px; background: var(--card); }
+.policy-provisional svg { flex: none; margin-top: 2px; color: #b58900; }
+.policy-provisional span { font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+.policy-provisional strong { color: var(--foreground); }
+.policy-provisional-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.policy-provisional-toggle span { display: flex; flex-direction: column; gap: 2px; }
+.policy-criteria-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.policy-criteria-footer > span { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font: 600 12px/1 var(--mono); }
+.policy-save { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--foreground); color: var(--background); font-size: 12px; font-weight: 600; cursor: pointer; }
+.policy-save:disabled { opacity: .6; cursor: not-allowed; }
+.settings-loading { color: var(--text-muted); font-size: 13px; }

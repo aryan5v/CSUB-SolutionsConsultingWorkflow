@@ -367,6 +367,18 @@ paths:
       responses:
         "200": {description: Per-requirement evidence status, collapsed review stage, human outcome, explicit vendor-visible comment, and safe next actions., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
         "410": {description: Expired or revoked.}
+  /policy-criteria:
+    get:
+      tags: [profiles]
+      summary: Read the active reviewer-editable evidence-validation criteria (issue #52).
+      description: Thresholds (pentest max age, PCI attestation currency, evidence expiry) and required COI coverages. Values are provisional until CSUB confirms them; a null threshold means no confirmed rule and forces manual review instead of an invented pass/fail.
+      responses: {"200": {description: Active policy criteria with version and provisional flag.}}
+    put:
+      tags: [profiles]
+      summary: Record a new immutable criteria version from a reviewer edit.
+      description: Reviewer-only. Each threshold accepts a positive integer or null (TBD). The reviewer identity is attributed and the change is audited; models cannot set policy.
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {pentest_max_age_days: {type: [integer, "null"], minimum: 1}, pci_attestation_max_age_days: {type: [integer, "null"], minimum: 1}, evidence_expiry_days: {type: [integer, "null"], minimum: 1}, coi_required_coverages: {type: array, items: {type: string}}, provisional: {type: boolean}}}}}}
+      responses: {"200": {description: New criteria version recorded.}}
   /review-profiles:
     get:
       tags: [profiles]
