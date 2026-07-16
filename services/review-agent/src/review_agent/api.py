@@ -563,6 +563,10 @@ class LocalReviewApi:
             decision_version,
             reviewer_id=reviewer_id,
         )
+        if action is ReviewAction.REQUEST_INFO:
+            if not vendor_visible_comment and payload.get("comments"):
+                vendor_visible_comment = str(payload["comments"]).strip() or None
+            self._vendor_call(lambda: self._vendor.reopen_submission(case_id))
         route = state.policy_result.risk_route.value if state.policy_result else "escalate"
         approved_fields = self._writeback_config.fields_for(
             route=route,
@@ -610,10 +614,6 @@ class LocalReviewApi:
             ReviewAction.REJECT: CaseLifecycle.DECLINED,
             ReviewAction.REQUEST_INFO: CaseLifecycle.CHANGES_REQUESTED,
         }.get(action)
-        if action is ReviewAction.REQUEST_INFO:
-            if not vendor_visible_comment and payload.get("comments"):
-                vendor_visible_comment = str(payload["comments"]).strip() or None
-            self._vendor_call(lambda: self._vendor.reopen_submission(case_id))
         if lifecycle_target is not None:
             self._transition_vendor_case(
                 case_id,

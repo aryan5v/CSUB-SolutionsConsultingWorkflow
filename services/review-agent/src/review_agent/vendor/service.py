@@ -397,8 +397,7 @@ class VendorBackend:
         product = self._require("product", invite.product_id, VendorProduct)
         vendor = self._require("vendor", product.vendor_id, Vendor)
         contact = self._require("contact", invite.contact_id, VendorContact)
-        review = self._vendor_review_projection(case)
-        payload = {
+        return {
             "invite": {
                 "invite_id": invite.invite_id,
                 "case_id": invite.case_id,
@@ -415,9 +414,6 @@ class VendorBackend:
             "submission": submission.to_vendor_dict(),
             "questions": self.unresolved_questions(token),
         }
-        if review is not None:
-            payload["review"] = review
-        return payload
 
     # Vendor-only draft operations; token determines case and scope -----------
 
@@ -1161,26 +1157,6 @@ class VendorBackend:
             if any(token in haystack for token in tokens):
                 matched.append(artifact.artifact_id)
         return matched
-
-    def record_changes_requested(
-        self,
-        case_id: str,
-        *,
-        comment: str | None,
-        next_actions: tuple[str, ...] | None = None,
-    ) -> VendorCase:
-        case = self._require("case", case_id, VendorCase)
-        actions = next_actions if next_actions is not None else (
-            "Supplement the requested evidence or answers.",
-            "Finalize again when you are ready for the reviewer to continue.",
-        )
-        updated = replace(
-            case,
-            vendor_visible_comment=comment.strip() if comment and comment.strip() else None,
-            vendor_next_actions=actions,
-        )
-        self._put("case", case.case_id, updated)
-        return updated
 
     def reopen_submission(self, case_id: str) -> Submission | None:
         """Return a finalized vendor submission to draft so the same invite can be edited."""
@@ -1983,16 +1959,6 @@ class VendorBackend:
         case = self._require("case", invite.case_id, VendorCase)
         if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
             self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
-
-    @staticmethod
-    def _vendor_review_projection(case: VendorCase) -> dict[str, Any] | None:
-        if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
-            return None
-        return {
-            "review_stage": "changes_requested",
-            "comment": case.vendor_visible_comment,
-            "next_actions": list(case.vendor_next_actions),
-        }
 
     def _valid_invite(self, token: str) -> VendorInvite:
         if not isinstance(token, str) or not token:

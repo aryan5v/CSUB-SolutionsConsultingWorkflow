@@ -211,10 +211,10 @@ class VendorBackendTests(unittest.TestCase):
         self.assertEqual(first.status, SubmissionStatus.FINALIZED)
 
         self.backend.transition_case("CASE-1", CaseLifecycle.NEEDS_REVIEW)
-        self.backend.transition_case("CASE-1", CaseLifecycle.CHANGES_REQUESTED)
-        self.backend.record_changes_requested(
+        self.backend.transition_case(
             "CASE-1",
-            comment="Please attach the current VPAT.",
+            CaseLifecycle.CHANGES_REQUESTED,
+            vendor_visible_comment="Please attach the current VPAT.",
         )
         reopened = self.backend.reopen_submission("CASE-1")
         self.assertIsNotNone(reopened)
@@ -225,9 +225,10 @@ class VendorBackendTests(unittest.TestCase):
         self.assertEqual(reopened.answers["A11Y.VPAT.001"], "Initial VPAT note.")
 
         resolved = self.backend.resolve_invite(token)
-        self.assertEqual(resolved["review"]["review_stage"], "changes_requested")
-        self.assertEqual(resolved["review"]["comment"], "Please attach the current VPAT.")
         self.assertEqual(resolved["submission"]["status"], "draft")
+        status = self.backend.review_status(token)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(status["vendor_visible_comment"], "Please attach the current VPAT.")
 
         self.backend.add_evidence(
             token,

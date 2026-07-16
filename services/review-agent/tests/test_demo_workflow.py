@@ -402,8 +402,9 @@ class LifecycleTransitionTests(unittest.TestCase):
         view = api.resolve_vendor_invite(token)
         self.assertEqual(view["submission"]["status"], "draft")
         self.assertEqual(view["submission"]["version"], 2)
-        self.assertEqual(view["review"]["review_stage"], "changes_requested")
-        self.assertEqual(view["review"]["comment"], "Please attach the current VPAT.")
+        status = api.vendor_review_status(token)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(status["vendor_visible_comment"], "Please attach the current VPAT.")
 
         api.vendor_finalize(token)
         rerun = api.create_review_run(case_id, {"instructions": "Recheck after vendor resubmit."})
