@@ -41,6 +41,12 @@ KNOWN_ACTIONS = {"Add", "Modify", "Remove", "Import", "Dynamic"}
 SAFE_REPLACEMENTS = {"False"}
 DESTRUCTIVE_POLICY_ACTIONS = {"Delete", "ReplaceAndDelete"}
 
+# CDK injects a metadata-only resource (the analytics/version string) that
+# CloudFormation reports with replacement=Conditional on essentially every
+# synth. It provisions no infrastructure and is never destructive, so it is
+# exempt from the action/replacement checks; otherwise it blocks every deploy.
+CDK_METADATA_TYPE = "AWS::CDK::Metadata"
+
 
 def change_findings(change_set: dict[str, Any]) -> list[str]:
     """Return reasons a prepared CloudFormation change set must not execute."""
@@ -51,6 +57,8 @@ def change_findings(change_set: dict[str, Any]) -> list[str]:
         action = str(resource.get("Action", "Unknown"))
         logical_id = str(resource.get("LogicalResourceId", "Unknown"))
         resource_type = str(resource.get("ResourceType", "Unknown"))
+        if resource_type == CDK_METADATA_TYPE:
+            continue
         replacement_value = resource.get("Replacement")
         replacement = str(replacement_value) if replacement_value is not None else "Missing"
         policy_action = str(resource.get("PolicyAction", ""))

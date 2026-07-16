@@ -29,6 +29,17 @@ class DeploymentChangeGuardTests(unittest.TestCase):
     def test_allows_non_replacing_application_update(self) -> None:
         self.assertEqual(change_findings({"Changes": [change()]}), [])
 
+    def test_exempts_cdk_metadata_conditional_replacement(self) -> None:
+        # CDKMetadata reports replacement=Conditional on nearly every synth but
+        # provisions no infrastructure; it must not block an otherwise-safe deploy.
+        payload = {
+            "Changes": [
+                change(resource_type="AWS::CDK::Metadata", replacement="Conditional"),
+                change(),
+            ]
+        }
+        self.assertEqual(change_findings(payload), [])
+
     def test_blocks_removal_and_conditional_replacement(self) -> None:
         findings = change_findings(
             {
