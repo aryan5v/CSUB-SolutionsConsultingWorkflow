@@ -711,11 +711,13 @@ function WritebackPreview({ decision, written, preview, onWrite }: { decision: D
   </section>;
 }
 
-function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange, comment, onCommentChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, rerunAvailable }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "packet" | "writeback") => void; comment: string; onCommentChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; rerunAvailable: boolean }) {
+function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, rerunAvailable }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "packet" | "writeback") => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; rerunAvailable: boolean }) {
   return <aside className="decision-panel">
     <div className="decision-panel-heading"><span className="decision-icon"><UserCheck size={19} /></span><div><p className="eyebrow">Human checkpoint</p><h2>Your decision</h2></div></div>
     <p className="decision-copy">Review the draft, cited findings, and open accessibility item. Your action is recorded with this packet version.</p>
-    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Reviewer comment (optional)</span><textarea value={comment} onChange={(event) => onCommentChange(event.target.value)} placeholder="Add context for this decision. It is saved with your recorded action." /></label>
+    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Internal reviewer note (optional)</span><textarea value={comment} onChange={(event) => onCommentChange(event.target.value)} placeholder="Saved with the decision. Never shown to the vendor." /></label>
+    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Vendor-visible comment (optional)</span><textarea value={vendorVisibleComment} maxLength={2000} onChange={(event) => onVendorVisibleCommentChange(event.target.value)} placeholder="Write only information that is safe to share with this vendor contact." /></label>
+    <label className="decision-comment"><span>Vendor next actions (changes requested only)</span><textarea value={vendorNextActions} maxLength={5000} onChange={(event) => onVendorNextActionsChange(event.target.value)} placeholder="One action per line. Leave blank to derive safe actions from outstanding requirement IDs." /></label>
     <div className="decision-state"><span>Current decision</span><StatusBadge>{decision}</StatusBadge></div>
     {!approvalAllowed && approvalBlockReason && <div className="decision-prerequisite"><LockKeyhole size={15} /><span><strong>Approval is locked.</strong> {approvalBlockReason}</span></div>}
     {decision === "Pending" ? <div className="decision-buttons">
@@ -741,7 +743,7 @@ function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecis
   </aside>;
 }
 
-function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence, onOpenPacket, comment, onCommentChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
+function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence, onOpenPacket, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
   const [tab, setTab] = useState<"overview" | "packet" | "writeback">("overview");
   const approvalAllowed = matchConfirmed && Boolean(state?.draft_packet) && state?.status !== "escalated";
   const approvalBlockReason = !matchConfirmed
@@ -790,7 +792,7 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
         {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the fuzzy or semantic software candidate before deterministic policy, specialist analysis, and packet composition continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
       </div>
-      <DecisionPanel decision={decision} approvalAllowed={approvalAllowed} approvalBlockReason={approvalBlockReason} onDecision={onDecision} onTabChange={setTab} comment={comment} onCommentChange={onCommentChange} rerunInstruction={rerunInstruction} onRerunInstructionChange={onRerunInstructionChange} onRerun={onRerun} rerunUsed={rerunUsed} rerunAvailable={Boolean(state)} />
+      <DecisionPanel decision={decision} approvalAllowed={approvalAllowed} approvalBlockReason={approvalBlockReason} onDecision={onDecision} onTabChange={setTab} comment={comment} onCommentChange={onCommentChange} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={onVendorVisibleCommentChange} vendorNextActions={vendorNextActions} onVendorNextActionsChange={onVendorNextActionsChange} rerunInstruction={rerunInstruction} onRerunInstructionChange={onRerunInstructionChange} onRerun={onRerun} rerunUsed={rerunUsed} rerunAvailable={Boolean(state)} />
     </div>
   </>;
 }
@@ -948,6 +950,8 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("review-sidebar") === "collapsed");
   const [reviewComment, setReviewComment] = useState("");
+  const [vendorVisibleComment, setVendorVisibleComment] = useState("");
+  const [vendorNextActions, setVendorNextActions] = useState("");
   const [rerunInstruction, setRerunInstruction] = useState("");
   const [rerunUsed, setRerunUsed] = useState(false);
 
@@ -1038,6 +1042,8 @@ export default function App() {
   const apiErrorMessage = (error: unknown) => error instanceof ReviewApiError ? error.message : "The local backend request failed.";
   const openCase = (review: ReviewCase) => {
     setReviewComment("");
+    setVendorVisibleComment("");
+    setVendorNextActions("");
     setRerunInstruction("");
     setRerunUsed(false);
     const state = caseStates[review.id];
@@ -1117,6 +1123,11 @@ export default function App() {
     const edits = hasPacketEdits && editableSection
       ? [{ section_key: editableSection.key, body: packetDraft }]
       : undefined;
+    const nextActions = vendorNextActions
+      .split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 10);
     try {
       const reviewed = await reviewApi.recordDecision(activeState.case_id, {
         decision_version: decisionVersion(activeState, hasPacketEdits),
@@ -1124,6 +1135,8 @@ export default function App() {
         action,
         decided_at: new Date().toISOString(),
         comments: reviewComment.trim() || undefined,
+        vendor_visible_comment: vendorVisibleComment.trim() || undefined,
+        vendor_next_actions: action === "request_info" && nextActions.length ? nextActions : undefined,
         edits,
       });
       syncActionResponse(reviewed);
@@ -1245,7 +1258,7 @@ export default function App() {
         {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span><small>No fixture records were substituted. Set <code>VITE_REVIEW_DATA_MODE=fixture</code> only when you intend to use the simulated demo.</small></div>}
         {page === "dashboard" && <DashboardPage cases={cases} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
         {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} mode={queueMode} />}
-        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
+        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={setVendorVisibleComment} vendorNextActions={vendorNextActions} onVendorNextActionsChange={setVendorNextActions} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
         {page === "vendors" && <CatalogPage notify={setToast} />}
         {page === "contacts" && <ContactsPage notify={setToast} />}
         {page === "requests" && <VendorRecordsPage notify={setToast} />}

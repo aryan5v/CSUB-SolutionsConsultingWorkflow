@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .adapters.email import EmailSender, build_email_sender
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
 from .adapters.notifications import Notifier, build_notifier
 from .adapters.servicenow import (
@@ -34,7 +35,7 @@ from .contracts.packet import PacketSection
 from .contracts.schema import ContractValidationError, validate, validate_definition
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
-from .contracts.vendor import CaseLifecycle, SoftwareCatalogEntry
+from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
 from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
 from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
@@ -50,6 +51,7 @@ from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
 _FIXED_CLOCK = "2026-07-14T20:00:00+00:00"
+_UNSET = object()
 
 
 class _UnsetResearchProvider:
@@ -157,6 +159,7 @@ class LocalReviewApi:
         model_client: ModelClient | None = None,
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
+        email_sender: EmailSender | None = None,
         evidence_uploads: EvidenceUploadIssuer | None = None,
         config: AppConfig | None = None,
         research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
@@ -179,6 +182,7 @@ class LocalReviewApi:
         self._model_client = model_client or build_model_client(self._config)
         self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
         self._notifier: Notifier = notifier or build_notifier(self._config)
+        self._email_sender: EmailSender = email_sender or build_email_sender(self._config)
         self._evidence_uploads: EvidenceUploadIssuer = (
             evidence_uploads or build_evidence_upload_issuer()
         )
@@ -447,6 +451,31 @@ class LocalReviewApi:
         except (KeyError, ValueError) as error:
             raise LocalApiError(400, "invalid_action", "action must be approve, reject, or request_info") from error
 
+        raw_vendor_comment = payload.get("vendor_visible_comment")
+        vendor_visible_comment = (
+            raw_vendor_comment.strip() if isinstance(raw_vendor_comment, str) else None
+        )
+        if raw_vendor_comment is not None and not vendor_visible_comment:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_visible_comment",
+                "vendor_visible_comment must contain visible text",
+            )
+        raw_vendor_actions = payload.get("vendor_next_actions", [])
+        vendor_next_actions = tuple(item.strip() for item in raw_vendor_actions)
+        if any(not item for item in vendor_next_actions):
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions must contain visible text",
+            )
+        if action is not ReviewAction.REQUEST_INFO and vendor_next_actions:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions are only allowed when requesting information",
+            )
+
         if state.status is WorkflowStatus.ESCALATED and action is ReviewAction.APPROVE:
             raise LocalApiError(403, "escalation_locked", "an escalated case cannot be approved")
         if action is ReviewAction.APPROVE and state.draft_packet is None:
@@ -522,11 +551,21 @@ class LocalReviewApi:
             ReviewAction.REQUEST_INFO: CaseLifecycle.CHANGES_REQUESTED,
         }.get(action)
         if lifecycle_target is not None:
-            self._transition_vendor_case(case_id, lifecycle_target)
+            self._transition_vendor_case(
+                case_id,
+                lifecycle_target,
+                vendor_visible_comment=vendor_visible_comment,
+                vendor_next_actions=vendor_next_actions,
+            )
             self._notify(
                 case_id,
                 f"review.{lifecycle_target.value}",
                 f"Case {case_id} decision recorded: {action.value} (v{decision_version}).",
+            )
+            self._email_vendor_outcome(
+                case_id,
+                lifecycle_target,
+                product_name=record.state.case_input.product_name,
             )
         return self._case_payload(record)
 
@@ -854,6 +893,11 @@ class LocalReviewApi:
         return self._vendor_call(
             lambda: self._vendor.finalize_submission(token).to_vendor_dict()
         )
+
+    def vendor_review_status(self, token: str) -> dict[str, Any]:
+        status = self._vendor_call(lambda: self._vendor.review_status(token))
+        validate_definition(status, "vendor-intake", "ReviewStatus")
+        return status
 
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
@@ -1272,15 +1316,112 @@ class LocalReviewApi:
             if profile.profile_key in {"security", "accessibility"}
         }
 
-    def _transition_vendor_case(self, case_id: str, target: CaseLifecycle) -> None:
+    def _transition_vendor_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> None:
         """Persist the vendor-case lifecycle transition, tolerating benign no-ops."""
+        kwargs: dict[str, Any] = {}
+        if vendor_visible_comment is not _UNSET:
+            kwargs["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            kwargs["vendor_next_actions"] = vendor_next_actions
         try:
-            self._vendor.transition_case(case_id, target)
+            self._vendor.transition_case(case_id, target, **kwargs)
         except VendorBackendError:
             # A lifecycle that cannot legally advance (e.g. an already-closed
             # case) must not mask the primary reviewer action; the workflow
             # state remains the source of truth for the write boundary.
             pass
+
+    # Deterministic outcome copy (issue #38). Recipients get the human decision
+    # verbatim; no model-generated text is sent to vendors.
+    _OUTCOME_EMAILS: dict[CaseLifecycle, tuple[str, str]] = {
+        CaseLifecycle.APPROVED: (
+            "passed",
+            "The campus technology review for {product} has passed. The campus "
+            "team will follow up with any remaining onboarding steps. Reply to "
+            "this email if you have questions.",
+        ),
+        CaseLifecycle.DECLINED: (
+            "did not pass",
+            "The campus technology review for {product} did not pass. Reply to "
+            "this email or contact your campus reviewer for details about the "
+            "decision.",
+        ),
+        CaseLifecycle.CHANGES_REQUESTED: (
+            "needs changes",
+            "The campus technology review for {product} needs additional "
+            "information before it can be completed. Open your invitation link "
+            "to see the outstanding items, or reply to this email if you are "
+            "unsure what is being requested.",
+        ),
+    }
+
+    def _email_vendor_outcome(
+        self, case_id: str, lifecycle: CaseLifecycle, *, product_name: str
+    ) -> None:
+        """Email the invited vendor contact when a human decision is recorded.
+
+        The recipient is the contact whose invitation carries the submitted
+        evidence (the SUBMITTED invite); a newer invitation issued to a
+        different contact never diverts the outcome. Only when no submission
+        was finalized does the newest non-revoked invitation apply. Delivery is
+        recorded idempotently: the same outcome for a case (a re-recorded
+        decision or a retried invocation) never sends or persists a duplicate.
+        Best-effort: a case without a vendor invitation (no intake ran) sends
+        nothing, and a failed delivery never blocks the reviewer decision. The
+        truthful delivery mode is persisted on an integration event.
+        """
+        outcome = self._OUTCOME_EMAILS.get(lifecycle)
+        if outcome is None:
+            return
+        dedupe_key = f"{case_id}:{lifecycle.value}"
+        if self._vendor.notification_recorded(
+            event_type="email.notification", dedupe_key=dedupe_key
+        ):
+            return
+        invites = [
+            invite
+            for invite in self._vendor.list_invites(case_id)
+            if invite.status is not InviteStatus.REVOKED
+        ]
+        if not invites:
+            return
+        submitted = [
+            invite for invite in invites if invite.status is InviteStatus.SUBMITTED
+        ]
+        if submitted:
+            invite = max(submitted, key=lambda item: item.submitted_at or item.issued_at)
+        else:
+            invite = max(invites, key=lambda item: item.issued_at)
+        try:
+            contact = self._vendor.get_contact(invite.contact_id)
+        except VendorBackendError:
+            return
+        headline, body_template = outcome
+        subject = f"VETTED review outcome for {product_name}: {headline}"
+        body = body_template.format(product=product_name)
+        try:
+            delivery = self._email_sender.send(to=contact.email, subject=subject, body=body)
+        except Exception:  # noqa: BLE001 - never let notification block the decision
+            delivery = {
+                "delivery": "failed",
+                "simulated": False,
+                "channel": "email",
+                "to": contact.email,
+            }
+        self._vendor.record_notification(
+            case_id=case_id,
+            summary=subject,
+            delivery=delivery,
+            event_type="email.notification",
+            dedupe_key=dedupe_key,
+        )
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
         """Send/record a truthful notification (live Slack only when configured)."""

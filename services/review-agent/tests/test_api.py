@@ -191,6 +191,32 @@ class LocalReviewApiTests(unittest.TestCase):
         self.assertEqual(self.api.get_packet("TR-260714-018"), before)
         self.assertEqual(self.api.get_state("TR-260714-018")["human_edits"], [])
 
+    def test_vendor_public_decision_fields_are_bounded_and_atomic(self) -> None:
+        base = {
+            "case_id": "TR-260714-018",
+            "decision_version": 1,
+            "reviewer_id": "alex.reviewer@example.edu",
+            "action": "request_info",
+            "decided_at": "2026-07-14T20:34:00+00:00",
+        }
+        invalid_payloads = [
+            {**base, "vendor_visible_comment": 7},
+            {**base, "vendor_visible_comment": "x" * 2001},
+            {**base, "vendor_visible_comment": "   "},
+            {**base, "vendor_next_actions": "upload evidence"},
+            {**base, "vendor_next_actions": ["item"] * 11},
+            {**base, "vendor_next_actions": ["   "]},
+            {**base, "action": "approve", "vendor_next_actions": ["not allowed"]},
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(LocalApiError) as invalid:
+                    self.api.review_case("TR-260714-018", payload)
+                self.assertEqual(invalid.exception.status, 400)
+                self.assertIsNone(
+                    self.api.get_state("TR-260714-018")["human_decision"]
+                )
+
     def test_low_risk_recommendation_edit_is_versioned(self) -> None:
         reviewed = self.api.review_case(
             "TR-260714-018",

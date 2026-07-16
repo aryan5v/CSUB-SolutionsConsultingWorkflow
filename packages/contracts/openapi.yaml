@@ -98,7 +98,7 @@ paths:
   /cases/{id}/review:
     post:
       tags: [review]
-      summary: Record a reviewer decision (approve, reject, request_info) and edits.
+      summary: Record a reviewer decision and edits, with internal comments separated from explicitly vendor-visible messaging.
       operationId: reviewCase
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       requestBody:
@@ -335,6 +335,14 @@ paths:
       summary: Finalize the vendor submission once.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Immutable finalized submission.}}
+  /vendor/invites/{token}/status:
+    get:
+      tags: [vendor-intake]
+      summary: Vendor-safe review status; stays readable after the submission is finalized, until the invitation expires.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: Per-requirement evidence status, collapsed review stage, human outcome, explicit vendor-visible comment, and safe next actions., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
+        "410": {description: Expired or revoked.}
   /review-profiles:
     get:
       tags: [profiles]

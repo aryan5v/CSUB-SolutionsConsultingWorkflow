@@ -42,6 +42,7 @@ _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
 _NORMALIZE_TOKENS = re.compile(r"[^a-z0-9]+")
+_UNSET = object()
 
 
 class VendorBackendError(ValueError):
@@ -589,6 +590,124 @@ class VendorBackend:
                 )
         return sorted(questions, key=lambda item: item["requirement_id"])
 
+    # Vendor-safe review-stage projection (issue #38): internal lifecycle states
+    # collapse to the few stages a vendor may see; reviewer-only states never
+    # leak through the vendor endpoints.
+    _VENDOR_REVIEW_STAGES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.DRAFT: "collecting_evidence",
+        CaseLifecycle.INVITED: "collecting_evidence",
+        CaseLifecycle.OPENED: "collecting_evidence",
+        CaseLifecycle.IN_PROGRESS: "collecting_evidence",
+        CaseLifecycle.SUBMITTED: "under_review",
+        CaseLifecycle.ANALYZING: "under_review",
+        CaseLifecycle.NEEDS_REVIEW: "under_review",
+        CaseLifecycle.CHANGES_REQUESTED: "changes_requested",
+        CaseLifecycle.APPROVED: "decided",
+        CaseLifecycle.DECLINED: "decided",
+        CaseLifecycle.WRITEBACK_COMPLETE: "decided",
+    }
+    _VENDOR_OUTCOMES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.APPROVED: "approved",
+        CaseLifecycle.WRITEBACK_COMPLETE: "approved",
+        CaseLifecycle.DECLINED: "declined",
+    }
+
+    def review_status(self, token: str) -> dict[str, Any]:
+        """Vendor-facing review status: received/outstanding checklist and stage.
+
+        Unlike the draft operations this stays readable after the submission is
+        finalized (the invite is SUBMITTED) so a vendor can track the review and
+        its outcome without contacting the campus team (issue #38). The
+        checklist is exposed only after intake analysis has run, consistent with
+        staged intake.
+        """
+        invite = self._status_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        case = self._require("case", invite.case_id, VendorCase)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return {
+            "invite": {
+                "invite_id": invite.invite_id,
+                "case_id": invite.case_id,
+                "status": invite.status.value,
+                "expires_at": invite.expires_at,
+            },
+            "vendor": {"vendor_id": vendor.vendor_id, "name": vendor.name},
+            "product": {"product_id": product.product_id, "name": product.name},
+            "submission_status": submission.status.value,
+            "intake_analysis_complete": submission.intake_analysis_complete,
+            "review_stage": self._VENDOR_REVIEW_STAGES[case.lifecycle],
+            "outcome": self._VENDOR_OUTCOMES.get(case.lifecycle),
+            "vendor_visible_comment": case.vendor_visible_comment,
+            "next_actions": (
+                list(case.vendor_next_actions)
+                if case.lifecycle is CaseLifecycle.CHANGES_REQUESTED
+                else []
+            ),
+            "checklist": self._checklist(submission),
+        }
+
+    def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
+        """Active-profile requirements with an honest per-requirement status.
+
+        ``received``: an evidence artifact is linked to the requirement through
+        a coverage item. ``processing``: only an unvalidated free-text answer
+        exists; it is never presented as received evidence. ``outstanding``:
+        nothing was provided. The contract additionally reserves ``accepted``,
+        ``invalid``, and ``stale`` for evidence validation (issue #36), which
+        this projection does not perform.
+        """
+        if not submission.intake_analysis_complete:
+            # Staged intake: requirement names are exposed only after the
+            # deterministic analysis step, matching unresolved_questions.
+            return []
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items: list[dict[str, Any]] = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in covered:
+                    status = "received"
+                elif criterion.requirement_id in answered:
+                    status = "processing"
+                else:
+                    status = "outstanding"
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "question": criterion.question,
+                        "expected_evidence": list(criterion.expected_evidence),
+                        "status": status,
+                    }
+                )
+        return sorted(items, key=lambda item: item["requirement_id"])
+
+    def _status_invite(self, token: str) -> VendorInvite:
+        """Token lookup for the read-only status view; permits submitted invites."""
+        if not isinstance(token, str) or not token:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self.repository.find_invite_by_token_hash(
+            self._hash_token(token), workspace_id=self.workspace_id
+        )
+        if invite is None:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        if invite.status is InviteStatus.REVOKED:
+            raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        # Expiry applies to submitted invitations too: the status view is
+        # readable after finalize, but only within the invitation's lifetime,
+        # matching the expiry semantics of every other token operation.
+        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        if self._now_datetime() >= expires:
+            if invite.status is not InviteStatus.SUBMITTED:
+                self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
+        return invite
+
     def intake_stage(self, token: str) -> dict[str, Any]:
         """Return the current staged-intake position for the vendor UI."""
         invite = self._valid_invite(token)
@@ -854,28 +973,48 @@ class VendorBackend:
         ),
     }
 
-    def transition_case(self, case_id: str, target: CaseLifecycle) -> VendorCase:
+    def transition_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> VendorCase:
         """Persist a reviewer/analysis lifecycle transition (issue #27).
 
-        Idempotent (target == current is a no-op) and validated against the
-        documented forward transition map. Emits an integration event so the
-        state change is auditable and observable in the demo.
+        Public messaging is stored on the vendor-case projection, separately
+        from internal reviewer comments. Analysis transitions omit these
+        arguments and preserve the last public message. Human outcomes pass
+        them explicitly, clearing stale actions on approve/decline. When a
+        changes-requested decision has no authored actions, stable outstanding
+        requirement IDs provide safe next steps without exposing findings,
+        policy, risk, or reviewer notes.
         """
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
         if not isinstance(case, VendorCase):
             # A case that was never registered as a vendor case has no lifecycle
             # to persist; callers treat this as a benign no-op.
             return None  # type: ignore[return-value]
-        if case.lifecycle is target:
+        if case.lifecycle is not target:
+            allowed = self._ALLOWED_TRANSITIONS.get(target)
+            if allowed is None or case.lifecycle not in allowed:
+                raise VendorBackendError(
+                    "invalid_transition",
+                    f"cannot move case from {case.lifecycle.value} to {target.value}",
+                    status=409,
+                )
+        updates: dict[str, Any] = {"lifecycle": target}
+        if vendor_visible_comment is not _UNSET:
+            updates["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            actions = tuple(vendor_next_actions)  # type: ignore[arg-type]
+            if target is CaseLifecycle.CHANGES_REQUESTED and not actions:
+                actions = self._derive_vendor_next_actions(case_id)
+            updates["vendor_next_actions"] = actions
+        updated = replace(case, **updates)
+        if updated == case:
             return case
-        allowed = self._ALLOWED_TRANSITIONS.get(target)
-        if allowed is None or case.lifecycle not in allowed:
-            raise VendorBackendError(
-                "invalid_transition",
-                f"cannot move case from {case.lifecycle.value} to {target.value}",
-                status=409,
-            )
-        updated = replace(case, lifecycle=target)
         self._put("case", case_id, updated)
         self._event(
             "case.transitioned",
@@ -886,26 +1025,86 @@ class VendorBackend:
         )
         return updated
 
+    def _derive_vendor_next_actions(self, case_id: str) -> tuple[str, ...]:
+        requirement_ids: tuple[str, ...] = ()
+        run_id = self.repository.get_current_run_id(case_id, workspace_id=self.workspace_id)
+        if run_id is not None:
+            run = self.repository.get("run", run_id, workspace_id=self.workspace_id)
+            if isinstance(run, ReviewRun):
+                requirement_ids = run.unresolved_requirement_ids
+        if not requirement_ids:
+            submissions = [
+                item
+                for item in self._list("submission", Submission)
+                if item.case_id == case_id and item.intake_analysis_complete
+            ]
+            if submissions:
+                submission = max(
+                    submissions,
+                    key=lambda item: item.finalized_at or item.updated_at or "",
+                )
+                requirement_ids = tuple(
+                    item["requirement_id"]
+                    for item in self._checklist(submission)
+                    if item["status"] == "outstanding"
+                )
+        unique_ids = tuple(dict.fromkeys(sorted(requirement_ids)))[:10]
+        if unique_ids:
+            return tuple(
+                f"Provide information or evidence for requirement {requirement_id}."
+                for requirement_id in unique_ids
+            )
+        return ("Contact your campus reviewer to confirm the requested updates.",)
+
     def get_case_lifecycle(self, case_id: str) -> str | None:
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
         return case.lifecycle.value if isinstance(case, VendorCase) else None
 
     def record_notification(
-        self, *, case_id: str | None, summary: str, delivery: dict[str, Any]
+        self,
+        *,
+        case_id: str | None,
+        summary: str,
+        delivery: dict[str, Any],
+        event_type: str = "slack.notification",
+        dedupe_key: str | None = None,
     ) -> IntegrationEvent:
-        """Persist an auditable notification event with its truthful delivery mode."""
+        """Persist an auditable notification event with its truthful delivery mode.
+
+        The raw recipient address is never persisted: the event carries a
+        SHA-256 digest instead, which stays auditable (a known address can be
+        verified against it) without storing personal data in the event log.
+        An optional ``dedupe_key`` is persisted so callers can record and check
+        delivery idempotently (issue #38).
+        """
+        detail = {
+            "summary": summary,
+            "delivery": delivery.get("delivery"),
+            "simulated": delivery.get("simulated", True),
+            "channel": delivery.get("channel"),
+        }
+        if delivery.get("to"):
+            detail["recipient_sha256"] = self._hash_recipient(str(delivery["to"]))
+        if dedupe_key is not None:
+            detail["dedupe_key"] = dedupe_key
         return self._event(
-            "slack.notification",
+            event_type,
             "notification",
             case_id or "workspace",
             case_id=case_id,
-            detail={
-                "summary": summary,
-                "delivery": delivery.get("delivery"),
-                "simulated": delivery.get("simulated", True),
-                "channel": delivery.get("channel"),
-            },
+            detail=detail,
         )
+
+    def notification_recorded(self, *, event_type: str, dedupe_key: str) -> bool:
+        """True when a notification with this dedupe key was already persisted."""
+        return any(
+            event.event_type == event_type and event.detail.get("dedupe_key") == dedupe_key
+            for event in self._list("event", IntegrationEvent)
+        )
+
+    @staticmethod
+    def _hash_recipient(recipient: str) -> str:
+        return hashlib.sha256(recipient.strip().lower().encode("utf-8")).hexdigest()
 
     # Immutable run versions --------------------------------------------------
 

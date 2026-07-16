@@ -110,6 +110,52 @@
         "source_citation": {"type": "object", "required": ["source_id"], "properties": {"source_id": {"type": "string"}}, "additionalProperties": true}
       }
     },
+    "ReviewStatusChecklistItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requirement_id", "question", "expected_evidence", "status"],
+      "properties": {
+        "requirement_id": {"type": "string"}, "question": {"type": "string"},
+        "expected_evidence": {"type": "array", "items": {"type": "string"}},
+        "status": {
+          "enum": ["received", "processing", "accepted", "invalid", "stale", "outstanding"],
+          "description": "received: evidence artifact linked to the requirement; processing: unvalidated free-text answer only; accepted/invalid/stale: set by evidence validation (issue #36); outstanding: nothing provided."
+        }
+      }
+    },
+    "ReviewStatus": {
+      "type": "object", "additionalProperties": false,
+      "description": "Vendor-safe status projection; internal lifecycle states collapse to a small stage vocabulary and no reviewer-only data is included.",
+      "required": ["invite", "vendor", "product", "submission_status", "intake_analysis_complete", "review_stage", "outcome", "vendor_visible_comment", "next_actions", "checklist"],
+      "properties": {
+        "invite": {
+          "type": "object", "additionalProperties": false,
+          "required": ["invite_id", "case_id", "status", "expires_at"],
+          "properties": {
+            "invite_id": {"type": "string"}, "case_id": {"type": "string"},
+            "status": {"enum": ["issued", "opened", "in_progress", "submitted", "revoked", "expired"]},
+            "expires_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        "vendor": {
+          "type": "object", "additionalProperties": false, "required": ["vendor_id", "name"],
+          "properties": {"vendor_id": {"type": "string"}, "name": {"type": "string"}}
+        },
+        "product": {
+          "type": "object", "additionalProperties": false, "required": ["product_id", "name"],
+          "properties": {"product_id": {"type": "string"}, "name": {"type": "string"}}
+        },
+        "submission_status": {"enum": ["draft", "finalized"]},
+        "intake_analysis_complete": {"type": "boolean"},
+        "review_stage": {"enum": ["collecting_evidence", "under_review", "changes_requested", "decided"]},
+        "outcome": {"enum": ["approved", "declined", null]},
+        "vendor_visible_comment": {"type": ["string", "null"], "minLength": 1, "maxLength": 2000},
+        "next_actions": {
+          "type": "array", "maxItems": 10,
+          "items": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "checklist": {"type": "array", "items": {"$ref": "#/$defs/ReviewStatusChecklistItem"}}
+      }
+    },
     "Submission": {
       "type": "object", "additionalProperties": false,
       "required": ["workspace_id", "submission_id", "invite_id", "case_id", "product_id", "version", "status", "trust_center_url", "answers", "evidence_artifact_ids", "coverage_ids", "updated_at", "finalized_at"],

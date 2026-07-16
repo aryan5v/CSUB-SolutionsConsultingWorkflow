@@ -5,9 +5,12 @@ import {
   createReviewApiClient,
   decisionVersion,
   packetEditSection,
+  checklistStatusLabel,
+  checklistStatusSettled,
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
+  reviewStageLabel,
   secureCorrelationId,
   suppressResolvedQuestions,
   vendorInviteUrl,
@@ -147,6 +150,8 @@ describe("review API client", () => {
       reviewer_id: "alex.reviewer@example.edu",
       action: "approve",
       decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal reviewer note",
+      vendor_visible_comment: "Vendor-safe completion message",
       edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
     });
     await client.previewWriteback("TR-260714-014");
@@ -159,6 +164,8 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
       case_id: "TR-260714-014",
       action: "approve",
+      comments: "Internal reviewer note",
+      vendor_visible_comment: "Vendor-safe completion message",
       edits: [{ section_key: "committee_routing", body: "Reviewer edit" }],
     });
     expect(fetchMock.mock.calls[2][0]).toBe(
@@ -167,6 +174,34 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toEqual({
       second_confirmation: true,
       expected_version: 3,
+    });
+  });
+
+  it("sends vendor-visible next actions only as explicit decision fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      state: state(), queue_item: {}, audit_events: [], simulated: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await client.recordDecision("TR-260714-014", {
+      decision_version: 1,
+      reviewer_id: "alex.reviewer@example.edu",
+      action: "request_info",
+      decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal note",
+      vendor_visible_comment: "Please provide the requested update.",
+      vendor_next_actions: ["Upload the current product-specific ACR."],
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      case_id: "TR-260714-014",
+      decision_version: 1,
+      reviewer_id: "alex.reviewer@example.edu",
+      action: "request_info",
+      decided_at: "2026-07-14T20:30:00.000Z",
+      comments: "Internal note",
+      vendor_visible_comment: "Please provide the requested update.",
+      vendor_next_actions: ["Upload the current product-specific ACR."],
     });
   });
 
@@ -303,6 +338,57 @@ describe("vendor invitation security", () => {
     expect(url).not.toContain("raw-secret-token");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("fetches the vendor review status with the bearer token only", async () => {
+    const status = {
+      invite: { invite_id: "invite-1", case_id: "case-1", expires_at: "2026-07-20T00:00:00Z", status: "submitted" },
+      vendor: { vendor_id: "vendor-1", name: "Vendor" },
+      product: { product_id: "product-1", name: "Product" },
+      submission_status: "finalized",
+      intake_analysis_complete: true,
+      review_stage: "changes_requested",
+      outcome: null,
+      vendor_visible_comment: "Please update the accessibility evidence.",
+      next_actions: ["Upload the current product-specific ACR."],
+      checklist: [
+        { requirement_id: "A11Y.VPAT.001", question: "Provide a current VPAT.", expected_evidence: ["VPAT"], status: "received" },
+        { requirement_id: "SEC.DATA.001", question: "Describe encryption controls.", expected_evidence: ["SOC 2"], status: "processing" },
+        { requirement_id: "SEC.HECVAT.001", question: "Provide a HECVAT.", expected_evidence: ["HECVAT"], status: "outstanding" },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(status));
+    const reviewer = authProvider("must-not-leak");
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: reviewer });
+
+    const resolved = await client.getReviewStatus("raw-secret-token");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/vendor/invites/current/status");
+    expect(url).not.toContain("raw-secret-token");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
+    expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+    expect(resolved.checklist.map((item) => item.status)).toEqual(["received", "processing", "outstanding"]);
+    // An unvalidated free-text answer is never presented as received evidence.
+    expect(resolved.checklist.map((item) => checklistStatusLabel(item.status))).toEqual([
+      "Received",
+      "Processing",
+      "Outstanding",
+    ]);
+    expect(checklistStatusSettled("received")).toBe(true);
+    expect(checklistStatusSettled("accepted")).toBe(true);
+    expect(checklistStatusSettled("processing")).toBe(false);
+    expect(checklistStatusSettled("invalid")).toBe(false);
+    expect(checklistStatusSettled("stale")).toBe(false);
+    expect(checklistStatusLabel("invalid")).toBe("Needs attention");
+    expect(checklistStatusLabel("stale")).toBe("Out of date");
+    expect(resolved.vendor_visible_comment).toBe("Please update the accessibility evidence.");
+    expect(resolved.next_actions).toEqual(["Upload the current product-specific ACR."]);
+    expect(reviewStageLabel(resolved)).toBe("Changes requested");
+    expect(reviewStageLabel({ review_stage: "under_review", outcome: null })).toBe("Under campus review");
+    expect(reviewStageLabel({ review_stage: "decided", outcome: "approved" })).toBe("Review passed");
+    expect(reviewStageLabel({ review_stage: "decided", outcome: "declined" })).toBe("Review did not pass");
+    expect(reviewStageLabel({ review_stage: "changes_requested", outcome: null })).toBe("Changes requested");
   });
 
   it("polls current vendor evidence with the invite bearer and reviewer evidence with Cognito", async () => {
