@@ -916,7 +916,7 @@ class LambdaApiTests(unittest.TestCase):
             headers=headers,
             authenticated=False,
             body={
-                "filename": "vpat-large.pdf",
+                "filename": "certificate-of-insurance-large.pdf",
                 "content_type": "application/pdf",
                 "size_bytes": 700_001,
                 "sha256": "d" * 64,

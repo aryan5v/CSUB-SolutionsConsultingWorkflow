@@ -902,6 +902,13 @@ class VendorBackend:
         findings: list[EvidenceValidationFinding] = []
         for artifact in evidence:
             evidence_type = classify_evidence_type(artifact.filename, artifact.content_type)
+            if evidence_type is None:
+                # Issue #36 defines deterministic content rules only for COI,
+                # pen-test, and PCI documents. Evidence of any other type has no
+                # content check to run, so it is neither validated nor blocked
+                # here: existing filename-based auto-coverage is unchanged and a
+                # reviewer can still inspect the retained artifact.
+                continue
             text, content_status = self._evidence_text(artifact)
             fields: dict[str, Any] = {}
             if content_status == "unavailable":
@@ -936,19 +943,9 @@ class VendorBackend:
                 failures = validate_identity(
                     fields=fields, vendor_name=vendor.name, product_name=product.name
                 )
-                if evidence_type is None:
-                    failures.append(
-                        {
-                            "check": "evidence.type_unknown",
-                            "reason": "Evidence type could not be determined safely; a human must "
-                            "classify the retained artifact before it can cover a requirement.",
-                            "disposition": "manual_review",
-                        }
-                    )
-                else:
-                    failures.extend(
-                        validate_evidence(evidence_type=evidence_type, fields=fields, today=today)
-                    )
+                failures.extend(
+                    validate_evidence(evidence_type=evidence_type, fields=fields, today=today)
+                )
             for failure in failures:
                 line = self._finding_line(fields, failure["check"])
                 finding = EvidenceValidationFinding(

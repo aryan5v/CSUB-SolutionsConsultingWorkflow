@@ -195,10 +195,11 @@ class VendorResearchIntegrationTests(unittest.TestCase):
             q["requirement_id"] for q in without_provider.unresolved_questions(token_b)
         ]
 
-        # Research is provenance-only. Because this fixture registers metadata
-        # without evidence bytes, fail-closed validation keeps both requirements
-        # open; adding a research provider must not change that coverage result.
-        self.assertEqual(questions_with, ["A11Y.VPAT.001", "SEC.DATA.001"])
+        # Research is provenance-only. This fixture registers a SOC 2 document
+        # (an unvalidated type) that covers SEC.DATA.001 by filename, leaving
+        # only the VPAT requirement open; adding a research provider must not
+        # change that coverage result.
+        self.assertEqual(questions_with, ["A11Y.VPAT.001"])
         self.assertEqual(questions_with, questions_without)
         # No provider -> research honestly reported as not performed, no findings.
         self.assertIsNone(without_provider.intake_research(token_b))

@@ -450,7 +450,13 @@ class IntakeValidationTests(unittest.TestCase):
         }
         self.assertIn("SEC.PENTEST.001", unresolved)
 
-    def test_unknown_artifact_is_retained_for_manual_review_and_cannot_cover(self) -> None:
+    def test_unknown_artifact_is_retained_without_content_validation(self) -> None:
+        # Issue #36 defines deterministic content rules only for COI/pen-test/PCI.
+        # An unrecognized document type is retained and simply not content-
+        # validated (no finding); it neither fails closed nor is content-checked,
+        # so filename-based auto-coverage applies as before. Here the document's
+        # filename matches SEC.PENTEST.001's expected evidence, so it covers that
+        # requirement without any content gating.
         self.add_document(
             "penetration-summary.txt",
             "UNCLASSIFIED SECURITY SUMMARY\nreview_status: available\n",
@@ -458,17 +464,13 @@ class IntakeValidationTests(unittest.TestCase):
         self.backend.run_intake_analysis(self.token)
 
         findings = self.backend.submission_findings(self.token)
-        self.assertEqual(
-            [(item["check"], item["evidence_type"], item["disposition"]) for item in findings],
-            [("evidence.type_unknown", "unknown", "manual_review")],
-        )
-        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        self.assertEqual(findings, [])
         submission = self.backend.resolve_invite(self.token)["submission"]
         self.assertEqual(len(submission["evidence_artifact_ids"]), 1)
         unresolved = {
             item["requirement_id"] for item in self.backend.unresolved_questions(self.token)
         }
-        self.assertIn("SEC.PENTEST.001", unresolved)
+        self.assertNotIn("SEC.PENTEST.001", unresolved)
 
     def test_unreadable_artifact_is_retained_for_manual_review_and_cannot_cover(self) -> None:
         self.add_document_bytes("coi-acme.pdf", b"\xff\xfe\x00\x01", content_type="application/pdf")

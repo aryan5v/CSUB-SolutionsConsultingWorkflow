@@ -94,7 +94,7 @@ class VendorBackendTests(unittest.TestCase):
         artifact = self.backend.add_evidence(
             token,
             {
-                "filename": "soc2-report.pdf",
+                "filename": "certificate-of-insurance.pdf",
                 "content_type": "application/pdf",
                 "size_bytes": 100,
                 "sha256": "a" * 64,
@@ -107,8 +107,9 @@ class VendorBackendTests(unittest.TestCase):
         self.assertEqual(pending.exception.code, "intake_analysis_pending")
         analyzed = self.backend.run_intake_analysis(token)
         self.assertTrue(analyzed.intake_analysis_complete)
-        # Metadata-only SOC 2 evidence is retained but cannot cover SEC.DATA.001
-        # by filename; both active requirements remain open for explicit answers.
+        # Metadata-only COI evidence (a validated type) is retained but fails
+        # closed with a content_unavailable finding, so it cannot cover any
+        # requirement; both active requirements remain open for explicit answers.
         questions = self.backend.unresolved_questions(token)
         self.assertEqual(
             [item["requirement_id"] for item in questions],
