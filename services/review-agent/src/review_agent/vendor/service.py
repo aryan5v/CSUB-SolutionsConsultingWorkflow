@@ -58,7 +58,9 @@ class VendorBackendError(ValueError):
 
 
 class VendorBackend:
-    MAX_RUN_VERSION = 2
+    # Run 1 is the initial analysis, run 2 the post-resubmission rerun, and one
+    # spare so a request-changes loop (issue #64) cannot dead-end a demo case.
+    MAX_RUN_VERSION = 3
 
     def __init__(
         self,
@@ -1014,6 +1016,60 @@ class VendorBackend:
         self._event("submission.finalized", "submission", finalized.submission_id, case_id=case.case_id)
         return finalized
 
+    def reopen_submission(self, case_id: str) -> Submission | None:
+        """Reopen a finalized submission so the vendor can revise it (issue #64).
+
+        Called when a reviewer requests changes: the case's submitted invite
+        becomes usable again and the single existing submission returns to a
+        draft with a bumped version. Prior evidence, answers, coverage, and the
+        completed intake analysis are preserved, so the vendor supplements
+        rather than restarts. A case with no submitted invite is a benign
+        no-op, matching ``transition_case`` tolerance for non-vendor cases.
+        """
+        invites = [
+            item
+            for item in self._list("invite", VendorInvite)
+            if item.case_id == case_id and item.status is InviteStatus.SUBMITTED
+        ]
+        if not invites:
+            return None
+        invite = max(invites, key=lambda item: item.issued_at)
+        submission = self._submission_for_invite(invite.invite_id)
+        if submission.status is not SubmissionStatus.FINALIZED:
+            return None
+        now = self._now()
+        reopened = replace(
+            submission,
+            status=SubmissionStatus.DRAFT,
+            version=submission.version + 1,
+            finalized_at=None,
+            updated_at=now,
+        )
+        self._put("submission", reopened.submission_id, reopened)
+        # Give the vendor room to respond: a link about to lapse is extended by
+        # one full invite lifetime from now.
+        expires_at = invite.expires_at
+        if parse_utc_timestamp(expires_at) - self._now_datetime() < datetime.timedelta(hours=72):
+            expires_at = (self._now_datetime() + self.invite_ttl).isoformat()
+        self._put(
+            "invite",
+            invite.invite_id,
+            replace(
+                invite,
+                status=InviteStatus.IN_PROGRESS,
+                submitted_at=None,
+                expires_at=expires_at,
+            ),
+        )
+        self._event(
+            "submission.reopened",
+            "submission",
+            reopened.submission_id,
+            case_id=case_id,
+            detail={"version": reopened.version},
+        )
+        return reopened
+
     # Reviewer-driven lifecycle transitions ----------------------------------
 
     _ALLOWED_TRANSITIONS: dict[CaseLifecycle, frozenset[CaseLifecycle]] = {
@@ -1501,12 +1557,13 @@ class VendorBackend:
         previous = (
             self._require("run", previous_id, ReviewRun) if previous_id is not None else None
         )
-        # Exactly one rerun per demo case: run 1 is the initial run, run 2 is the
-        # single permitted rerun with custom instructions (issue #27).
+        # Bounded reruns per demo case (issue #27, relaxed for the
+        # request-changes loop in issue #64): each rerun creates a new
+        # immutable version and invalidates stale decisions.
         if previous is not None and previous.run_version >= self.MAX_RUN_VERSION:
             raise VendorBackendError(
                 "rerun_limit_reached",
-                "only one rerun is permitted per demo case",
+                f"at most {self.MAX_RUN_VERSION} run versions are permitted per demo case",
                 status=409,
             )
         clean_instructions: str | None = None
@@ -1741,7 +1798,11 @@ class VendorBackend:
         if invite.status in {InviteStatus.ISSUED, InviteStatus.OPENED}:
             self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.IN_PROGRESS))
         case = self._require("case", invite.case_id, VendorCase)
-        self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
+        # A reopened changes-requested case keeps its truthful stage (and the
+        # reviewer comment/next actions with it) until the vendor re-finalizes;
+        # draft edits must not silently downgrade it to IN_PROGRESS (issue #64).
+        if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
+            self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
 
     def _valid_invite(self, token: str) -> VendorInvite:
         if not isinstance(token, str) or not token:

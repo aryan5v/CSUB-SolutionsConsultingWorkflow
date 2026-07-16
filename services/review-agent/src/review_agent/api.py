@@ -584,6 +584,10 @@ class LocalReviewApi:
                 vendor_visible_comment=vendor_visible_comment,
                 vendor_next_actions=vendor_next_actions,
             )
+            if action is ReviewAction.REQUEST_INFO:
+                # Requesting changes reopens the finalized submission so the
+                # vendor's existing link becomes editable again (issue #64).
+                self._vendor.reopen_submission(case_id)
             self._notify(
                 case_id,
                 f"review.{lifecycle_target.value}",
