@@ -848,6 +848,40 @@ describe('Retention, budget, and encryption', () => {
     });
   });
 
+  test('vendor email sender wiring only appears when a sender is configured', () => {
+    const withoutSender = build(baseConfig).platform;
+    const statementsWithout = Object.values(withoutSender.findResources('AWS::IAM::Policy'))
+      .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement as any[]);
+    expect(
+      statementsWithout.some((statement) => JSON.stringify(statement.Action).includes('ses:SendEmail')),
+    ).toBe(false);
+
+    const withSender = build({
+      ...baseConfig,
+      vendorEmailSender: 'no-reply@vetted.example.edu',
+    }).platform;
+    withSender.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'csub-case-proxy-test',
+      Environment: {
+        Variables: Match.objectLike({
+          VENDOR_EMAIL_SENDER: 'no-reply@vetted.example.edu',
+        }),
+      },
+    });
+    const sesStatements = Object.values(withSender.findResources('AWS::IAM::Policy'))
+      .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement as any[])
+      .filter((statement) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('ses:SendEmail');
+      });
+    expect(sesStatements).toHaveLength(1);
+    const sesResources = JSON.stringify(sesStatements[0].Resource);
+    expect(sesResources).toContain(
+      'ses:us-west-2:111111111111:identity/no-reply@vetted.example.edu',
+    );
+    expect(sesResources).toContain('ses:us-west-2:111111111111:identity/vetted.example.edu');
+  });
+
   test('seven-day AgentCore memory with a separately enabled pinned guardrail version', () => {
     const { platform } = build(enabledConfig);
     platform.hasResourceProperties('AWS::BedrockAgentCore::Memory', {

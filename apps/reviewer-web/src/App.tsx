@@ -902,6 +902,8 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
   const [selectedVendorId, setSelectedVendorId] = useState("");
   const [vendorName, setVendorName] = useState("");
   const [officialDomain, setOfficialDomain] = useState("");
+  const [vendorQuery, setVendorQuery] = useState("");
+  const [vendorListOpen, setVendorListOpen] = useState(false);
   const selectedVendor = vendors.find((vendor) => vendor.vendor_id === selectedVendorId);
 
   useEffect(() => {
@@ -914,15 +916,26 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
     return () => { active = false; };
   }, []);
 
+  const normalizedQuery = vendorQuery.trim().toLowerCase();
+  const vendorMatches = normalizedQuery
+    ? vendors.filter((vendor) =>
+        vendor.name.toLowerCase().includes(normalizedQuery) ||
+        (vendor.official_domain ?? "").toLowerCase().includes(normalizedQuery),
+      ).slice(0, 8)
+    : vendors.slice(0, 8);
+
   const chooseVendor = (vendorId: string) => {
     setSelectedVendorId(vendorId);
+    setVendorListOpen(false);
     if (!vendorId) {
+      setVendorQuery("");
       setVendorName("");
       setOfficialDomain("");
       return;
     }
     const vendor = vendors.find((item) => item.vendor_id === vendorId);
     if (!vendor) return;
+    setVendorQuery(vendor.name);
     setVendorName(vendor.name);
     setOfficialDomain(vendor.official_domain ?? "");
   };
@@ -961,15 +974,50 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
       <form onSubmit={submit}>
         <div className="form-grid">
           <label><span>Product name</span><input name="product_name" required placeholder="e.g. LabArchives" autoFocus /></label>
-          <label><span>Existing vendor</span>
-            <select value={selectedVendorId} onChange={(event) => chooseVendor(event.target.value)} aria-label="Select existing vendor">
-              <option value="">Create a new vendor</option>
-              {vendors.map((vendor) => (
-                <option key={vendor.vendor_id} value={vendor.vendor_id}>
-                  {vendor.name}{vendor.review_status && vendor.review_status !== "no_cases" ? ` · ${vendor.review_status.replace("_", " ")}` : ""}
-                </option>
-              ))}
-            </select>
+          <label className="vendor-search-field"><span>Existing vendor</span>
+            <input
+              type="search"
+              role="combobox"
+              aria-expanded={vendorListOpen}
+              aria-label="Search existing vendors"
+              placeholder="Search by name or domain, or leave empty for a new vendor"
+              value={vendorQuery}
+              onChange={(event) => {
+                setVendorQuery(event.target.value);
+                setVendorListOpen(true);
+                if (selectedVendorId) {
+                  setSelectedVendorId("");
+                  setVendorName("");
+                  setOfficialDomain("");
+                }
+              }}
+              onFocus={() => setVendorListOpen(true)}
+              onBlur={() => setVendorListOpen(false)}
+            />
+            {vendorListOpen && (
+              <ul className="vendor-search-results" role="listbox">
+                {vendorMatches.length === 0 && (
+                  <li className="vendor-search-empty">No matching vendors — a new vendor record will be created.</li>
+                )}
+                {vendorMatches.map((vendor) => (
+                  <li key={vendor.vendor_id}>
+                    <button type="button" role="option" aria-selected={vendor.vendor_id === selectedVendorId} onMouseDown={(event) => { event.preventDefault(); chooseVendor(vendor.vendor_id); }}>
+                      <span className="vendor-search-name">{vendor.name}</span>
+                      <span className="vendor-search-meta">
+                        {vendor.official_domain ?? "no domain"}
+                        {vendor.review_status && vendor.review_status !== "no_cases" ? ` · ${vendor.review_status.replace("_", " ")}` : ""}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {selectedVendor && (
+              <span className="vendor-search-selected">
+                Linked to existing vendor record{" "}
+                <button type="button" className="vendor-search-clear" onMouseDown={(event) => { event.preventDefault(); chooseVendor(""); }}>clear</button>
+              </span>
+            )}
           </label>
           <label><span>Vendor</span><input name="vendor_name" required placeholder="Legal vendor name" value={vendorName} onChange={(event) => setVendorName(event.target.value)} disabled={Boolean(selectedVendor)} /></label>
           <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" value={officialDomain} onChange={(event) => setOfficialDomain(event.target.value)} /></label>

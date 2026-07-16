@@ -972,8 +972,28 @@ export class PlatformStack extends cdk.Stack {
             }
           : {}),
         ...(slackSecret ? { SLACK_SECRET_ARN: slackSecret.secretArn } : {}),
+        ...(config.vendorEmailSender
+          ? { VENDOR_EMAIL_SENDER: config.vendorEmailSender }
+          : {}),
       },
     });
+
+    // Live vendor email is opt-in: without a configured verified SES sender
+    // the API keeps its simulated sender and no SES permission is granted.
+    if (config.vendorEmailSender) {
+      const senderDomain = config.vendorEmailSender.split('@')[1];
+      this.proxyFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ses:SendEmail'],
+          resources: [
+            `arn:${this.partition}:ses:${this.region}:${this.account}:identity/${config.vendorEmailSender}`,
+            ...(senderDomain
+              ? [`arn:${this.partition}:ses:${this.region}:${this.account}:identity/${senderDomain}`]
+              : []),
+          ],
+        }),
+      );
+    }
 
     // The deterministic API persists each domain projection to its existing
     // purpose-built table. AgentCore remains an independently gated future

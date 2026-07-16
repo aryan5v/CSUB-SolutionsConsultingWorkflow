@@ -51,11 +51,16 @@ the phased Twenty-to-vendor adaptation plan.
 
 **New request → vendor invite:** creating a case with vendor contact fields
 find-or-creates the operational vendor/product/contact, issues a tracked intake
-invitation, and records an invitation email attempt. Delivery is usually
-`simulated` until live SES is wired (issue #85); the reviewer UI still shows a
-copyable intake link. Vendor `review_status` (`pending_review` / `accepted` /
-`declined`) is derived from linked case lifecycles — it is not a stored Vendor
-table key and does not mutate the institutional approved-software catalog.
+invitation, and records an invitation email attempt. The New Request form
+offers a typeahead search over existing vendors (name or domain) instead of a
+scroll-only dropdown. Email delivery is `simulated` locally; the deployed
+Lambda sends live SES email when the stack is deployed with a verified sender
+(`-c vendorEmailSender=...` or `VENDOR_EMAIL_SENDER`), which also grants the
+scoped `ses:SendEmail` permission (issue #85 tracks requester notifications).
+The reviewer UI still shows a copyable intake link either way. Vendor
+`review_status` (`pending_review` / `accepted` / `declined`) is derived from
+linked case lifecycles — it is not a stored Vendor table key and does not
+mutate the institutional approved-software catalog.
 
 ## Start here
 
