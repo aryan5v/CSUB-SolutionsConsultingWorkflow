@@ -85,8 +85,14 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                # GitHub percent-encodes the colon inside the context claim.
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrganization}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:context:environment%3A${GitHubEnvironment}:workflow_ref:${GitHubOrganization}/${GitHubRepository}/.github/workflows/deploy.yml@refs/heads/main
+              # GitHub issues an immutable-subject token whose prefix is the
+              # owner/repo login@id pair. Matching that prefix with StringLike
+              # (rather than a full composite subject that assumed a non-existent
+              # "context" claim) keeps the trust scoped to this repository; the
+              # `production` environment's main-only branch policy restricts
+              # which refs can obtain the token.
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrganization}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:*
       Policies:
         - PolicyName: GuardedVettedDeployment
           PolicyDocument:
