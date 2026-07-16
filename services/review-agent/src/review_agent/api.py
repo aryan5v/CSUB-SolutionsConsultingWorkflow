@@ -37,7 +37,11 @@ from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
 from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
 from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
-from .ingestion.software_workbook import normalized_identity
+from .ingestion.software_workbook import (
+    XlsxWorkbookReader,
+    normalize_workbook,
+    normalized_identity,
+)
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
 from .orchestration.state import InMemoryCheckpointer
@@ -63,6 +67,39 @@ class _UnsetResearchProvider:
 
 
 _RESEARCH_PROVIDER_UNSET = _UnsetResearchProvider()
+
+# Institutional approved-software export (issue #67). The workbook stays out of
+# Git (data/raw/ is ignored); when it is present locally — or named by the
+# environment override — the full catalog seeds instead of the synthetic rows.
+_CATALOG_XLSX_ENV = "APPROVED_SOFTWARE_XLSX"
+_CATALOG_XLSX_DEFAULT = "data/raw/SNOW Export_approved_software_database.xlsx"
+
+
+def _local_catalog_records() -> list[ApprovedSoftwareRecord]:
+    """Load the real approved-software export when available, else nothing.
+
+    Truthful fallback: any missing or unreadable workbook returns an empty
+    list so callers seed the labeled synthetic sample set instead. The file
+    itself never enters Git.
+    """
+    from pathlib import Path
+
+    path = Path(os.environ.get(_CATALOG_XLSX_ENV) or _CATALOG_XLSX_DEFAULT)
+    if not path.is_file():
+        return []
+    try:
+        result = normalize_workbook(
+            XlsxWorkbookReader(path), source_id="src:approved-software-export"
+        )
+    except (ValueError, OSError) as error:
+        print(f"[catalog] could not load {path.name}: {error}; using sample records")
+        return []
+    report = result.reconciliation
+    print(
+        f"[catalog] loaded {report.output_rows} approved-software rows from "
+        f"{path.name} ({len(report.warnings)} warning(s))"
+    )
+    return result.records
 
 
 def _default_packet_storage(config: AppConfig) -> StorageClient:
@@ -209,7 +246,7 @@ class LocalReviewApi:
         self._evidence_uploads: EvidenceUploadIssuer = (
             evidence_uploads or build_evidence_upload_issuer()
         )
-        records = sample_records() + [
+        records = _local_catalog_records() or sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
                 canonical_name="LabArchives ELN",
