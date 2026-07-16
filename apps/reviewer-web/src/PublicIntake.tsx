@@ -30,7 +30,9 @@ function PixelLogo() {
 }
 
 function messageFor(error: unknown): string {
-  if (error instanceof ReviewApiError) return error.message;
+  if (error instanceof ReviewApiError) {
+    return `${error.message}${error.correlationId ? ` Reference: ${error.correlationId}.` : ""}`;
+  }
   if (error instanceof Error) return error.message;
   return "The intake service could not complete this request.";
 }

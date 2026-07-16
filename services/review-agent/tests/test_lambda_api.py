@@ -4,7 +4,9 @@ import contextlib
 import hashlib
 import io
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import _bootstrap  # noqa: F401
 
@@ -13,6 +15,7 @@ from review_agent.config import AppConfig
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
     InMemoryWorkspaceStore,
+    SnapshotConflictError,
     create_handler,
     restore_api,
     seed_workspace,
@@ -21,10 +24,25 @@ from review_agent.lambda_api import (
 from review_agent.research import build_research_provider
 
 
+class FakeAwsError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code, "Message": "synthetic failure"}}
+
+
+class FakeTableMeta:
+    def __init__(self, client: FakeTransactionClient) -> None:
+        self.client = client
+
+
 class FakeTable:
-    def __init__(self, *key_fields: str) -> None:
+    def __init__(self, name: str, *key_fields: str) -> None:
+        self.name = name
         self.key_fields = key_fields
         self.items: dict[tuple[object, ...], dict] = {}
+        self.put_calls: list[dict] = []
+        self.next_put_error_code: str | None = None
+        self.meta: FakeTableMeta
 
     def _key(self, value: dict) -> tuple[object, ...]:
         return tuple(value[field] for field in self.key_fields)
@@ -33,7 +51,12 @@ class FakeTable:
         item = self.items.get(self._key(Key))
         return {"Item": json.loads(json.dumps(item))} if item is not None else {}
 
-    def put_item(self, *, Item: dict) -> None:
+    def put_item(self, *, Item: dict, **kwargs) -> None:
+        self.put_calls.append({"Item": json.loads(json.dumps(Item)), **kwargs})
+        if self.next_put_error_code is not None:
+            code = self.next_put_error_code
+            self.next_put_error_code = None
+            raise FakeAwsError(code)
         self.items[self._key(Item)] = json.loads(json.dumps(Item))
 
     def delete_item(self, *, Key: dict) -> None:
@@ -52,20 +75,85 @@ class FakeTable:
         return None
 
 
+class FakeTransactionClient:
+    def __init__(self, tables: dict[str, FakeTable]) -> None:
+        self.tables = {table.name: table for table in tables.values()}
+        self.next_error_code: str | None = None
+        self.calls: list[list[dict]] = []
+
+    @staticmethod
+    def _value(value: dict) -> object:
+        if "S" in value:
+            return value["S"]
+        if "N" in value:
+            return int(value["N"])
+        if "BOOL" in value:
+            return value["BOOL"]
+        raise AssertionError(f"unsupported synthetic DynamoDB value: {value}")
+
+    @classmethod
+    def _item(cls, item: dict) -> dict:
+        return {key: cls._value(value) for key, value in item.items()}
+
+    def transact_write_items(self, *, TransactItems: list[dict]) -> None:
+        self.calls.append(json.loads(json.dumps(TransactItems)))
+        if self.next_error_code is not None:
+            code = self.next_error_code
+            self.next_error_code = None
+            raise FakeAwsError(code)
+
+        check = TransactItems[0]["ConditionCheck"]
+        check_table = self.tables[check["TableName"]]
+        check_key = self._item(check["Key"])
+        expected_revision = self._value(check["ExpressionAttributeValues"][":revision"])
+        snapshot = check_table.items.get(check_table._key(check_key))
+        if snapshot is None or snapshot.get("revision") != expected_revision:
+            raise FakeAwsError("TransactionCanceledException")
+
+        mutations: list[tuple[str, FakeTable, dict]] = []
+        for entry in TransactItems[1:]:
+            action = "Put" if "Put" in entry else "Delete"
+            mutation = entry[action]
+            table = self.tables[mutation["TableName"]]
+            value = self._item(mutation["Item"] if action == "Put" else mutation["Key"])
+            existing = table.items.get(table._key(value))
+            incoming_revision = self._value(
+                mutation["ExpressionAttributeValues"][":projection_revision"]
+            )
+            if (
+                existing is not None
+                and "projection_revision" in existing
+                and existing["projection_revision"] > incoming_revision
+            ):
+                raise FakeAwsError("TransactionCanceledException")
+            mutations.append((action, table, value))
+
+        for action, table, value in mutations:
+            if action == "Put":
+                table.items[table._key(value)] = json.loads(json.dumps(value))
+            else:
+                table.items.pop(table._key(value), None)
+
+
 def fake_dynamo_tables() -> dict[str, FakeTable]:
-    return {
-        "cases": FakeTable("case_id"),
-        "vendor": FakeTable("vendor_id"),
-        "product": FakeTable("product_id", "version"),
-        "contact": FakeTable("contact_id"),
-        "invite": FakeTable("token_hash"),
-        "submission": FakeTable("submission_id", "case_id"),
-        "review": FakeTable("case_id", "decision_version"),
-        "profile": FakeTable("user_id", "version"),
-        "integration": FakeTable("event_id", "occurred_at"),
-        "audit": FakeTable("case_id", "sequence"),
-        "idempotency": FakeTable("idempotency_key"),
+    keys = {
+        "cases": ("case_id",),
+        "vendor": ("vendor_id",),
+        "product": ("product_id", "version"),
+        "contact": ("contact_id",),
+        "invite": ("token_hash",),
+        "submission": ("submission_id", "case_id"),
+        "review": ("case_id", "decision_version"),
+        "profile": ("user_id", "version"),
+        "integration": ("event_id", "occurred_at"),
+        "audit": ("case_id", "sequence"),
+        "idempotency": ("idempotency_key",),
     }
+    tables = {name: FakeTable(name, *key_fields) for name, key_fields in keys.items()}
+    client = FakeTransactionClient(tables)
+    for table in tables.values():
+        table.meta = FakeTableMeta(client)
+    return tables
 
 
 class LambdaApiTests(unittest.TestCase):
@@ -249,6 +337,90 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(state["case_id"], case_id)
         self.assertEqual(state["case_input"]["product_name"], "Synthetic Calendar")
 
+    def test_fresh_authenticated_records_issue_open_and_revoke_across_cold_start(self) -> None:
+        _, vendor = self.call(
+            "POST",
+            "/vendors",
+            body={"name": "Disposable Canary Vendor", "official_domain": "canary.example"},
+        )
+        _, product = self.call(
+            "POST",
+            "/vendor-products",
+            body={"vendor_id": vendor["vendor_id"], "name": "Disposable Canary Product"},
+        )
+        _, contact = self.call(
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Sanitized Contact",
+                "email": "vendor@example.edu",
+            },
+        )
+        intake = {
+            "product_name": product["name"],
+            "vendor_name": vendor["name"],
+            "requester": {
+                "name": "Sanitized Requester",
+                "email": "requester@example.edu",
+                "department": "Library",
+            },
+            "use_case": "Disposable invitation reliability canary.",
+            "expected_users": 1,
+            "platform": ["web"],
+            "data_classification": "public",
+            "estimated_cost_usd": 0,
+            "integrations": [],
+            "uses_sso": False,
+            "uses_ai": False,
+            "classroom_or_public_use": False,
+        }
+        created_response, created = self.call("POST", "/cases", body=intake)
+        self.assertEqual(created_response["statusCode"], 201)
+        issue_response, issued = self.call(
+            "POST",
+            f"/cases/{created['case_id']}/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        self.assertEqual(issue_response["statusCode"], 201)
+        token = issued["token"]
+        self.assertNotIn(token, json.dumps(self.store.load_snapshot("csub-demo")))
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        opened = cold(
+            self.event(
+                "POST",
+                "/vendor/invites/current/open",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+                body={},
+            ),
+            None,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(json.loads(opened["body"])["invite"]["status"], "opened")
+
+        revoked_response, _ = self.call(
+            "POST", f"/invites/{issued['invite']['invite_id']}/revoke", body={}
+        )
+        self.assertEqual(revoked_response["statusCode"], 200)
+        terminal = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        terminal_payload = json.loads(terminal["body"])
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(terminal_payload["error"]["code"], "invite_revoked")
+        self.assertEqual(
+            terminal_payload["error"]["correlation_id"],
+            terminal["headers"]["X-Correlation-Id"],
+        )
+
     def _issue_invite(self):
         _, vendors = self.call("GET", "/vendors")
         vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
@@ -310,6 +482,104 @@ class LambdaApiTests(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertEqual(response["statusCode"], 410)
         self.assertEqual(payload["error"]["code"], "invite_revoked")
+
+    def test_concurrent_rotation_persists_exactly_one_replacement(self) -> None:
+        class RacingStore(InMemoryWorkspaceStore):
+            barrier: threading.Barrier | None = None
+
+            def load_snapshot(self, workspace_id: str):
+                value = super().load_snapshot(workspace_id)
+                barrier = self.barrier
+                if barrier is not None:
+                    barrier.wait(timeout=5)
+                return value
+
+        store = RacingStore()
+        seed_workspace(store)
+        handler_one = create_handler(store, allowed_origins=[self.origin])
+        handler_two = create_handler(store, allowed_origins=[self.origin])
+
+        def call(handler, method: str, path: str, *, body=None, headers=None, authenticated=True):
+            response = handler(
+                self.event(
+                    method,
+                    path,
+                    body=body,
+                    headers=headers,
+                    authenticated=authenticated,
+                ),
+                None,
+            )
+            return response, json.loads(response["body"]) if response["body"] else None
+
+        _, vendors = call(handler_one, "GET", "/vendors")
+        vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
+        _, contact = call(
+            handler_one,
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Concurrent Contact",
+                "email": "concurrent@example.edu",
+            },
+        )
+        _, issued = call(
+            handler_one,
+            "POST",
+            "/cases/TR-260714-014/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        source_token = issued["token"]
+        invite_id = issued["invite"]["invite_id"]
+        store.barrier = threading.Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    call,
+                    handler,
+                    "POST",
+                    f"/invites/{invite_id}/resend",
+                    body={},
+                )
+                for handler in (handler_one, handler_two)
+            ]
+            results = [future.result() for future in futures]
+        store.barrier = None
+
+        self.assertEqual(sorted(response[0]["statusCode"] for response in results), [200, 409])
+        conflict = next(payload for response, payload in results if response["statusCode"] == 409)
+        self.assertEqual(conflict["error"]["code"], "concurrent_update")
+        winner = next(payload for response, payload in results if response["statusCode"] == 200)
+        replacement_token = winner["token"]
+
+        terminal, payload = call(
+            handler_one,
+            "GET",
+            "/vendor/invites/current",
+            headers={"authorization": f"Bearer {source_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(payload["error"]["code"], "invite_revoked")
+        opened, payload = call(
+            handler_two,
+            "POST",
+            "/vendor/invites/current/open",
+            body={},
+            headers={"authorization": f"Bearer {replacement_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(payload["invite"]["status"], "opened")
+        snapshot = store.load_snapshot("csub-demo")
+        replacements = [
+            invite
+            for invite in snapshot["repository"]["records"]["invite"]
+            if invite.get("replaced_invite_id") == invite_id
+        ]
+        self.assertEqual(len(replacements), 1)
 
     def test_vendor_submission_and_review_runs_are_immutable_across_cold_starts(self) -> None:
         issued = self._issue_invite()
@@ -507,6 +777,179 @@ class LambdaApiTests(unittest.TestCase):
         self.assertNotIn(token, logged)
         record = json.loads(logged.strip())
         self.assertEqual(set(record), {"correlation_id", "event_type", "status"})
+
+    def test_invite_listing_projects_expiry_without_bumping_revision(self) -> None:
+        issued = self._issue_invite()
+        snapshot = self.store.load_snapshot("csub-demo")
+        revision = snapshot["persistence_revision"]
+        invite = next(
+            item
+            for item in snapshot["repository"]["records"]["invite"]
+            if item["invite_id"] == issued["invite"]["invite_id"]
+        )
+        invite["status"] = "issued"
+        invite["expires_at"] = "2000-01-01T00:00:00+00:00"
+        snapshot["persistence_revision"] = revision + 1
+        self.store.save_snapshot(
+            "csub-demo",
+            snapshot,
+            expected_revision=revision,
+        )
+        expected_revision = revision + 1
+
+        first, payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(first["statusCode"], 200)
+        projected = next(
+            item for item in payload["items"] if item["invite_id"] == invite["invite_id"]
+        )
+        self.assertEqual(projected["status"], "expired")
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+        second, second_payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(second["statusCode"], 200)
+        self.assertEqual(second_payload, payload)
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+    def test_dynamo_snapshot_write_always_sends_condition_and_maps_conflict(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        cases = tables["cases"]
+        snapshot = {
+            "persistence_revision": 1,
+            "repository": {"records": {}},
+            "cases": {},
+            "connector": {},
+        }
+
+        def options(call: dict) -> dict:
+            return {key: value for key, value in call.items() if key != "Item"}
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=None)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "attribute_not_exists(#case_id)",
+                "ExpressionAttributeNames": {"#case_id": "case_id"},
+            },
+        )
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=0)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": (
+                    "attribute_exists(#case_id) AND "
+                    "(attribute_not_exists(#revision) OR #revision = :expected_revision)"
+                ),
+                "ExpressionAttributeNames": {
+                    "#case_id": "case_id",
+                    "#revision": "revision",
+                },
+                "ExpressionAttributeValues": {":expected_revision": 0},
+            },
+        )
+
+        snapshot["persistence_revision"] = 8
+        store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "#revision = :expected_revision",
+                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeValues": {":expected_revision": 7},
+            },
+        )
+
+        cases.next_put_error_code = "ConditionalCheckFailedException"
+        with self.assertRaises(SnapshotConflictError):
+            store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+
+    def test_dynamo_projection_transactions_reject_stale_order_and_are_idempotent(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        older = {
+            "persistence_revision": 1,
+            "repository": {
+                "records": {
+                    "vendor": [
+                        {"vendor_id": "vendor-kept", "name": "Old name"},
+                        {"vendor_id": "vendor-removed", "name": "Removed later"},
+                    ]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+        newer = {
+            "persistence_revision": 2,
+            "repository": {
+                "records": {
+                    "vendor": [{"vendor_id": "vendor-kept", "name": "New name"}]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+
+        store.save_snapshot("csub-demo", older, expected_revision=None)
+        store.save_snapshot("csub-demo", newer, expected_revision=1)
+        projected = {
+            key: json.loads(json.dumps(value)) for key, value in tables["vendor"].items.items()
+        }
+
+        with self.assertRaises(FakeAwsError):
+            store._write_projections("csub-demo", older)
+        self.assertEqual(tables["vendor"].items, projected)
+        self.assertNotIn(("csub-demo#vendor#vendor-removed",), tables["vendor"].items)
+        kept = tables["vendor"].items[("csub-demo#vendor#vendor-kept",)]
+        self.assertEqual(json.loads(kept["payload"])["name"], "New name")
+        self.assertEqual(kept["projection_revision"], 2)
+
+        store._write_projections("csub-demo", newer)
+        self.assertEqual(tables["vendor"].items, projected)
+
+    def test_dynamo_projection_failure_does_not_fail_committed_http_mutation(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        seed_workspace(store)
+        handler = create_handler(store, allowed_origins=[self.origin])
+        tables["cases"].meta.client.next_error_code = "InternalServerError"
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            response = handler(
+                self.event(
+                    "POST",
+                    "/vendors",
+                    body={"name": "Committed Vendor", "official_domain": "vendor.example"},
+                ),
+                None,
+            )
+
+        payload = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 201)
+        snapshot = store.load_snapshot("csub-demo")
+        vendors = snapshot["repository"]["records"]["vendor"]
+        self.assertTrue(any(item["vendor_id"] == payload["vendor_id"] for item in vendors))
+        projected_ids = {
+            json.loads(item["payload"])["vendor_id"] for item in tables["vendor"].items.values()
+        }
+        self.assertNotIn(payload["vendor_id"], projected_ids)
+        logs = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn(
+            {
+                "event_type": "projection_write_failed",
+                "revision": snapshot["persistence_revision"],
+                "status": 202,
+            },
+            logs,
+        )
 
     def test_dynamo_store_projects_scoped_state_and_restores_with_a_fresh_instance(self) -> None:
         tables = fake_dynamo_tables()

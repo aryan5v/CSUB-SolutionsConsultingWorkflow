@@ -8,7 +8,9 @@ import {
   packetToDraft,
   queueItemToSummary,
   requiresReviewerConfirmation,
+  secureCorrelationId,
   suppressResolvedQuestions,
+  vendorInviteUrl,
   type QueueItem,
   type ReviewState,
   type VendorQuestion,
@@ -68,6 +70,21 @@ function state(overrides: Partial<ReviewState> = {}): ReviewState {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("secure correlation identifiers", () => {
+  it("uses getRandomValues to create a valid UUID when randomUUID is unavailable", () => {
+    const getRandomValues = vi.fn((target: Uint8Array) => {
+      target.set(Array.from({ length: 16 }, (_, index) => index));
+      return target;
+    });
+
+    const identifier = secureCorrelationId({ getRandomValues });
+
+    expect(identifier).toBe("00010203-0405-4607-8809-0a0b0c0d0e0f");
+    expect(identifier).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("review API client", () => {
@@ -197,7 +214,7 @@ describe("review API client", () => {
       authProvider: authProvider(),
       fetchImpl: vi.fn().mockResolvedValue(
         jsonResponse(
-          { error: { code: "approval_required", message: "approval required" } },
+          { error: { code: "approval_required", message: "approval required", correlation_id: "request-43" } },
           403,
         ),
       ),
@@ -208,6 +225,7 @@ describe("review API client", () => {
         status: 403,
         code: "approval_required",
         message: "approval required",
+        correlationId: "request-43",
       }),
     );
   });
@@ -237,6 +255,33 @@ describe("vendor invitation security", () => {
         storage,
       ),
     ).toBe("opaque+value");
+  });
+
+  it("builds complete links with tokens only in the fragment", () => {
+    const url = vendorInviteUrl("https://demo.example/", "opaque+/value");
+    expect(url).toBe("https://demo.example/intake#token=opaque%2B%2Fvalue");
+    expect(new URL(url).search).toBe("");
+  });
+
+  it("collapses duplicate issue clicks and calls the authenticated rotation endpoint", async () => {
+    const issued = {
+      invite: { workspace_id: "csub-demo", invite_id: "invite-1", case_id: "case-1", product_id: "product-1", contact_id: "contact-1", issued_at: "2026-07-15T00:00:00Z", expires_at: "2026-07-22T00:00:00Z", status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null },
+      token: "opaque-token-value-with-at-least-32-characters",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(issued));
+    const client = createReviewApiClient({ baseUrl: "/api", mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const [first, duplicate] = await Promise.all([
+      client.issueInvite("case-1", "contact-1"),
+      client.issueInvite("case-1", "contact-1"),
+    ]);
+    expect(first).toEqual(duplicate);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await client.rotateInvite("invite-1");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/invites/invite-1/resend");
+    expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("Authorization")).toBe("Bearer reviewer-jwt");
   });
 
   it("uses a bearer header and never includes the raw token in the API path", async () => {
