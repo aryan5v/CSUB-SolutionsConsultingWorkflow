@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  INLINE_EVIDENCE_MAX_BYTES,
   ReviewApiError,
   consumeInviteTokenFromFragment,
   createReviewApiClient,
@@ -395,6 +396,42 @@ describe("vendor invitation security", () => {
     expect(url).not.toContain("raw-secret-token");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer raw-secret-token");
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("inlines small evidence bytes so the API can store and validate them", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      workspace_id: "csub-demo", artifact_id: "artifact-1", submission_id: "submission-1",
+      filename: "evidence.txt", content_type: "text/plain", size_bytes: 8, sha256: "hash", untrusted: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.uploadEvidence("vendor-invite-token", new File(["evidence"], "evidence.txt", { type: "text/plain" }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.content_base64).toBe(btoa("evidence"));
+    expect(result.transfer).toBe("uploaded");
+    expect(result.notice).toBeUndefined();
+  });
+
+  it("registers files above 700 KB as manual-review metadata without inline bytes", async () => {
+    const size = INLINE_EVIDENCE_MAX_BYTES + 1;
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      workspace_id: "csub-demo", artifact_id: "artifact-large", submission_id: "submission-1",
+      filename: "coi-large.pdf", content_type: "application/pdf", size_bytes: size, sha256: "hash", untrusted: true,
+    }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.uploadEvidence(
+      "vendor-invite-token",
+      new File([new Uint8Array(size)], "coi-large.pdf", { type: "application/pdf" }),
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.size_bytes).toBe(size);
+    expect(body).not.toHaveProperty("content_base64");
+    expect(result.transfer).toBe("simulated");
+    expect(result.notice).toContain("requires manual review");
+    expect(result.notice).toContain("cannot automatically cover");
   });
 
   it("fetches the vendor review status with the bearer token only", async () => {

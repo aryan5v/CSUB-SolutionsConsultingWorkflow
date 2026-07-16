@@ -195,7 +195,10 @@ class VendorResearchIntegrationTests(unittest.TestCase):
             q["requirement_id"] for q in without_provider.unresolved_questions(token_b)
         ]
 
-        # SOC 2 filename deterministically covers SEC.DATA.001; A11Y stays open.
+        # Research is provenance-only. This fixture registers a SOC 2 document
+        # (an unvalidated type) that covers SEC.DATA.001 by filename, leaving
+        # only the VPAT requirement open; adding a research provider must not
+        # change that coverage result.
         self.assertEqual(questions_with, ["A11Y.VPAT.001"])
         self.assertEqual(questions_with, questions_without)
         # No provider -> research honestly reported as not performed, no findings.

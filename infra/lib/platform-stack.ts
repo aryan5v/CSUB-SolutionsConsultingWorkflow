@@ -810,18 +810,14 @@ export class PlatformStack extends cdk.Stack {
       functionName: `vetted-auth-${appEnv}`,
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'services', 'auth-api'), {
+      handler: 'index.handler',
+      // The auth-api build (infra presynth -> auth:build) emits a self-contained
+      // esbuild bundle at dist/index.js, so the Lambda asset is just that
+      // directory. Packaging the whole service directory pulled in node_modules
+      // (including a .bin/esbuild symlink) which the sealed-release verifier
+      // rejects as an unsupported archive member.
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'services', 'auth-api', 'dist'), {
         assetHashType: cdk.AssetHashType.SOURCE,
-        exclude: [
-          'node_modules/**',
-          'src/**',
-          'test/**',
-          'package.json',
-          'package-lock.json',
-          'tsconfig.json',
-          '.npmrc',
-        ],
       }),
       memorySize: 512,
       timeout: cdk.Duration.seconds(15),
@@ -1054,20 +1050,17 @@ export class PlatformStack extends cdk.Stack {
     }
 
     // Weekly vendor-evidence reminder sweep. Scheduler assumes a role that can
-    // invoke only this Lambda, and the trust policy is pinned to this account
-    // and exact schedule ARN to prevent confused-deputy use.
+    // invoke only this Lambda. Confused-deputy protection is scoped to this
+    // account via aws:SourceAccount. A self-referential aws:SourceArn condition
+    // cannot be used: EventBridge Scheduler validates the execution role at
+    // CreateSchedule time before the schedule exists, so that context key is
+    // absent and the role would be un-assumable ("must allow AWS EventBridge
+    // Scheduler to assume the role").
     const reminderScheduleName = `csub-vendor-reminders-${appEnv}`;
-    const reminderScheduleArn = cdk.Stack.of(this).formatArn({
-      service: 'scheduler',
-      resource: 'schedule',
-      resourceName: `default/${reminderScheduleName}`,
-      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
-    });
     const reminderSchedulerRole = new iam.Role(this, 'ReminderSchedulerRole', {
       assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
         conditions: {
           StringEquals: { 'aws:SourceAccount': this.account },
-          ArnEquals: { 'aws:SourceArn': reminderScheduleArn },
         },
       }),
       inlinePolicies: {
@@ -1144,6 +1137,7 @@ export class PlatformStack extends cdk.Stack {
       ['/cases/{id}', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/research', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/documents', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/evidence-findings', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/analyze', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/review', [apigwv2.HttpMethod.POST]],
@@ -1200,6 +1194,7 @@ export class PlatformStack extends cdk.Stack {
       ['/vendor/invites/current/analyze', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/finalize', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/status', [apigwv2.HttpMethod.GET]],
+      ['/vendor/invites/current/findings', [apigwv2.HttpMethod.GET]],
       // Backward-compatible aliases; tokens remain header-only.
       ['/intake', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/intake/evidence', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
@@ -1210,6 +1205,7 @@ export class PlatformStack extends cdk.Stack {
       ['/intake/questions', [apigwv2.HttpMethod.GET]],
       ['/intake/finalize', [apigwv2.HttpMethod.POST]],
       ['/intake/status', [apigwv2.HttpMethod.GET]],
+      ['/intake/findings', [apigwv2.HttpMethod.GET]],
     ] as Array<[string, apigwv2.HttpMethod[]]>) {
       // Opaque invite tokens are accepted only in Authorization: Bearer.
       // No public route contains a token path or query parameter.

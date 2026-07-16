@@ -1,4 +1,4 @@
-"""Secure evidence ingestion, extraction, and provenance boundaries."""
+"""Secure evidence ingestion, extraction, provenance, and content validation."""
 
 from .ingestion import ProcessingState
 

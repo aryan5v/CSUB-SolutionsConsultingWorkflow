@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
 import hashlib
@@ -20,6 +21,7 @@ from review_agent.lambda_api import (
     FileWorkspaceStore,
     InMemoryWorkspaceStore,
     SnapshotConflictError,
+    _packet,
     create_handler,
     restore_api,
     seed_workspace,
@@ -839,6 +841,136 @@ class LambdaApiTests(unittest.TestCase):
         self.assertFalse(run_two["decision_valid"])
         self.assertFalse(run_two["write_preview_valid"])
 
+    def test_evidence_findings_survive_restore_and_validate_stored_bytes(self) -> None:
+        # Regression (issue #36 follow-up): inline evidence bytes reach the
+        # storage seam, the restored VendorBackend can read them during a later
+        # request, and a workspace snapshot containing a persisted finding
+        # restores instead of failing on an unsupported record kind.
+        issued = self._issue_invite()
+        headers = {"authorization": f"Bearer {issued['token']}"}
+        self.call("POST", "/intake", headers=headers, authenticated=False, body={})
+        body = (
+            "CERTIFICATE OF INSURANCE\n"
+            "coverage: cyber liability, general liability\n"
+            "expires_date: 2026-06-30\n"
+        ).encode("utf-8")
+        upload, _ = self.call(
+            "POST",
+            "/vendor/invites/current/evidence",
+            headers=headers,
+            authenticated=False,
+            body={
+                "filename": "coi-acme.txt",
+                "content_type": "text/plain",
+                "size_bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "content_base64": base64.b64encode(body).decode("ascii"),
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+        self.call(
+            "POST",
+            "/vendor/invites/current/trust-center",
+            headers=headers,
+            authenticated=False,
+            body={"trust_center_url": "https://trust.example.edu/security"},
+        )
+        # The analyze request restores the API from the snapshot; the restored
+        # backend must still see the stored bytes to produce the finding.
+        analyze, _ = self.call(
+            "POST",
+            "/vendor/invites/current/analyze",
+            headers=headers,
+            authenticated=False,
+            body={},
+        )
+        self.assertEqual(analyze["statusCode"], 200)
+        # A cold start restores a workspace whose snapshot now contains a
+        # persisted finding record.
+        cold = create_handler(self.store)
+        response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/findings",
+                headers=headers,
+                authenticated=False,
+            ),
+            None,
+        )
+        self.assertEqual(response["statusCode"], 200)
+        findings = json.loads(response["body"])["items"]
+        self.assertEqual([item["check"] for item in findings], ["coi.expired"])
+        self.assertEqual(findings[0]["disposition"], "failed")
+        self.assertEqual(findings[0]["source_citation"]["source_id"], findings[0]["artifact_id"])
+        self.assertEqual(findings[0]["source_citation"]["filename"], "coi-acme.txt")
+        self.assertEqual(findings[0]["source_citation"]["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(findings[0]["source_citation"]["line"], 3)
+        self.assertEqual(findings[0]["source_citation"]["rule_source_id"], "issue:36")
+
+    def test_large_metadata_only_evidence_fails_closed_across_restore(self) -> None:
+        issued = self._issue_invite()
+        headers = {"authorization": f"Bearer {issued['token']}"}
+        self.call("POST", "/intake", headers=headers, authenticated=False, body={})
+        upload, artifact = self.call(
+            "POST",
+            "/vendor/invites/current/evidence",
+            headers=headers,
+            authenticated=False,
+            body={
+                "filename": "certificate-of-insurance-large.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 700_001,
+                "sha256": "d" * 64,
+            },
+        )
+        self.assertEqual(upload["statusCode"], 200)
+        self.call(
+            "POST",
+            "/vendor/invites/current/trust-center",
+            headers=headers,
+            authenticated=False,
+            body={"trust_center_url": "https://trust.example.edu/security"},
+        )
+        analyze, _ = self.call(
+            "POST",
+            "/vendor/invites/current/analyze",
+            headers=headers,
+            authenticated=False,
+            body={},
+        )
+        self.assertEqual(analyze["statusCode"], 200)
+
+        cold = create_handler(self.store)
+        finding_response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/findings",
+                headers=headers,
+                authenticated=False,
+            ),
+            None,
+        )
+        findings = json.loads(finding_response["body"])["items"]
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings],
+            [("evidence.content_unavailable", "manual_review")],
+        )
+        self.assertEqual(findings[0]["artifact_id"], artifact["artifact_id"])
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        question_response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/questions",
+                headers=headers,
+                authenticated=False,
+            ),
+            None,
+        )
+        question_ids = {
+            item["requirement_id"] for item in json.loads(question_response["body"])["items"]
+        }
+        self.assertIn("A11Y.VPAT.001", question_ids)
+
     def test_vendor_public_status_survives_lambda_cold_start(self) -> None:
         issued = self._issue_invite()
         token = issued["token"]
@@ -1418,3 +1550,25 @@ class LambdaApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PacketRestoreTests(unittest.TestCase):
+    def test_packet_section_with_empty_body_round_trips(self) -> None:
+        # Regression: a packet section body may be empty (e.g. security_summary
+        # with no findings). Restore must accept "" instead of raising, which
+        # previously 500'd every request that restored such a case.
+        packet = _packet(
+            {
+                "packet_id": "CASE-1-packet",
+                "case_id": "CASE-1",
+                "packet_version": 1,
+                "packet_type": "medium_risk",
+                "sections": [
+                    {"key": "security_summary", "title": "Security", "body": ""},
+                    {"key": "recommendation", "title": "Recommendation", "body": "Approve"},
+                ],
+            }
+        )
+        bodies = {section.key: section.body for section in packet.sections}
+        self.assertEqual(bodies["security_summary"], "")
+        self.assertEqual(bodies["recommendation"], "Approve")

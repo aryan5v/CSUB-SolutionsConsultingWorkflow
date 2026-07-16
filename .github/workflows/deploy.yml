@@ -45,6 +45,7 @@ jobs:
       BUDGET_LIMIT_USD: ${{ vars.BUDGET_LIMIT_USD }}
       SERVICE_NOW_TABLE_NAME: ${{ vars.SERVICE_NOW_TABLE_NAME }}
       DESTROY_ON_REMOVAL: ${{ vars.DESTROY_ON_REMOVAL }}
+      SLACK_SECRET_ARN: ${{ vars.SLACK_SECRET_ARN }}
 
     steps:
       - name: Check out complete history
@@ -131,6 +132,7 @@ jobs:
           npm --prefix infra run synth -- \
             --output "$RUNNER_TEMP/cdk.out" \
             -c "appEnv=$APP_ENV" \
+            -c "slackSecretArn=$SLACK_SECRET_ARN" \
             -c enableAgentCoreServices=false \
             -c enableVectorStores=false \
             -c enableGuardrail=false

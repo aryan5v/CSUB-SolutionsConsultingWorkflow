@@ -88,7 +88,7 @@ class VendorHttpRouteTests(unittest.TestCase):
                 f"/vendor/invites/{token}/evidence",
                 "POST",
                 {
-                    "filename": "vpat-report.pdf",
+                    "filename": "certificate-of-insurance.pdf",
                     "content_type": "application/pdf",
                     "size_bytes": 100,
                     "sha256": "a" * 64,
@@ -114,6 +114,18 @@ class VendorHttpRouteTests(unittest.TestCase):
         )
         _, questions = self.request(f"/vendor/invites/{token}/questions")
         self.assertTrue(questions["intake_analysis_complete"])
+        # Content-validation findings routes (issue #36): a validated-type (COI)
+        # document with no bytes is retained but fails closed and cannot cover.
+        findings_status, findings = self.request(f"/vendor/invites/{token}/findings")
+        self.assertEqual(findings_status, 200)
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings["items"]],
+            [("evidence.content_unavailable", "manual_review")],
+        )
+        self.assertEqual(findings["items"][0]["source_citation"]["line"], 1)
+        case_findings_status, case_findings = self.request(f"/cases/{self.case_id}/evidence-findings")
+        self.assertEqual(case_findings_status, 200)
+        self.assertEqual(case_findings["items"], findings["items"])
         answers = {item["requirement_id"]: "Sanitized answer" for item in questions["items"]}
         if answers:
             self.assertEqual(

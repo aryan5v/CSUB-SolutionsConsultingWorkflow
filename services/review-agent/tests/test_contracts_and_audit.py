@@ -17,6 +17,7 @@ from review_agent.orchestration.state import InMemoryCheckpointer
 from review_agent.policy.conflicts import default_conflict_registry
 from review_agent.policy.rules import default_ruleset
 from review_agent.adapters.model import DeterministicModelClient
+from review_agent.contracts.common import SourceCoordinates
 from review_agent.contracts.graph_state import ReviewGraphState
 
 
@@ -59,6 +60,18 @@ class ContractValidationTests(unittest.TestCase):
         packet_state = _run_medium()
         payload = packet_state.policy_result.to_dict()
         self.assertIs(validate(payload, "policy-result"), payload)
+
+    def test_source_coordinates_support_one_based_text_lines(self) -> None:
+        payload = SourceCoordinates(
+            source_id="evidence-0001",
+            filename="coi.txt",
+            sha256="a" * 64,
+            line=4,
+        ).to_dict()
+        self.assertIs(validate(payload, "source-coordinates"), payload)
+        invalid = {**payload, "line": 0}
+        with self.assertRaises(ContractValidationError):
+            validate(invalid, "source-coordinates")
 
     def test_vendor_public_decision_fields_have_schema_bounds(self) -> None:
         payload = {

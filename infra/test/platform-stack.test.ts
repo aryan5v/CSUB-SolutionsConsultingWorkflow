@@ -191,7 +191,7 @@ describe('VETTED Better Auth same-origin session layer', () => {
     platform.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs22.x',
       Architectures: ['arm64'],
-      Handler: 'dist/index.handler',
+      Handler: 'index.handler',
       Environment: {
         Variables: Match.objectLike({
           NODE_ENV: 'production',
@@ -509,6 +509,7 @@ describe('API authorization boundaries', () => {
       'POST /cases',
       'GET /review-queue',
       'POST /cases/{id}/review',
+      'GET /cases/{id}/evidence-findings',
       'GET /cases/{id}/research',
       'GET /cases/{id}/packet/pdf',
       'POST /reminders/run',
@@ -532,10 +533,12 @@ describe('API authorization boundaries', () => {
       'POST /vendor/invites/current/analyze',
       'POST /vendor/invites/current/finalize',
       'GET /vendor/invites/current/status',
+      'GET /vendor/invites/current/findings',
       'GET /intake',
       'POST /intake',
       'POST /intake/analyze',
       'GET /intake/status',
+      'GET /intake/findings',
       'POST /slack/events',
     ]) {
       expect(byKey.get(key).AuthorizationType ?? 'NONE').toBe('NONE');
@@ -616,7 +619,6 @@ describe('Weekly vendor reminder scheduling', () => {
             Principal: { Service: 'scheduler.amazonaws.com' },
             Condition: Match.objectLike({
               StringEquals: { 'aws:SourceAccount': '111111111111' },
-              ArnEquals: Match.objectLike({ 'aws:SourceArn': Match.anyValue() }),
             }),
           }),
         ]),
