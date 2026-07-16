@@ -13,6 +13,7 @@ import {
   ClipboardCheck,
   Clock3,
   ContactRound,
+  Copy,
   Database,
   ExternalLink,
   FileCheck2,
@@ -23,8 +24,8 @@ import {
   LayoutDashboard,
   LifeBuoy,
   Link2,
-  ListTodo,
   LockKeyhole,
+  LogOut,
   Menu,
   MessageCircle,
   Moon,
@@ -32,20 +33,15 @@ import {
   Search,
   Settings2,
   ShieldCheck,
-  Sparkles,
-  StickyNote,
   Sun,
   Download,
   MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
   RotateCcw,
   Upload,
   UserCheck,
-  Workflow,
   X,
 } from "lucide-react";
-import { Area, AreaChart, Legend, Tooltip, XAxis, YAxis } from "@/components/dither-kit/area-chart";
+import { Legend, Line, LineChart, Tooltip, XAxis, YAxis } from "@/components/dither-kit/area-chart";
 import { BarChart } from "@/components/dither-kit/bar-chart";
 import { Bar } from "@/components/dither-kit/bar";
 import { PieChart } from "@/components/dither-kit/pie-chart";
@@ -67,6 +63,7 @@ import {
   type AuditEvent,
   type CaseActionResponse,
   type CaseIntakeInput,
+  type CaseResearchResponse,
   type EvidenceArtifact,
   type QueueStatus,
   type ReviewerRecordContext,
@@ -78,22 +75,32 @@ import {
   ChatPage,
   ContactsPage,
   DocumentationPage,
-  NotesPage,
   SettingsPage,
-  TasksPage,
-  WorkflowsPage,
   type RestoredPage,
 } from "./WorkspacePages";
 import { VendorRecordsPage } from "./VendorRecordsPage";
 import { CatalogPage } from "./CatalogPage";
 import { EvidenceProcessingList, evidenceNeedsPolling } from "./EvidenceProcessing";
+import { useReviewerSession } from "./AuthGate";
 import "./app.css";
 
-type Page = "dashboard" | "queue" | "review" | "evidence" | "audit" | RestoredPage;
+type Page = "dashboard" | "queue" | "review" | "audit" | RestoredPage;
 type QueueMode = "all" | "inbox" | "my-work";
 type Theme = "light" | "dark";
 type Decision = "Pending" | "Changes requested" | "Rejected" | "Approved";
 type ReviewCase = ReviewSummary;
+type DashboardInviteRow = { inviteId: string; caseId: string; product: string; contact: string; contactEmail: string; status: string; expiresAt: string };
+
+const pagePaths: Record<Page, string> = {
+  dashboard: "/app", queue: "/app/review-queue", review: "/app/active-review", chat: "/app/chat",
+  requests: "/app/review-requests", vendors: "/app/vendors", contacts: "/app/contacts",
+  audit: "/app/audit", settings: "/app/settings", documentation: "/app/documentation",
+};
+
+function pageFromLocation(): Page {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/app";
+  return (Object.entries(pagePaths).find(([, value]) => value === path)?.[0] as Page | undefined) ?? "dashboard";
+}
 
 type EvidenceItem = {
   id: string;
@@ -258,32 +265,20 @@ const throughputConfig = {
   completed: { label: "Completed", color: "green" },
 } as const;
 
-type NavItem = { page: Page; label: string; icon: typeof LayoutDashboard; count?: number; queueMode?: QueueMode };
+type NavItem = { page: Page; label: string; icon: typeof LayoutDashboard };
 const navGroups: Array<{ label: string; items: NavItem[] }> = [
   { label: "Workspace", items: [
     { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { page: "queue", label: "Inbox", icon: Inbox, queueMode: "inbox" },
-    { page: "queue", label: "My work", icon: ClipboardCheck, queueMode: "my-work" },
-    { page: "review", label: "Active review", icon: FileCheck2 },
+    { page: "queue", label: "Review queue", icon: Inbox },
     { page: "chat", label: "Chat", icon: MessageCircle },
   ] },
   { label: "Records", items: [
+    { page: "requests", label: "Review requests", icon: FileText },
     { page: "vendors", label: "Vendors", icon: Building2 },
     { page: "contacts", label: "Contacts", icon: ContactRound },
-    { page: "requests", label: "Review requests", icon: FileText },
-    { page: "tasks", label: "Tasks", icon: ListTodo },
-    { page: "notes", label: "Notes", icon: StickyNote },
   ] },
-  { label: "Automation", items: [
-    { page: "workflows", label: "Workflows", icon: Workflow },
-    { page: "workflow-runs", label: "Workflow runs", icon: CircleDotDashed },
-    { page: "workflow-versions", label: "Workflow versions", icon: History },
-  ] },
-  { label: "Review system", items: [
-    { page: "evidence", label: "Evidence", icon: FolderLock },
+  { label: "System", items: [
     { page: "audit", label: "Audit", icon: History },
-  ] },
-  { label: "Other", items: [
     { page: "settings", label: "Settings", icon: Settings2 },
     { page: "documentation", label: "Documentation", icon: LifeBuoy },
   ] },
@@ -293,11 +288,11 @@ const allNavItems = navGroups.flatMap((group) => group.items);
 
 const workflowSteps = [
   { short: "01", label: "Intake", detail: "Required fields validated", state: "complete" },
-  { short: "02", label: "Software match", detail: "Candidate found", state: "complete" },
-  { short: "03", label: "Policy route", detail: "Deterministic result", state: "complete" },
-  { short: "04", label: "Specialists", detail: "Parallel checks complete", state: "complete" },
+  { short: "02", label: "Software", detail: "Candidate found", state: "complete" },
+  { short: "03", label: "Policy", detail: "Deterministic result", state: "complete" },
+  { short: "04", label: "Analysis", detail: "Parallel checks complete", state: "complete" },
   { short: "05", label: "Evidence", detail: "One gap flagged", state: "complete" },
-  { short: "06", label: "Human review", detail: "Decision required", state: "current" },
+  { short: "06", label: "Review", detail: "Decision required", state: "current" },
   { short: "07", label: "Write-back", detail: "Locked", state: "upcoming" },
 ] as const;
 
@@ -311,7 +306,7 @@ const initialAuditEvents = [
 ];
 
 
-const defaultPacketDraft = "LabArchives may proceed to committee review with the mitigations and owner assignments recorded in this packet. The deterministic policy engine calculated a medium-risk route under rule set v2026.07.14. Security findings are supported by the attached case evidence. Before a final institutional decision, the reviewer must confirm that the supplied VPAT applies to the requested LabArchives product version and deployment context.\n\nThis draft does not approve the request, sign a TAAP, or authorize an external write. The reviewer remains responsible for edits, the final decision, and the separate simulated write-back confirmation.";
+const defaultPacketDraft = "LabArchives may proceed to committee review with the mitigations and owners recorded in this packet. Versioned rules calculated a medium-risk route under rule set v2026.07.14, supported by the attached case evidence. Confirm that the VPAT applies to the requested product version and deployment before making an institutional decision or simulated write-back.";
 function statusTone(label: string) {
   if (["Completed", "Verified", "Approved", "Low risk"].includes(label)) return "positive";
   if (["Ready for review", "Medium risk", "Review needed", "Changes requested"].includes(label)) return "warning";
@@ -328,12 +323,12 @@ function Avatar({ name, small = false }: { name: string; small?: boolean }) {
   return <span className={`avatar ${small ? "avatar-small" : ""}`} aria-hidden="true">{initials}</span>;
 }
 
-function PageIntro({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description: string; actions?: ReactNode }) {
-  return <header className="page-intro">
+function PageIntro({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description?: string; actions?: ReactNode }) {
+  return <header className={`page-intro ${description ? "" : "page-intro-compact"}`}>
     <div>
       <p className="eyebrow">{eyebrow}</p>
       <h1>{title}</h1>
-      <p className="page-description">{description}</p>
+      {description && <p className="page-description">{description}</p>}
     </div>
     {actions && <div className="page-actions">{actions}</div>}
   </header>;
@@ -343,13 +338,12 @@ function Button({ children, variant = "secondary", icon, className = "", ...prop
   return <button className={`button button-${variant} ${className}`} {...props}>{icon}{children}</button>;
 }
 
-function MetricCard({ label, value, detail, icon, tone, trend, secondary }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; trend: { data: number[]; color: DitherColor }; secondary: { label: string; value: string } }) {
+function MetricCard({ label, value, detail, icon, tone, trend }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; trend: { data: number[]; color: DitherColor } }) {
   return <article className="metric-card">
     <div className="metric-top">
       <div className={`metric-icon metric-${tone}`}>{icon}</div>
       <div className="metric-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
     </div>
-    <div className="metric-secondary"><span>{secondary.label}</span><b>{secondary.value}</b></div>
     <div className="metric-spark" aria-hidden="true">
       <Sparkline data={trend.data} color={trend.color} variant="gradient" bloom="low" />
     </div>
@@ -407,7 +401,7 @@ function buildDashboardSeries(cases: ReviewCase[]): DashboardPoint[] {
   return points;
 }
 
-function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases: ReviewCase[]; onNavigate: (page: Page) => void; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void }) {
+function DashboardPage({ cases, invites, reviewerName, onNavigate, onOpenCase, onNewRequest }: { cases: ReviewCase[]; invites: DashboardInviteRow[]; reviewerName: string; onNavigate: (page: Page) => void; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void }) {
   const primaryCase = cases[0] ?? null;
   const actionCases = cases.filter((review) => review.status === "Ready for review" || review.status === "Needs evidence");
   const attentionCount = actionCases.length;
@@ -417,7 +411,6 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
   const series = buildDashboardSeries(cases);
   const needsEvidenceCount = cases.filter((review) => review.status === "Needs evidence").length;
   const readyCount = cases.filter((review) => review.status === "Ready for review").length;
-  const share = (count: number) => (cases.length ? `${Math.round((count / cases.length) * 100)}% of queue` : "0% of queue");
   const spark = (key: "attention" | "analyzing" | "completed" | "escalated") => series.map((point) => point[key]);
   const currentRiskData = [
     { route: "low", reviews: cases.filter((review) => review.route === "Low risk").length },
@@ -438,46 +431,56 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
     <div className="dashboard-content-layer">
     <PageIntro
       eyebrow="Reviewer workspace / Current queue"
-      title="Good afternoon, Alex."
-      description={cases.length ? `${attentionCount} review${attentionCount === 1 ? "" : "s"} currently need a person.` : "No review records are loaded."}
+      title={`Good afternoon, ${reviewerName.split(" ")[0]}.`}
       actions={<><Button variant="secondary" icon={<Upload size={15} />} onClick={onNewRequest}>New request</Button>{primaryCase && <DitherButton color="orange" variant="solid" bloom="low" className="dashboard-dither-button" onClick={() => onOpenCase(primaryCase)}><ClipboardCheck size={15} /> Review {primaryCase.product}</DitherButton>}</>}
     />
 
-    <section className="trust-strip" aria-label="Workspace safeguards">
-      <span><UserCheck size={15} />Human decision required</span>
-      <span><ShieldCheck size={15} />Versioned policy rules</span>
-      <span><LockKeyhole size={15} />Scoped evidence</span>
-      <span className="simulation-label"><CircleDashed size={15} />Simulated ServiceNow</span>
+    <section className="metric-grid" aria-label="Review queue summary">
+      <MetricCard label="Needs your attention" value={String(attentionCount)} detail="Ready or waiting on evidence" icon={<Inbox size={18} />} tone="yellow" trend={{ data: spark("attention"), color: "orange" }} />
+      <MetricCard label="In analysis" value={String(analyzingCount)} detail="Specialist or policy stage" icon={<Activity size={18} />} tone="blue" trend={{ data: spark("analyzing"), color: "blue" }} />
+      <MetricCard label="Completed" value={String(completedCount)} detail="Decision recorded" icon={<CheckCircle2 size={18} />} tone="green" trend={{ data: spark("completed"), color: "green" }} />
+      <MetricCard label="Safe escalations" value={String(escalationCount)} detail="Held for review" icon={<AlertTriangle size={18} />} tone="red" trend={{ data: spark("escalated"), color: "red" }} />
     </section>
 
-    <section className="metric-grid" aria-label="Review queue summary">
-      <MetricCard label="Needs your attention" value={String(attentionCount)} detail="Ready or waiting on evidence" icon={<Inbox size={18} />} tone="yellow" trend={{ data: spark("attention"), color: "orange" }} secondary={{ label: "Share of queue", value: share(attentionCount) }} />
-      <MetricCard label="In analysis" value={String(analyzingCount)} detail="Specialist or policy stage" icon={<Activity size={18} />} tone="blue" trend={{ data: spark("analyzing"), color: "blue" }} secondary={{ label: "Share of queue", value: share(analyzingCount) }} />
-      <MetricCard label="Completed" value={String(completedCount)} detail="Decision recorded" icon={<CheckCircle2 size={18} />} tone="green" trend={{ data: spark("completed"), color: "green" }} secondary={{ label: "Share of queue", value: share(completedCount) }} />
-      <MetricCard label="Safe escalations" value={String(escalationCount)} detail="Held for review" icon={<AlertTriangle size={18} />} tone="red" trend={{ data: spark("escalated"), color: "red" }} secondary={{ label: "Evidence gaps", value: String(needsEvidenceCount) }} />
+    <section className="panel dashboard-invites-panel" aria-labelledby="dashboard-invites-title">
+      <div className="panel-heading">
+        <div><p className="eyebrow">Live invitation status</p><h2 id="dashboard-invites-title">Vendor intake links</h2></div>
+        <Button variant="ghost" onClick={() => onNavigate("requests")}>Manage invitations <ArrowRight size={14} /></Button>
+      </div>
+      <div className="dashboard-invite-table" role="table" aria-label="Vendor invitation status">
+        <div className="dashboard-invite-row dashboard-invite-head" role="row"><span role="columnheader">Request</span><span role="columnheader">Contact</span><span role="columnheader">Status</span><span role="columnheader">Expires</span><span role="columnheader">Reviewer link</span></div>
+        {invites.map((invite) => <div className="dashboard-invite-row" role="row" key={invite.inviteId}>
+          <span role="cell"><strong>{invite.product}</strong><small>{invite.caseId}</small></span>
+          <span role="cell"><strong>{invite.contact}</strong><small>{invite.contactEmail}</small></span>
+          <span role="cell"><StatusBadge>{invite.status.replace(/_/g, " ")}</StatusBadge></span>
+          <span role="cell">{new Date(invite.expiresAt).toLocaleDateString()}</span>
+          <span role="cell"><button type="button" className="copy-link-button" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${pagePaths.review}?case=${encodeURIComponent(invite.caseId)}`)}><Copy size={14} aria-hidden="true" />Copy case link</button></span>
+        </div>)}
+        {!invites.length && <div className="dashboard-invite-empty">No invitations have been issued for the loaded queue.</div>}
+      </div>
     </section>
 
     <section className="panel throughput-panel">
       <div className="panel-heading">
-        <div><p className="eyebrow">Last 7 days</p><h2>Review throughput</h2><p>Records entering review and completions, placed by their most recent update. Every value comes from the loaded queue.</p></div>
+        <div><p className="eyebrow">Last 7 days</p><h2>Review throughput</h2></div>
         <span className="ascii-note">API SNAPSHOT</span>
       </div>
       <div className="chart-summary"><strong>{cases.length}</strong><span>records loaded</span><small>{completedCount} completed · {escalationCount} escalated</small></div>
-      <div className="chart-frame chart-frame-tall" aria-label="Dated area chart of records entering review and completions over the last seven days">
-        <AreaChart data={series} config={throughputConfig} bloom="low" animationDuration={700}>
+      <div className="chart-frame chart-frame-tall" aria-label="Line and area chart of records entering review and completions over the last seven days">
+        <LineChart data={series} config={throughputConfig} bloom="low" animationDuration={700}>
           <XAxis dataKey="date" />
           <YAxis />
           <Legend isClickable />
           <Tooltip labelKey="date" />
-          <Area dataKey="entered" variant="gradient" />
-          <Area dataKey="completed" variant="dotted" />
-        </AreaChart>
+          <Line dataKey="entered" variant="gradient" strokeVariant="solid" />
+          <Line dataKey="completed" variant="dotted" strokeVariant="dashed" />
+        </LineChart>
       </div>
     </section>
 
     <section className="panel attention-panel">
       <div className="panel-heading">
-        <div><p className="eyebrow">Next up</p><h2>Needs attention</h2><p>Reviews remain paused until a person acts.</p></div>
+        <div><p className="eyebrow">Next up</p><h2>Needs attention</h2></div>
         <Button variant="ghost" onClick={() => onNavigate("queue")}>View queue <ArrowRight size={14} /></Button>
       </div>
       <div className="review-list">
@@ -487,7 +490,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
 
     <div className="dashboard-insight-grid">
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Risk routes</h2><p>Calculated routes on the records currently loaded.</p></div><span className="ascii-note">{cases.length} RECORDS</span></div>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Risk routes</h2></div><span className="ascii-note">{cases.length} RECORDS</span></div>
         <div className="dither-small-chart" aria-label="Pie chart showing routes on currently loaded review records">
           <PieChart data={currentRiskData} config={riskConfig} dataKey="reviews" nameKey="route" innerRadius={0.56} bloom="low">
             <Legend isClickable align="right" />
@@ -497,7 +500,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
         </div>
       </section>
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Evidence status</h2><p>Completed records and records currently waiting for evidence.</p></div><Button variant="ghost" onClick={() => onNavigate("evidence")}>Inspect sources</Button></div>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Evidence status</h2></div><Button variant="ghost" onClick={() => onNavigate("review")}>Inspect sources</Button></div>
         <div className="dither-small-chart" aria-label="Bar chart of completed records and records waiting for evidence in the loaded queue">
           <BarChart data={currentEvidenceData} config={evidenceChartConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="scope" />
@@ -513,7 +516,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
 
     <div className="dashboard-insight-grid">
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Queue shape</h2><p>Loaded records by review status and safe escalation route.</p></div><span className="ascii-note">API SNAPSHOT</span></div>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Queue shape</h2></div><span className="ascii-note">API SNAPSHOT</span></div>
         <div className="dither-small-chart" aria-label="Radar chart of loaded records by status and safe escalation route">
           <RadarChart data={currentCoverageData} config={radarCoverageConfig} nameKey="dimension" bloom="low" animationDuration={700}>
             <Legend isClickable align="right" />
@@ -524,7 +527,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
         </div>
       </section>
       <section className="panel dither-insight-card">
-        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Completion and escalation</h2><p>Completed records and safe escalation routes now loaded.</p></div><span className="ascii-note">API SNAPSHOT</span></div>
+        <div className="panel-heading"><div><p className="eyebrow">Current queue</p><h2>Completion and escalation</h2></div><span className="ascii-note">API SNAPSHOT</span></div>
         <div className="dither-small-chart" aria-label="Bar chart of completed records and safe escalation routes in the loaded queue">
           <BarChart data={currentOutcomeData} config={outcomeChartConfig} bloom="low" animationDuration={700}>
             <XAxis dataKey="day" />
@@ -541,7 +544,7 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
     <div className="dashboard-lower-grid">
       {primaryCase ? <section className="panel workflow-panel">
         <div className="panel-heading">
-          <div><p className="eyebrow">{primaryCase.id}</p><h2>{primaryCase.product} · {primaryCase.stage}</h2><p>The workflow remains at its current deterministic or human checkpoint.</p></div>
+          <div><p className="eyebrow">{primaryCase.id}</p><h2>{primaryCase.product} · {primaryCase.stage}</h2></div>
           <StatusBadge>{primaryCase.status}</StatusBadge>
         </div>
         <ol className="workflow-rail">
@@ -550,25 +553,25 @@ function DashboardPage({ cases, onNavigate, onOpenCase, onNewRequest }: { cases:
             <span><strong>{step.label}</strong><small>{step.detail}</small></span>
           </li>)}
         </ol>
-        <div className="panel-footer"><span><Sparkles size={14} />Specialists can draft and compare. They cannot approve.</span><Button variant="primary" onClick={() => onOpenCase(primaryCase)}>Open review <ArrowRight size={14} /></Button></div>
-      </section> : <section className="panel workflow-panel empty-state"><Inbox size={18} /><strong>No workflow record is loaded.</strong><span>Connect the live API or select explicit fixture mode.</span></section>}
+        <div className="panel-footer panel-footer-actions"><Button variant="primary" onClick={() => onOpenCase(primaryCase)}>Open review <ArrowRight size={14} /></Button></div>
+      </section> : <section className="panel workflow-panel empty-state"><Inbox size={18} /><strong>No workflow record is loaded.</strong></section>}
 
       <section className="panel evidence-health-panel">
-        <div className="panel-heading"><div><p className="eyebrow">Source boundaries</p><h2>Evidence health</h2></div><Button variant="ghost" onClick={() => onNavigate("evidence")}>Open library</Button></div>
+        <div className="panel-heading"><div><p className="eyebrow">Source boundaries</p><h2>Evidence health</h2></div><Button variant="ghost" onClick={() => onNavigate("review")}>Open active review</Button></div>
         <div className="evidence-health-list">
-          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Campus policy</strong><small>Separate retrieval scope</small></span><b>Scoped</b></div>
-          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Case evidence</strong><small>Limited to the current case</small></span><b>Scoped</b></div>
-          <div><span className="health-symbol health-warn">!</span><span><strong>Vendor evidence</strong><small>Coverage is shown on each connected review</small></span><b>Review</b></div>
+          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Campus policy</strong></span><b>Scoped</b></div>
+          <div><span className="health-symbol health-good"><Check size={14} /></span><span><strong>Case evidence</strong></span><b>Scoped</b></div>
+          <div><span className="health-symbol health-warn">!</span><span><strong>Vendor evidence</strong></span><b>Review</b></div>
         </div>
-        <div className="scope-callout"><FolderLock size={17} /><span><strong>Retrieval scopes stay separate.</strong> Campus policy cannot be replaced by vendor claims, and evidence never crosses cases.</span></div>
       </section>
     </div>
     </div>
   </div>;
 }
 
-function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange, mode }: { cases: ReviewCase[]; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void; query: string; onQueryChange: (value: string) => void; mode: QueueMode }) {
+function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange }: { cases: ReviewCase[]; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void; query: string; onQueryChange: (value: string) => void }) {
   const [filter, setFilter] = useState<"Open" | "All" | QueueStatus>("Open");
+  const [mode, setMode] = useState<QueueMode>("inbox");
   const modeCases = mode === "inbox" ? cases.filter((review) => review.status !== "Completed") : mode === "my-work" ? cases.filter((review) => review.owner === "Alex Reviewer") : cases;
   const filteredCases = modeCases.filter((review) => {
     const matchesFilter = filter === "All" || (filter === "Open" ? review.status !== "Completed" : review.status === filter);
@@ -576,15 +579,18 @@ function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange, mode
     return matchesFilter && haystack.includes(query.toLowerCase());
   });
   const title = mode === "inbox" ? "Review inbox" : mode === "my-work" ? "My work" : "Review queue";
-  const description = mode === "my-work" ? "Reviews assigned to Alex Reviewer, with every evidence gap and human checkpoint visible." : "Move requests forward without hiding uncertainty, evidence gaps, or human checkpoints.";
+  const description = mode === "my-work" ? "Reviews assigned to Alex Reviewer." : "Open reviews and their next action.";
   return <>
     <PageIntro eyebrow="Review operations" title={title} description={description} actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onNewRequest}>New request</Button>} />
     <section className="panel queue-panel">
       <div className="queue-toolbar">
+        <div className="filter-tabs" aria-label="Review ownership">
+          {(["inbox", "my-work", "all"] as const).map((item) => <button key={item} type="button" className={mode === item ? "active" : ""} onClick={() => setMode(item)} aria-pressed={mode === item}>{item === "my-work" ? "My work" : item === "inbox" ? "Inbox" : "All reviews"}</button>)}
+        </div>
         <div className="filter-tabs" aria-label="Filter reviews">
           {(["Open", "Ready for review", "Needs evidence", "All"] as const).map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)} aria-pressed={filter === item}>{item}<span>{item === "All" ? modeCases.length : item === "Open" ? modeCases.filter((review) => review.status !== "Completed").length : modeCases.filter((review) => review.status === item).length}</span></button>)}
         </div>
-        <label className="search-control"><Search size={15} /><span className="sr-only">Search reviews</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search requests…" /></label>
+        <label className="search-control"><Search size={15} /><span className="sr-only">Search reviews</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search requests" /></label>
       </div>
       <div className="queue-columns"><span>Request</span><span>Requester / owner</span><span>Status</span><span>Route / match</span><span>Updated</span></div>
       <div className="review-list review-list-full">
@@ -597,7 +603,7 @@ function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange, mode
 
 function SpecialistCard({ icon, title, status, summary, points }: { icon: ReactNode; title: string; status: string; summary: string; points: string[] }) {
   return <article className="specialist-card">
-    <div className="specialist-heading"><span>{icon}</span><div><p className="eyebrow">Bounded specialist</p><h3>{title}</h3></div><StatusBadge>{status}</StatusBadge></div>
+    <div className="specialist-heading"><span>{icon}</span><div><p className="eyebrow">Specialist</p><h3>{title}</h3></div><StatusBadge>{status}</StatusBadge></div>
     <p>{summary}</p>
     <ul>{points.map((point) => <li key={point}><Check size={13} />{point}</li>)}</ul>
   </article>;
@@ -618,8 +624,8 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
   const accessibility = state?.specialist_results.accessibility as undefined | { summary?: string; vpat_required?: boolean };
   return <div className="review-sections">
     <section className="content-card record-context-card">
-      <div className="card-heading"><div><p className="eyebrow">Record context</p><h2>Owner, invitation, and versions</h2></div><StatusBadge>{latestInvite ? latestInvite.status.replace("_", " ") : "No invite"}</StatusBadge></div>
-      {recordContextError && <p className="record-context-error" role="alert">{recordContextError} Live record details were not replaced with fixture data.</p>}
+      <div className="card-heading"><div><p className="eyebrow">Record context</p><h2>Review details</h2></div><StatusBadge>{latestInvite ? latestInvite.status.replace("_", " ") : "No invite"}</StatusBadge></div>
+      {recordContextError && <p className="record-context-error" role="alert">{recordContextError}</p>}
       <dl className="detail-grid">
         <div><dt>Vendor contact</dt><dd>{contact ? `${contact.name} · ${contact.email}` : "Not returned"}</dd></div>
         <div><dt>Internal owner</dt><dd>{review.owner}</dd></div>
@@ -628,7 +634,7 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
         <div><dt>Profile versions</dt><dd>{profileVersions || "No active profiles returned"}</dd></div>
         <div><dt>Review runs</dt><dd>{runVersions || "No immutable run yet"}</dd></div>
         <div><dt>Evidence coverage</dt><dd>{policy ? `${policy.citations.length} cited policy source(s); ${policy.required_evidence.length} required evidence item(s)` : "Pending deterministic routing"}</dd></div>
-        <div><dt>Catalog candidates</dt><dd>{recordContext?.catalog?.matches.length ?? state?.software_candidates.length ?? 0} returned · membership is not approval</dd></div>
+        <div><dt>Catalog candidates</dt><dd>{recordContext?.catalog?.matches.length ?? state?.software_candidates.length ?? 0} returned</dd></div>
       </dl>
     </section>
     <section className="review-section two-column-section">
@@ -645,14 +651,14 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
         <div className="card-heading"><div><p className="eyebrow">02 / Approved software</p><h2>Candidate match</h2></div><StatusBadge>{matchConfirmed ? "Verified" : "Review needed"}</StatusBadge></div>
         <div className="match-record"><Database size={19} /><span><strong>{candidate?.canonical_name ?? "No approved-software candidate"}</strong><small>{source ? `${source.filename ?? source.source_id}${source.row ? ` · Row ${source.row}` : ""}` : "Structured lookup completed"}</small></span><b>{candidate ? `${Math.round(candidate.score * 100)}%` : "-"}</b></div>
         <dl className="compact-details"><div><dt>Method</dt><dd>{matchMethod}</dd></div><div><dt>Why review?</dt><dd>{candidate?.requires_confirmation ? "Fuzzy or semantic candidates require a person" : "No non-exact confirmation required"}</dd></div></dl>
-        <div className="match-confirm-row"><div className="boundary-note"><UserCheck size={16} /><span>{matchConfirmed ? "Alex Reviewer confirmed this candidate for the current request." : "A reviewer, not a model, must confirm this candidate."}</span></div><Button variant={matchConfirmed ? "secondary" : "primary"} disabled={matchConfirmed} onClick={onConfirmMatch} icon={matchConfirmed ? <Check size={14} /> : <UserCheck size={14} />}>{matchConfirmed ? "Candidate confirmed" : "Confirm candidate"}</Button></div>
+        <div className="match-confirm-row"><div className="boundary-note"><UserCheck size={16} /><span>{matchConfirmed ? "Confirmed for this request." : "Reviewer confirmation required."}</span></div><Button variant={matchConfirmed ? "secondary" : "primary"} disabled={matchConfirmed} onClick={onConfirmMatch} icon={matchConfirmed ? <Check size={14} /> : <UserCheck size={14} />}>{matchConfirmed ? "Candidate confirmed" : "Confirm candidate"}</Button></div>
       </article>
     </section>
 
     <section className="content-card policy-card">
       <div className="card-heading"><div><p className="eyebrow">03 / Deterministic policy</p><h2>{routeLabel}</h2></div><StatusBadge>{policy ? routeLabel : "Paused"}</StatusBadge></div>
       <div className="policy-layout">
-        <div className="policy-result"><span className="policy-icon"><ShieldCheck size={22} /></span><div><strong>{policy ? "Reviewer packet route calculated" : "Waiting for match confirmation"}</strong><p>{policy ? `The route came from versioned rules (${policy.policy_version}). Specialist output cannot change it.` : "Policy and specialist analysis remain paused until a reviewer confirms the fuzzy candidate."}</p></div></div>
+        <div className="policy-result"><span className="policy-icon"><ShieldCheck size={22} /></span><div><strong>{policy ? "Route calculated" : "Waiting for match confirmation"}</strong><p>{policy ? `Versioned rules ${policy.policy_version}` : "Confirm the candidate to continue."}</p></div></div>
         <ul className="citation-list">
           {policy?.citations.length ? policy.citations.map((citation, index) => <li key={`${citation.source.source_id}-${index}`}><Link2 size={14} /><span><strong>{citation.source.source_id}</strong>{citation.claim}{citation.source.row ? ` · Row ${citation.source.row}` : ""}</span></li>) : <li><LockKeyhole size={14} /><span><strong>HUMAN CHECKPOINT</strong>No policy result is shown before confirmation.</span></li>}
         </ul>
@@ -662,15 +668,15 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
     <section>
       <div className="section-heading"><div><p className="eyebrow">04 / Parallel analysis</p><h2>Specialist findings</h2></div><span className="parallel-label">SECURITY ─┬─ ACCESSIBILITY</span></div>
       <div className="specialist-grid">
-        <SpecialistCard icon={<ShieldCheck size={18} />} title="Security" status={security ? "Completed" : "Paused"} summary={security?.summary ?? "Security analysis starts only after deterministic routing."} points={security?.required_evidence?.length ? security.required_evidence.map((item) => `Required: ${item}`) : ["No model approval authority", "Policy route remains deterministic"]} />
-        <SpecialistCard icon={<BookOpenCheck size={18} />} title="Accessibility" status={accessibility ? "Completed" : "Paused"} summary={accessibility?.summary ?? "Accessibility analysis starts only after deterministic routing."} points={accessibility?.vpat_required ? ["VPAT / ACR required", "Version alignment remains a reviewer check"] : ["No cross-case evidence", "Human review remains required"]} />
+        <SpecialistCard icon={<ShieldCheck size={18} />} title="Security" status={security ? "Completed" : "Paused"} summary={security?.summary ?? "Waiting for policy routing."} points={security?.required_evidence?.length ? security.required_evidence.map((item) => `Required: ${item}`) : ["No additional evidence returned"]} />
+        <SpecialistCard icon={<BookOpenCheck size={18} />} title="Accessibility" status={accessibility ? "Completed" : "Paused"} summary={accessibility?.summary ?? "Waiting for policy routing."} points={accessibility?.vpat_required ? ["VPAT / ACR required", "Confirm product version"] : ["No additional evidence returned"]} />
       </div>
     </section>
 
     <section className="content-card">
       <div className="card-heading"><div><p className="eyebrow">05 / Evidence & citations</p><h2>{policy ? `${policy.required_evidence.length} required evidence item${policy.required_evidence.length === 1 ? "" : "s"}` : "Analysis paused"}</h2></div><StatusBadge>{policy ? "Review needed" : "Paused"}</StatusBadge></div>
-      <div className="gap-row"><span className="gap-icon">!</span><span><strong>{policy ? (policy.required_evidence.join(", ") || "No additional evidence required") : "Confirm the software candidate before evidence analysis."}</strong><small>{policy ? "Requirements come from the deterministic policy result." : "No specialist or policy result has been fabricated."}</small></span><Button variant="secondary" onClick={onOpenEvidence}>Review sources <ExternalLink size={14} /></Button></div>
-      <div className="evidence-summary-row"><span><FileCheck2 size={16} />{policy?.citations.length ?? 0} policy citations</span><span><CheckCircle2 size={16} />{state?.draft_packet ? "Packet composed" : "Packet not composed"}</span><span><FolderLock size={16} />{state ? "Connected scoped state" : "Offline demo only"}</span></div>
+      <div className="gap-row"><span className="gap-icon">!</span><span><strong>{policy ? (policy.required_evidence.join(", ") || "No additional evidence required") : "Confirm the software candidate to continue."}</strong></span><Button variant="secondary" onClick={onOpenEvidence}>Review sources <ExternalLink size={14} /></Button></div>
+      <div className="evidence-summary-row"><span><FileCheck2 size={16} />{policy?.citations.length ?? 0} policy citations</span><span><CheckCircle2 size={16} />{state?.draft_packet ? "Packet composed" : "Packet not composed"}</span><span><FolderLock size={16} />{state ? "Live case data" : "Offline"}</span></div>
       {state?.draft_packet && <button type="button" className="evidence-pdf-link" onClick={onOpenPacket}><Download size={14} aria-hidden="true" />Open the evidence packet (PDF)</button>}
     </section>
   </div>;
@@ -679,15 +685,14 @@ function ReviewOverview({ state, review, recordContext, recordContextError, onOp
 function PacketEditor({ draft, onDraftChange, onSave }: { draft: string; onDraftChange: (value: string) => void; onSave: () => void }) {
   return <section className="packet-layout">
     <div className="content-card packet-editor">
-      <div className="card-heading"><div><p className="eyebrow">Current packet / Draft</p><h2>Reviewer recommendation</h2><p>Edit the draft before making a decision. Policy results and citations remain locked.</p></div><Button variant="primary" onClick={onSave}>Save draft</Button></div>
+      <div className="card-heading"><div><p className="eyebrow">Current packet / Draft</p><h2>Reviewer recommendation</h2></div><Button variant="primary" onClick={onSave}>Save draft</Button></div>
       <label htmlFor="packet-draft">Recommendation text</label>
       <textarea id="packet-draft" value={draft} onChange={(event) => onDraftChange(event.target.value)} />
-      <div className="editor-footer"><span>Edits stay in this session · Save to this browser</span><span><LockKeyhole size={13} />Policy route locked</span></div>
+      <div className="editor-footer"><span>Saved in this browser</span><span><LockKeyhole size={13} />Policy route locked</span></div>
     </div>
     <aside className="content-card packet-outline">
       <p className="eyebrow">Packet contents</p><h2>Coverage</h2>
       <ol>{["Request summary", "Security findings", "Accessibility findings", "Evidence inventory", "Gaps and mitigations", "Source citations", "Committee routing"].map((item, index) => <li key={item}><span>{String(index + 1).padStart(2, "0")}</span>{item}<Check size={14} /></li>)}</ol>
-      <div className="scope-callout"><Sparkles size={16} /><span>Drafted from approved clauses. A reviewer owns every edit and final decision.</span></div>
     </aside>
   </section>;
 }
@@ -698,26 +703,26 @@ function WritebackPreview({ decision, written, preview, onWrite }: { decision: D
   const after = preview?.after ?? { state: "Ready for committee", u_review_outcome: "Medium-risk packet drafted", work_notes: "Human-reviewed decision", attachment: "Pending confirmation" };
   const rows = (values: Record<string, unknown>, changed: boolean) => Object.entries(values).slice(0, 5).map(([field, value]) => <div key={field}><dt>{field.replace(/^u_/, "").replace(/_/g, " ")}</dt><dd>{changed ? <span className="diff-value">{String(value || "-")}</span> : String(value || "-")}</dd></div>);
   return <section className="writeback-layout">
-    <div className="simulation-banner" role="note"><CircleDashed size={18} aria-hidden="true" /><span><strong>Simulated ServiceNow</strong>This preview never connects to a live campus system.</span></div>
+    <div className="simulation-banner" role="note"><CircleDashed size={18} aria-hidden="true" /><span><strong>Simulated ServiceNow</strong>Local preview</span></div>
     <div className="before-after-grid">
       <article className="content-card"><p className="eyebrow">Before</p><h2>Mock request · {preview?.record_id ?? "Preview pending"}</h2><dl className="change-list">{rows(before, false)}</dl></article>
       <article className="content-card after-card"><p className="eyebrow">After</p><h2>Proposed configured changes</h2><dl className="change-list">{rows(after, true)}</dl></article>
     </div>
     <div className={`writeback-confirm ${unlocked ? "writeback-unlocked" : ""}`}>
       <span className="writeback-lock">{written ? <CheckCircle2 size={20} /> : unlocked ? <UserCheck size={20} /> : <LockKeyhole size={20} />}</span>
-      <span><strong>{written ? "Mock record updated" : unlocked ? "Second confirmation required" : "Write-back is locked"}</strong><small>{written ? "Decision v1 and packet hash were added to the local audit trail." : unlocked ? "Confirm the preview to write once to the local mock connector." : "Record an approved human decision first. Drafts and model output cannot unlock this action."}</small></span>
+      <span><strong>{written ? "Mock record updated" : unlocked ? "Second confirmation required" : "Write-back is locked"}</strong><small>{written ? "Added to the local audit trail." : unlocked ? "Confirm this preview to continue." : "Record an approved decision first."}</small></span>
       <Button variant="primary" disabled={!unlocked || written || !preview} onClick={onWrite}>{written ? "Simulation complete" : preview ? "Approve & simulate write-back" : "Preparing preview…"}</Button>
     </div>
   </section>;
 }
 
-function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, rerunAvailable }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "packet" | "writeback") => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; rerunAvailable: boolean }) {
+function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecision, onTabChange, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, rerunAvailable }: { decision: Decision; approvalAllowed: boolean; approvalBlockReason: string | null; onDecision: (decision: Decision) => void; onTabChange: (tab: "overview" | "evidence" | "packet" | "writeback") => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; rerunAvailable: boolean }) {
   return <aside className="decision-panel">
     <div className="decision-panel-heading"><span className="decision-icon"><UserCheck size={19} /></span><div><p className="eyebrow">Human checkpoint</p><h2>Your decision</h2></div></div>
-    <p className="decision-copy">Review the draft, cited findings, and open accessibility item. Your action is recorded with this packet version.</p>
-    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Internal reviewer note (optional)</span><textarea value={comment} onChange={(event) => onCommentChange(event.target.value)} placeholder="Saved with the decision. Never shown to the vendor." /></label>
-    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Vendor-visible comment (optional)</span><textarea value={vendorVisibleComment} maxLength={2000} onChange={(event) => onVendorVisibleCommentChange(event.target.value)} placeholder="Write only information that is safe to share with this vendor contact." /></label>
-    <label className="decision-comment"><span>Vendor next actions (changes requested only)</span><textarea value={vendorNextActions} maxLength={5000} onChange={(event) => onVendorNextActionsChange(event.target.value)} placeholder="One action per line. Leave blank to derive safe actions from outstanding requirement IDs." /></label>
+    <p className="decision-copy">Review the packet and cited findings before deciding.</p>
+    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Internal reviewer note (optional)</span><textarea value={comment} onChange={(event) => onCommentChange(event.target.value)} placeholder="Internal note" /></label>
+    <label className="decision-comment"><span><MessageSquare size={13} aria-hidden="true" />Vendor-visible comment (optional)</span><textarea value={vendorVisibleComment} maxLength={2000} onChange={(event) => onVendorVisibleCommentChange(event.target.value)} placeholder="Message to the vendor" /></label>
+    <label className="decision-comment"><span>Vendor next actions (changes requested only)</span><textarea value={vendorNextActions} maxLength={5000} onChange={(event) => onVendorNextActionsChange(event.target.value)} placeholder="One action per line" /></label>
     <div className="decision-state"><span>Current decision</span><StatusBadge>{decision}</StatusBadge></div>
     {!approvalAllowed && approvalBlockReason && <div className="decision-prerequisite"><LockKeyhole size={15} /><span><strong>Approval is locked.</strong> {approvalBlockReason}</span></div>}
     {decision === "Pending" ? <div className="decision-buttons">
@@ -728,23 +733,19 @@ function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecis
       <div className={`decision-message decision-${statusTone(decision)}`}><strong>{decision}</strong><span>{decision === "Approved" ? "The write-back preview is now available. A second confirmation is still required." : decision === "Rejected" ? "The case will close without write-back." : "The packet is paused for reviewer edits."}</span></div>
       <Button variant="ghost" className="full-width" onClick={() => onDecision("Pending")}>Change decision</Button>
     </>}
-    <div className="decision-boundaries">
-      <span><ShieldCheck size={14} />Policy result is read-only</span>
-      <span><History size={14} />Every decision is audited</span>
-      <span><CircleDashed size={14} />External write is simulated</span>
-    </div>
+    <div className="decision-boundaries"><span><History size={14} />Decision recorded in audit</span></div>
     <div className="decision-rerun">
       <p className="eyebrow">One custom rerun</p>
-      <p className="decision-rerun-copy">Run the analysis once more with a specific instruction. This creates a new immutable review version and invalidates the prior write-back preview.</p>
-      <textarea value={rerunInstruction} onChange={(event) => onRerunInstructionChange(event.target.value)} placeholder="For example: recheck the VPAT against the requested product version." disabled={rerunUsed || !rerunAvailable} aria-label="Custom rerun instruction" />
+      <p className="decision-rerun-copy">Creates a new review version.</p>
+      <textarea value={rerunInstruction} onChange={(event) => onRerunInstructionChange(event.target.value)} placeholder="Recheck the VPAT for this product version" disabled={rerunUsed || !rerunAvailable} aria-label="Custom rerun instruction" />
       <Button variant="secondary" className="full-width" icon={<RotateCcw size={14} />} disabled={rerunUsed || !rerunAvailable} onClick={onRerun}>{rerunUsed ? "Custom rerun used" : "Rerun with this instruction"}</Button>
     </div>
     {decision === "Approved" && <Button variant="primary" className="full-width" onClick={() => onTabChange("writeback")}>Review write-back <ArrowRight size={14} /></Button>}
   </aside>;
 }
 
-function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenEvidence, onOpenPacket, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenEvidence: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
-  const [tab, setTab] = useState<"overview" | "packet" | "writeback">("overview");
+function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenPacket, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
+  const [tab, setTab] = useState<"overview" | "evidence" | "packet" | "writeback">("overview");
   const approvalAllowed = matchConfirmed && Boolean(state?.draft_packet) && state?.status !== "escalated";
   const approvalBlockReason = !matchConfirmed
     ? "Confirm the fuzzy or semantic candidate first."
@@ -770,7 +771,7 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
     state: index < currentStepIndex ? "complete" : index === currentStepIndex ? "current" : "upcoming",
   }));
   if (!state) {
-    return <section className="content-card"><p className="eyebrow">Sanitized offline fallback</p><h1>{review.product}</h1><p>The detailed review, evidence claims, packet, decision, preview, and audit actions require the local backend. Start it with the documented command; no consequential action is recorded while offline.</p></section>;
+    return <section className="content-card"><p className="eyebrow">Offline</p><h1>{review.product}</h1><p>Start the local backend to open this review.</p></section>;
   }
   return <>
     <div className="review-page-header">
@@ -783,13 +784,14 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
     </ol>
 
     <div className="review-tabs" role="tablist" aria-label="Review sections">
-      {(["overview", "packet", "writeback"] as const).map((item) => <button key={item} id={`review-tab-${item}`} type="button" role="tab" aria-selected={tab === item} aria-controls={`review-panel-${item}`} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} aria-hidden="true" />}</button>)}
+      {(["overview", "evidence", "packet", "writeback"] as const).map((item) => <button key={item} id={`review-tab-${item}`} type="button" role="tab" aria-selected={tab === item} aria-controls={`review-panel-${item}`} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "evidence" ? "Evidence" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} aria-hidden="true" />}</button>)}
     </div>
 
     <div className="review-workspace">
       <div className="review-main" role="tabpanel" id={`review-panel-${tab}`} aria-labelledby={`review-tab-${tab}`}>
-        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={onOpenEvidence} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
-        {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the fuzzy or semantic software candidate before deterministic policy, specialist analysis, and packet composition continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
+        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={() => setTab("evidence")} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
+        {tab === "evidence" && <ReviewEvidence caseId={review.id} />}
+        {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the software candidate to continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
       </div>
       <DecisionPanel decision={decision} approvalAllowed={approvalAllowed} approvalBlockReason={approvalBlockReason} onDecision={onDecision} onTabChange={setTab} comment={comment} onCommentChange={onCommentChange} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={onVendorVisibleCommentChange} vendorNextActions={vendorNextActions} onVendorNextActionsChange={onVendorNextActionsChange} rerunInstruction={rerunInstruction} onRerunInstructionChange={onRerunInstructionChange} onRerun={onRerun} rerunUsed={rerunUsed} rerunAvailable={Boolean(state)} />
@@ -797,11 +799,14 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
   </>;
 }
 
-function EvidencePage({ caseId }: { caseId: string }) {
+function ReviewEvidence({ caseId }: { caseId: string }) {
   const [scope, setScope] = useState<"All sources" | EvidenceItem["scope"]>("All sources");
   const [selectedId, setSelectedId] = useState(evidenceItems[1].id);
   const [processingItems, setProcessingItems] = useState<EvidenceArtifact[]>([]);
   const [processingError, setProcessingError] = useState("");
+  const [research, setResearch] = useState<CaseResearchResponse | null>(null);
+  const [researchBusy, setResearchBusy] = useState(false);
+  const [researchError, setResearchError] = useState("");
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
@@ -824,13 +829,34 @@ function EvidencePage({ caseId }: { caseId: string }) {
   }, [caseId]);
   const selected = evidenceItems.find((item) => item.id === selectedId) ?? evidenceItems[0];
   const filtered = evidenceItems.filter((item) => scope === "All sources" || item.scope === scope);
+  const runResearch = async () => {
+    setResearchBusy(true);
+    setResearchError("");
+    try { setResearch(await reviewApi.getCaseResearch(caseId)); }
+    catch (error) { setResearchError(error instanceof ReviewApiError ? error.message : "Secure research results are unavailable."); }
+    finally { setResearchBusy(false); }
+  };
   return <>
-    <PageIntro eyebrow="Grounded review material" title="Evidence" description="Inspect citations without mixing campus policy, case uploads, or official vendor material." />
-    <section className="scope-strip" aria-label="Evidence retrieval boundaries"><FolderLock size={17} aria-hidden="true" /><div><strong>Three retrieval scopes, always separate.</strong><span>Sources can support a finding; they cannot override deterministic policy or a reviewer.</span></div></section>
+    <section className="scope-strip" aria-label="Evidence retrieval boundaries"><FolderLock size={17} aria-hidden="true" /><div><strong>Separate evidence scopes</strong><span>Campus policy, case evidence, and vendor evidence.</span></div></section>
     <section className="panel evidence-list-panel" aria-labelledby="processing-state-heading">
       <div className="preview-toolbar"><span><CircleDotDashed size={17} aria-hidden="true" /><span><strong id="processing-state-heading">Current case processing</strong><small>Case {caseId} · refreshed while work is active</small></span></span></div>
       {processingError && <p className="record-context-error" role="alert">{processingError}</p>}
       <EvidenceProcessingList items={processingItems} emptyMessage="No uploaded evidence is registered for this case." />
+    </section>
+    <section className="panel evidence-list-panel secure-research-panel" aria-labelledby="secure-research-heading">
+      <div className="panel-heading"><div><p className="eyebrow">Official-domain retrieval</p><h2 id="secure-research-heading">Secure research</h2><p>Review source provenance before using a finding.</p></div><Button variant="secondary" disabled={researchBusy} onClick={() => void runResearch()} icon={<Search size={14} />}>{researchBusy ? "Researching…" : research ? "Refresh research" : "Run secure research"}</Button></div>
+      {researchError && <p className="record-context-error" role="alert">{researchError}</p>}
+      {research && !research.research_performed && <div className="empty-state"><FolderLock size={18} /><strong>No official-domain research was configured for this case.</strong><span>Add a confirmed official vendor domain to the intake before running research.</span></div>}
+      {research?.research && <div className="research-results">
+        <div className="scope-callout"><ShieldCheck size={17} /><span><strong>Confirmed host: {research.research.confirmed_host}</strong>{research.research.findings.length} source(s) · {research.research.downloads_used} download(s)</span></div>
+        {research.research.findings.map((finding) => <article className="research-finding" key={finding.provenance.provenance_id}>
+          <div><strong>{finding.provenance.final_url}</strong><StatusBadge>{finding.provenance.scope.replace("_", " ")}</StatusBadge></div>
+          <dl><div><dt>Retrieved</dt><dd>{new Date(finding.provenance.retrieved_at).toLocaleString()}</dd></div><div><dt>Content hash</dt><dd><code>{finding.provenance.content_sha256.slice(0, 18)}…</code></dd></div><div><dt>Type</dt><dd>{finding.provenance.mime_type}</dd></div></dl>
+          <div className="untrusted-findings"><span>Untrusted extracted findings</span>{finding.untrusted_findings.length ? finding.untrusted_findings.map((item, index) => <pre key={index}>{JSON.stringify(item, null, 2)}</pre>) : <p>No structured findings were extracted from this source.</p>}</div>
+        </article>)}
+        {research.research.gaps.length > 0 && <div className="research-notices"><strong>Retrieval gaps</strong>{research.research.gaps.map((gap) => <p key={`${gap.requested_url}-${gap.code}`}>{gap.code}: {gap.detail}</p>)}</div>}
+        {research.research.quarantined.length > 0 && <div className="research-notices"><strong>Quarantined</strong>{research.research.quarantined.map((item) => <p key={item.url}>{item.url}: {item.reason}</p>)}</div>}
+      </div>}
     </section>
     <div className="evidence-layout">
       <section className="panel evidence-list-panel">
@@ -863,9 +889,9 @@ function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents }: { c
     return [...dynamic, ...demoEvents];
   }, [apiEvents, caseId, decision, written, matchConfirmed]);
   return <>
-    <PageIntro eyebrow={reviewApi.mode === "fixture" ? "Sanitized fixture timeline" : "Connected audit timeline"} title="Audit" description={reviewApi.mode === "fixture" ? "Fixture events are simulated and remain in this browser." : "Structured reviewer and workflow events returned by the API, newest first."} />
+    <PageIntro eyebrow={reviewApi.mode === "fixture" ? "Fixture timeline" : "Connected timeline"} title="Audit" />
     <section className="panel audit-panel">
-      <div className="audit-summary"><div><span className="audit-symbol">LOG</span><span><strong>{caseId}</strong><small>{reviewApi.mode === "fixture" ? "Simulated fixture events · newest first" : "Events returned by the review API · newest first"}</small></span></div><div><StatusBadge>{reviewApi.mode === "fixture" ? "Fixture" : "Connected"}</StatusBadge><span className="hash-label">{reviewApi.mode === "fixture" ? "LOCAL FIXTURE" : "API EVENTS"}</span></div></div>
+      <div className="audit-summary"><div><span className="audit-symbol">LOG</span><span><strong>{caseId}</strong><small>Newest first</small></span></div><div><StatusBadge>{reviewApi.mode === "fixture" ? "Fixture" : "Connected"}</StatusBadge><span className="hash-label">{reviewApi.mode === "fixture" ? "LOCAL FIXTURE" : "API EVENTS"}</span></div></div>
       <div className="audit-timeline">{events.map((event, index) => <article key={`${event.time}-${event.action}`}><div className="timeline-rail"><span>{index === 0 ? <Activity size={13} /> : String(events.length - index).padStart(2, "0")}</span></div><time>{event.time}</time><div><strong>{event.actor}</strong><p>{event.action}</p><small>{event.detail}</small></div></article>)}</div>
     </section>
   </>;
@@ -899,7 +925,7 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
   };
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-request-title">
-      <div className="dialog-heading"><div><p className="eyebrow">Guided intake / Sanitized local case</p><h2 id="new-request-title">Start a technology review</h2><p>Use sanitized information only. Required details are validated before deterministic analysis.</p></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
+      <div className="dialog-heading"><div><p className="eyebrow">Guided intake</p><h2 id="new-request-title">Start a technology review</h2><p>Use sanitized information only.</p></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
       <form onSubmit={submit}>
         <div className="form-grid">
           <label><span>Product name</span><input name="product_name" required placeholder="e.g. LabArchives" autoFocus /></label>
@@ -919,7 +945,6 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
           <label><span>Uses AI?</span><select name="uses_ai" defaultValue="false"><option value="false">No</option><option value="true">Yes</option></select></label>
           <label><span>Classroom or public use?</span><select name="classroom_or_public_use" defaultValue="false"><option value="false">No</option><option value="true">Yes</option></select></label>
         </div>
-        <div className="form-notice"><ShieldCheck size={17} /><span>Submitting creates the case and runs bounded local analysis. It cannot approve software or write to an external system.</span></div>
         <div className="dialog-actions"><Button variant="ghost" type="button" onClick={onClose}>Cancel</Button><Button variant="primary" type="submit">Create and analyze <ArrowRight size={14} /></Button></div>
       </form>
     </section>
@@ -927,11 +952,12 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("dashboard");
-  const [queueMode, setQueueMode] = useState<QueueMode>("inbox");
+  const reviewerSession = useReviewerSession();
+  const [page, setPage] = useState<Page>(pageFromLocation);
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("review-theme") === "light" ? "light" : "dark");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [cases, setCases] = useState<ReviewCase[]>(() => reviewApi.mode === "fixture" ? reviewCases : []);
+  const [dashboardInvites, setDashboardInvites] = useState<DashboardInviteRow[]>([]);
   const [caseStates, setCaseStates] = useState<Record<string, ReviewState>>({});
   const [selectedReview, setSelectedReview] = useState(reviewCases[0]);
   const [activeState, setActiveState] = useState<ReviewState | null>(null);
@@ -954,6 +980,7 @@ export default function App() {
   const [vendorNextActions, setVendorNextActions] = useState("");
   const [rerunInstruction, setRerunInstruction] = useState("");
   const [rerunUsed, setRerunUsed] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   const syncActionResponse = (response: CaseActionResponse, syncDraft = false) => {
     const summary = queueItemToSummary(response.queue_item);
@@ -986,12 +1013,26 @@ export default function App() {
       setCases(summaries);
       setCaseStates(states);
       if (items.length === 0) return;
-      const active = items.find((item) => item.case_id === "TR-260714-014") ?? items[0];
+      const linkedCaseId = new URLSearchParams(window.location.search).get("case");
+      const active = items.find((item) => item.case_id === linkedCaseId) ?? items.find((item) => item.case_id === "TR-260714-014") ?? items[0];
       setSelectedReview(queueItemToSummary(active));
       setActiveState(active.state);
       const candidate = active.state.software_candidates[0];
       setMatchConfirmed(Boolean(active.state.confirmed_match_id) || !candidate?.requires_confirmation);
       if (active.state.draft_packet) setPacketDraft(packetToDraft(active.state.draft_packet));
+      void (async () => {
+        const [contacts, inviteGroups] = await Promise.all([
+          reviewApi.listContacts(),
+          Promise.all(items.map((item) => reviewApi.listInvites(item.case_id))),
+        ]);
+        if (!current) return;
+        const contactById = new Map(contacts.map((contact) => [contact.contact_id, contact]));
+        const productByCase = new Map(summaries.map((summary) => [summary.id, summary.product]));
+        setDashboardInvites(inviteGroups.flat().map((invite) => {
+          const contact = contactById.get(invite.contact_id);
+          return { inviteId: invite.invite_id, caseId: invite.case_id, product: productByCase.get(invite.case_id) ?? invite.case_id, contact: contact?.name ?? "Vendor contact", contactEmail: contact?.email ?? "Not returned", status: invite.status, expiresAt: invite.expires_at };
+        }));
+      })().catch(() => { if (current) setDashboardInvites([]); });
     }).catch((error) => {
       if (!current) return;
       setBackendConnected(false);
@@ -1027,17 +1068,31 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    const handlePopState = () => setPage(pageFromLocation());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 3200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => {
-    if (nextQueueMode) setQueueMode(nextQueueMode);
+  const navigate = (nextPage: Page, caseId?: string) => {
+    const nextUrl = `${pagePaths[nextPage]}${nextPage === "review" && caseId ? `?case=${encodeURIComponent(caseId)}` : ""}`;
+    if (`${window.location.pathname}${window.location.search}` !== nextUrl) window.history.pushState({}, "", nextUrl);
     setPage(nextPage);
     setMobileNavOpen(false);
     const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  };
+  const toggleSidebar = () => {
+    if (window.matchMedia("(max-width: 920px)").matches) {
+      setMobileNavOpen(false);
+      return;
+    }
+    setSidebarCollapsed((value) => !value);
   };
   const apiErrorMessage = (error: unknown) => error instanceof ReviewApiError ? error.message : "The local backend request failed.";
   const openCase = (review: ReviewCase) => {
@@ -1056,7 +1111,7 @@ export default function App() {
       setWritten(false);
       setPacketDraft(defaultPacketDraft);
       setPacketDirty(false);
-      navigate("review");
+      navigate("review", review.id);
       return;
     }
     setSelectedReview(review);
@@ -1068,7 +1123,7 @@ export default function App() {
     setDecision(action === "approve" ? "Approved" : action === "reject" ? "Rejected" : action === "request_info" ? "Changes requested" : "Pending");
     setWritten(Boolean(state.write_result?.committed));
     if (state.draft_packet) setPacketDraft(packetToDraft(state.draft_packet));
-    navigate("review");
+    navigate("review", review.id);
   };
   const updatePacketDraft = (value: string) => {
     setPacketDraft(value);
@@ -1218,29 +1273,33 @@ export default function App() {
   };
 
   const navCount = (item: NavItem): number | undefined => {
-    if (item.page === "queue" && item.queueMode === "inbox") return cases.filter((review) => review.status !== "Completed").length || undefined;
-    if (item.page === "queue" && item.queueMode === "my-work") return cases.filter((review) => review.owner === "Alex Reviewer").length || undefined;
+    if (item.page === "queue") return cases.filter((review) => review.status !== "Completed").length || undefined;
     return undefined;
   };
-  const pageLabel = page === "queue" ? (queueMode === "my-work" ? "My work" : queueMode === "inbox" ? "Inbox" : "Review queue") : allNavItems.find((item) => item.page === page)?.label ?? "Workspace";
+  const pageLabel = page === "review" ? "Active review" : allNavItems.find((item) => item.page === page)?.label ?? "Workspace";
 
   return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
     <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`} aria-label="Workspace navigation">
       <div className="brand">
-        <img className="brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
+        <button className="brand-logo-button" type="button" onClick={toggleSidebar} aria-label={mobileNavOpen ? "Close navigation" : sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={sidebarCollapsed} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><img className="brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" /></button>
         <span><strong>Vetted</strong><small>Reviewer workspace</small></span>
-        <button className="sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={sidebarCollapsed}>{sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
         <button className="sidebar-close" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"><X size={18} /></button>
       </div>
-      <div className="workspace-chip"><span>CSUB</span><div><strong>CSUB workspace</strong><small>{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : backendConnected ? "Live API connected" : "Live API unavailable"}</small></div></div>
       <nav className="primary-nav" aria-label="Primary navigation">
-        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} aria-hidden="true" /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em aria-label={`${badge} items`}>{badge}</em> : null; })()}</button>; })}</div>)}
+        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page; return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page)} aria-current={active ? "page" : undefined}><Icon size={17} aria-hidden="true" /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em aria-label={`${badge} items`}>{badge}</em> : null; })()}</button>; })}</div>)}
       </nav>
       <div className="sidebar-spacer" />
-      <div className="boundary-card"><ShieldCheck size={17} aria-hidden="true" /><div><strong>Human-controlled</strong><span>AI can draft security and accessibility findings. It cannot set policy, approve, or write externally.</span></div></div>
-      <div className="profile"><Avatar name="Alex Reviewer" small /><div><strong>Alex Reviewer</strong><span>Information Security</span></div><span className="presence-dot" role="img" aria-label="Online" /></div>
+      <div className="profile-wrap" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setAccountMenuOpen(false); }}>
+        {accountMenuOpen && <div className="account-menu" role="menu" aria-label="Reviewer account">
+          <div className="account-menu-identity"><Avatar name={reviewerSession.name} /><span><strong>{reviewerSession.name}</strong><small>{reviewerSession.email}</small></span></div>
+          <span className="account-session-label">{reviewerSession.mode === "local-bypass" ? "Local session" : reviewerSession.mode === "fixture" ? "Fixture session" : "Signed in"}</span>
+          <button type="button" role="menuitem" onClick={() => { setAccountMenuOpen(false); navigate("settings"); }}><Settings2 size={15} aria-hidden="true" />Account settings</button>
+          <button type="button" role="menuitem" onClick={reviewerSession.signOut}><LogOut size={15} aria-hidden="true" />Sign out</button>
+        </div>}
+        <button type="button" className="profile" onClick={() => setAccountMenuOpen((value) => !value)} aria-expanded={accountMenuOpen} aria-haspopup="menu"><Avatar name={reviewerSession.name} small /><div><strong>{reviewerSession.name}</strong><span>{reviewerSession.email}</span></div><ChevronRight className={`account-chevron ${accountMenuOpen ? "account-chevron-open" : ""}`} size={15} aria-hidden="true" /></button>
+      </div>
     </aside>
 
     <div className="app-main">
@@ -1249,26 +1308,20 @@ export default function App() {
         <div className="topbar-actions">
           <label className="global-search"><Search size={15} /><span className="sr-only">Search the review queue</span><input value={globalQuery} onChange={(event) => setGlobalQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") navigate("queue"); }} placeholder="Search reviews" /></label>
           <button className="icon-button theme-button" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`}>{theme === "light" ? <Moon size={17} /> : <Sun size={17} />}</button>
-          <span className="topbar-divider" />
-          <Avatar name="Alex Reviewer" small />
         </div>
       </header>
 
       <main id="main-content" className={`content ${page === "review" ? "content-wide" : ""}`}>
-        {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span><small>No fixture records were substituted. Set <code>VITE_REVIEW_DATA_MODE=fixture</code> only when you intend to use the simulated demo.</small></div>}
-        {page === "dashboard" && <DashboardPage cases={cases} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
-        {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} mode={queueMode} />}
-        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenEvidence={() => navigate("evidence")} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={setVendorVisibleComment} vendorNextActions={vendorNextActions} onVendorNextActionsChange={setVendorNextActions} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
-        {page === "vendors" && <CatalogPage notify={setToast} />}
+        {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span></div>}
+        {page === "dashboard" && <DashboardPage cases={cases} invites={dashboardInvites} reviewerName={reviewerSession.name} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
+        {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} />}
+        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={setVendorVisibleComment} vendorNextActions={vendorNextActions} onVendorNextActionsChange={setVendorNextActions} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
+        {page === "vendors" && <CatalogPage />}
         {page === "contacts" && <ContactsPage notify={setToast} />}
         {page === "requests" && <VendorRecordsPage notify={setToast} />}
-        {page === "tasks" && <TasksPage notify={setToast} />}
-        {page === "notes" && <NotesPage notify={setToast} />}
-        {(page === "workflows" || page === "workflow-runs" || page === "workflow-versions") && <WorkflowsPage view={page} navigate={(nextPage) => navigate(nextPage)} notify={setToast} />}
         {page === "chat" && <ChatPage notify={setToast} />}
         {page === "settings" && <SettingsPage notify={setToast} />}
         {page === "documentation" && <DocumentationPage notify={setToast} />}
-        {page === "evidence" && <EvidencePage caseId={selectedReview.id} />}
         {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} apiEvents={auditEvents[selectedReview.id] ?? []} />}
       </main>
     </div>

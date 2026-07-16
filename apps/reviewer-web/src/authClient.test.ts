@@ -8,7 +8,7 @@ import {
 
 function rawClient(overrides: Partial<BetterAuthReactClientLike> = {}): BetterAuthReactClientLike {
   return {
-    getSession: vi.fn().mockResolvedValue({ data: { user: { id: "u1", email: "reviewer@example.edu" }, session: { token: "better-auth-session" } } }),
+    getSession: vi.fn().mockResolvedValue({ data: { user: { id: "u1", name: "Campus Reviewer", email: "reviewer@example.edu" }, session: { token: "better-auth-session" } } }),
     getAccessToken: vi.fn().mockResolvedValue({ data: { accessToken: "cognito-access-token" } }),
     signIn: { oauth2: vi.fn().mockResolvedValue({ data: { url: "https://cognito.example/authorize", redirect: true } }) },
     signOut: vi.fn().mockResolvedValue({ data: { success: true } }),
@@ -64,7 +64,7 @@ describe("Better Auth OIDC adapter", () => {
 function adapterStub(overrides: Partial<AuthClient> = {}): AuthClient {
   return {
     baseURL: "https://vetted.example/api/auth",
-    getSession: vi.fn().mockResolvedValue({ ok: true, status: 200, data: { user: { email: "reviewer@example.edu" }, session: { token: "session-token" } } }),
+    getSession: vi.fn().mockResolvedValue({ ok: true, status: 200, data: { user: { name: "Campus Reviewer", email: "reviewer@example.edu" }, session: { token: "session-token" } } }),
     getProviderAccessToken: vi.fn().mockResolvedValue({ ok: true, status: 200, data: { accessToken: "cognito-access-token" } }),
     signInWithCognito: vi.fn(),
     signOut: vi.fn().mockResolvedValue({ ok: true, status: 200 }),
@@ -79,7 +79,7 @@ describe("Better Auth reviewer provider", () => {
 
     const snapshot = await provider.initialize();
 
-    expect(snapshot).toMatchObject({ status: "authenticated", email: "reviewer@example.edu" });
+    expect(snapshot).toMatchObject({ status: "authenticated", name: "Campus Reviewer", email: "reviewer@example.edu" });
     expect(provider.getAccessToken()).toBe("cognito-access-token");
   });
 

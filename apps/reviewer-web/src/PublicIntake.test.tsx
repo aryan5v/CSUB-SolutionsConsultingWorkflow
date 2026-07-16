@@ -36,6 +36,7 @@ describe("PublicIntake review status", () => {
     expect(html).toContain("Please update the accessibility evidence.");
     expect(html).toContain("What to do next");
     expect(html).toContain("Upload the current product-specific ACR.");
+    expect(html).toContain("Checklist updated for this intake");
     expect(html).not.toContain("Internal reviewer finding");
   });
 });

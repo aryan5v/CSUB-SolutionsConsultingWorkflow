@@ -40,17 +40,17 @@ const THRESHOLDS: Array<{ key: keyof FormState; label: string; help: string }> =
   {
     key: "pentest_max_age_days",
     label: "Penetration test max age (days)",
-    help: "A report older than this is flagged. One year is confirmed in the 2026-07-15 feedback (issue #36).",
+    help: "Older reports return for review.",
   },
   {
     key: "pci_attestation_max_age_days",
     label: "PCI attestation currency (days)",
-    help: "Left blank until CSUB confirms it (issue #52); blank routes every PCI AoC to manual review rather than an invented limit.",
+    help: "Leave blank to review each PCI attestation manually.",
   },
   {
     key: "evidence_expiry_days",
     label: "Evidence expiry / re-review window (days)",
-    help: "Approved evidence older than this triggers a scoped re-review (issue #53).",
+    help: "Older evidence returns for review.",
   },
 ];
 
@@ -121,8 +121,7 @@ export function PolicyCriteriaSettings({ notify }: { notify: Notify }) {
         <p className="policy-provisional" role="note">
           <AlertTriangle size={15} aria-hidden="true" />
           <span>
-            <strong>Provisional values.</strong> These are not yet confirmed CSUB policy (issue #52). Adjust them here as
-            your institution defines authoritative rules; a blank threshold defers that check to manual review.
+            <strong>Provisional values.</strong> Leave a threshold blank to require manual review.
           </span>
         </p>
       )}
@@ -149,12 +148,12 @@ export function PolicyCriteriaSettings({ notify }: { notify: Notify }) {
             onChange={(event) => update("coi_required_coverages", event.target.value)}
             placeholder="cyber, privacy"
           />
-          <small>Comma-separated coverage keywords a certificate of insurance must list.</small>
+          <small>Comma-separated coverage names.</small>
         </label>
         <label className="policy-provisional-toggle">
           <span>
             <strong>Mark values provisional</strong>
-            <small>Keep on until CSUB has confirmed these thresholds as authoritative.</small>
+            <small>Turn off after CSUB confirms these values.</small>
           </span>
           <input
             type="checkbox"
@@ -168,7 +167,7 @@ export function PolicyCriteriaSettings({ notify }: { notify: Notify }) {
         <span>
           <ShieldCheck size={14} aria-hidden="true" />
           {criteria.version === 0
-            ? "Provisional defaults · never edited"
+            ? "Provisional defaults"
             : `Version ${criteria.version} · ${criteria.updated_by || "reviewer"}`}
         </span>
         <button type="button" className="policy-save" onClick={save} disabled={saving}>

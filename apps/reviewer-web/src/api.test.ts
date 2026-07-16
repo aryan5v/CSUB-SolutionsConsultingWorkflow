@@ -91,6 +91,18 @@ describe("secure correlation identifiers", () => {
 });
 
 describe("review API client", () => {
+  it("omits reviewer authorization only when the caller explicitly enables the local bypass", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    const provider = authProvider("");
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: provider, authBypass: true });
+
+    await client.listQueue();
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Headers;
+    expect(headers.has("Authorization")).toBe(false);
+    expect(provider.getAccessToken).not.toHaveBeenCalled();
+  });
+
   it("loads and maps review queue items", async () => {
     const item: QueueItem = {
       case_id: "TR-260714-014",
