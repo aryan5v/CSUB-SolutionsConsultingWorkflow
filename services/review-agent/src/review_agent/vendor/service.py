@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import hmac
 import ipaddress
 import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from ..contracts.vendor import (
     DEFAULT_WORKSPACE_ID,
@@ -20,6 +21,7 @@ from ..contracts.vendor import (
     EvidenceArtifact,
     IntegrationEvent,
     InviteStatus,
+    ReminderClaim,
     ReviewProfileVersion,
     ReviewRun,
     SoftwareCatalogEntry,
@@ -33,6 +35,8 @@ from ..contracts.vendor import (
 )
 from ..evidence.ingestion import ACCEPTED_CONTENT_TYPES, MAX_EVIDENCE_BYTES
 from ..profiles.service import ProfileError, ReviewProfileService
+from ..timestamps import parse_utc_timestamp
+from .delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .repository import VendorRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -64,32 +68,37 @@ class VendorBackend:
         clock: Callable[[], datetime.datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
         invite_ttl: datetime.timedelta = datetime.timedelta(days=7),
+        reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
+        intake_base_url: str = "https://vetted.invalid/intake",
+        link_secret: bytes | None = None,
         research_provider: VendorResearchProvider | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
+        if reminder_interval <= datetime.timedelta(0):
+            raise ValueError("reminder_interval must be positive")
         self.repository = repository
         self.profiles = profiles
         self.workspace_id = workspace_id
         self._clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self.invite_ttl = invite_ttl
-        # Optional official-domain research provider. Left ``None`` in the
-        # dependency-free local slice: research is then simply not performed
-        # (recorded honestly) rather than fabricated. Injected with a
-        # VendorResearchService (guarded transport) where live research is
-        # approved. It only annotates provenance and surfaces gaps; it never
-        # sets coverage, policy, approval, or requirements.
+        self.reminder_interval = reminder_interval
+        self.intake_base_url = intake_base_url.rstrip("/#")
+        # Keyed secret seals invite tokens so reminders can repeat the scoped
+        # link without persisting plaintext. Production supplies a stable key.
+        self._link_secret = link_secret or secrets.token_bytes(32)
+        # Guarded official-domain research annotates provenance and gaps only.
         self._research = research_provider
+        # Delivery claims are deliberately separate from the restored domain
+        # snapshot. Production injects the DynamoDB-backed workspace store so
+        # independent cold starts contend on one atomic outbox record.
+        self._delivery_claims = delivery_claim_store or InMemoryDeliveryClaimStore()
 
     @property
     def research_provider(self) -> VendorResearchProvider | None:
-        """The configured official-domain research provider, if any.
-
-        Exposed read-only so composition roots (``LocalReviewApi`` and the Lambda
-        ``restore_api`` path) can preserve the same provider when they rebuild the
-        backend, instead of dropping it and silently reverting to "not performed".
-        """
+        """The configured official-domain research provider, if any."""
 
         return self._research
 
@@ -261,14 +270,16 @@ class VendorBackend:
         if not isinstance(token, str) or len(token) < 32:
             raise VendorBackendError("weak_token", "token factory must provide at least 32 characters")
         now = self._now_datetime()
+        invite_id = self._id("invite", "invite")
         invite = VendorInvite(
-            invite_id=self._id("invite", "invite"),
+            invite_id=invite_id,
             case_id=case_id,
             product_id=case.product_id,
             contact_id=contact_id,
             token_hash=self._hash_token(token),
             issued_at=now.isoformat(),
             expires_at=(now + self.invite_ttl).isoformat(),
+            token_seal=self._seal_token(invite_id, token),
             workspace_id=self.workspace_id,
         )
         self._put("invite", invite.invite_id, invite)
@@ -701,7 +712,7 @@ class VendorBackend:
         # Expiry applies to submitted invitations too: the status view is
         # readable after finalize, but only within the invitation's lifetime,
         # matching the expiry semantics of every other token operation.
-        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        expires = parse_utc_timestamp(invite.expires_at)
         if self._now_datetime() >= expires:
             if invite.status is not InviteStatus.SUBMITTED:
                 self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
@@ -1105,6 +1116,310 @@ class VendorBackend:
     @staticmethod
     def _hash_recipient(recipient: str) -> str:
         return hashlib.sha256(recipient.strip().lower().encode("utf-8")).hexdigest()
+
+    # Weekly vendor reminders (issue #37) -------------------------------------
+
+    _REMINDER_EVENT = "email.reminder"
+    # A failed delivery is retried on later sweeps within the same cadence
+    # period, but never unboundedly.
+    MAX_REMINDER_ATTEMPTS = 3
+    # Reminders run only while the vendor still owes evidence; once the case
+    # moves to reviewer-owned states the nagging stops.
+    _REMINDER_LIFECYCLES = frozenset(
+        {
+            CaseLifecycle.DRAFT,
+            CaseLifecycle.INVITED,
+            CaseLifecycle.OPENED,
+            CaseLifecycle.IN_PROGRESS,
+        }
+    )
+
+    def reminder_candidates(self) -> list[dict[str, Any]]:
+        """Cases with missing/incomplete evidence that are due a reminder.
+
+        At most one candidate per case: when several invitations are active the
+        most recently issued one is authoritative (consistent with the outcome
+        email's submitted-contact rule). A case qualifies when its invite is
+        still actionable (issued/opened/in progress and unexpired), its
+        lifecycle has not moved past the vendor's part, reminders are not
+        paused, its submission is an incomplete draft, and the current cadence
+        period — anchored at the invite's issuance, so a new invitation only
+        becomes due after one full ``reminder_interval`` — has not already been
+        satisfied. Each candidate names the specific missing items and carries
+        the deterministic ``dedupe_key`` the sweep must claim before sending.
+        """
+        now = self._now_datetime()
+        authoritative: dict[str, VendorInvite] = {}
+        for invite in self._list("invite", VendorInvite):
+            if invite.status not in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                continue
+            if now >= parse_utc_timestamp(invite.expires_at):
+                continue
+            current = authoritative.get(invite.case_id)
+            invite_order = (parse_utc_timestamp(invite.issued_at), invite.invite_id)
+            current_order = (
+                (parse_utc_timestamp(current.issued_at), current.invite_id)
+                if current is not None
+                else None
+            )
+            if current_order is None or invite_order > current_order:
+                authoritative[invite.case_id] = invite
+        candidates: list[dict[str, Any]] = []
+        for case_id, invite in sorted(authoritative.items()):
+            case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+            if not isinstance(case, VendorCase) or case.lifecycle not in self._REMINDER_LIFECYCLES:
+                continue
+            if case.reminders_paused:
+                continue
+            try:
+                submission = self._submission_for_invite(invite.invite_id)
+            except VendorBackendError:
+                continue
+            if submission.status is not SubmissionStatus.DRAFT:
+                continue
+            stage, missing = self._missing_items(submission)
+            if not missing:
+                continue
+            period = self._reminder_period(invite, now)
+            if period < 1:
+                # Not yet due: the first reminder comes one full interval
+                # after the invitation, never immediately.
+                continue
+            dedupe_key = self._reminder_dedupe_key(case_id, period)
+            claim = self._delivery_claims.get(
+                workspace_id=self.workspace_id, dedupe_key=dedupe_key
+            )
+            if claim is not None and (
+                claim.status != "failed" or claim.attempts >= self.MAX_REMINDER_ATTEMPTS
+            ):
+                continue
+            contact = self._require("contact", invite.contact_id, VendorContact)
+            product = self._require("product", invite.product_id, VendorProduct)
+            candidates.append(
+                {
+                    "invite_id": invite.invite_id,
+                    "case_id": case_id,
+                    "dedupe_key": dedupe_key,
+                    "contact_name": contact.name,
+                    "contact_email": contact.email,
+                    "product_name": product.name,
+                    "intake_url": self._intake_url(invite),
+                    "stage": stage,
+                    "missing": missing,
+                }
+            )
+        return candidates
+
+    def claim_reminder(
+        self, *, dedupe_key: str, case_id: str, invite_id: str
+    ) -> ReminderClaim | None:
+        """Atomically claim one cadence period before any email is sent.
+
+        ``None`` means another worker owns the pending/sent attempt or the
+        bounded failed-attempt budget is exhausted. The returned claim carries
+        the attempt number used for conditional settlement.
+        """
+        return self._delivery_claims.claim(
+            workspace_id=self.workspace_id,
+            dedupe_key=dedupe_key,
+            case_id=case_id,
+            invite_id=invite_id,
+            claimed_at=self._now(),
+            max_attempts=self.MAX_REMINDER_ATTEMPTS,
+        )
+
+    def record_reminder(
+        self,
+        *,
+        invite_id: str,
+        case_id: str,
+        dedupe_key: str,
+        summary: str,
+        delivery: dict[str, Any],
+        claim: ReminderClaim | None = None,
+    ) -> IntegrationEvent:
+        """Settle and audit one reminder attempt without retaining raw email.
+
+        Only explicit ``live`` and ``simulated`` modes satisfy cadence. Failed,
+        skipped, missing, and unknown modes settle as failed and remain
+        retryable until the atomic outbox reaches ``MAX_REMINDER_ATTEMPTS``.
+        """
+        current = claim or self._delivery_claims.get(
+            workspace_id=self.workspace_id, dedupe_key=dedupe_key
+        )
+        mode = delivery.get("delivery") if isinstance(delivery, dict) else None
+        successful = mode in {"live", "simulated"}
+        if current is not None:
+            self._delivery_claims.settle(
+                workspace_id=self.workspace_id,
+                dedupe_key=dedupe_key,
+                attempts=current.attempts,
+                status="sent" if successful else "failed",
+            )
+        detail = {
+            "summary": summary,
+            "delivery": mode if isinstance(mode, str) else "failed",
+            "simulated": mode == "simulated",
+            "channel": delivery.get("channel") if isinstance(delivery, dict) else "email",
+            "dedupe_key": dedupe_key,
+        }
+        recipient = delivery.get("to") if isinstance(delivery, dict) else None
+        if recipient:
+            detail["recipient_sha256"] = self._hash_recipient(str(recipient))
+        return self._event(
+            self._REMINDER_EVENT,
+            "invite",
+            invite_id,
+            case_id=case_id,
+            detail=detail,
+        )
+
+    def reminder_history(self, case_id: str) -> dict[str, Any]:
+        """Reviewer-facing reminder delivery history and pause state (issue #37)."""
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        attempts = [
+            {
+                "occurred_at": event.occurred_at,
+                "invite_id": event.resource_id,
+                "summary": event.detail.get("summary"),
+                "delivery": event.detail.get("delivery"),
+                "simulated": event.detail.get("simulated"),
+                "dedupe_key": event.detail.get("dedupe_key"),
+            }
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == self._REMINDER_EVENT and event.case_id == case_id
+        ]
+        attempts.sort(key=lambda item: item["occurred_at"] or "")
+        return {
+            "case_id": case_id,
+            "paused": case.reminders_paused if isinstance(case, VendorCase) else False,
+            "items": attempts,
+        }
+
+    def set_reminders_paused(self, case_id: str, paused: bool) -> dict[str, Any]:
+        """Reviewer control: pause or resume automated reminders for one case."""
+        case = self._require("case", case_id, VendorCase)
+        if case.reminders_paused != paused:
+            self._put("case", case_id, replace(case, reminders_paused=paused))
+            self._event(
+                "reminder.paused" if paused else "reminder.resumed",
+                "case",
+                case_id,
+                case_id=case_id,
+            )
+        return {"case_id": case_id, "paused": paused}
+
+    def _reminder_period(self, invite: VendorInvite, now: datetime.datetime) -> int:
+        issued = parse_utc_timestamp(invite.issued_at)
+        return int((now - issued) / self.reminder_interval)
+
+    @staticmethod
+    def _reminder_dedupe_key(case_id: str, period: int) -> str:
+        return f"reminder:{case_id}:{period}"
+
+    # Sealed invite links. The raw token is never persisted (only its SHA-256
+    # hash authenticates requests); the seal XORs the token with an HMAC-SHA256
+    # keystream keyed by the non-persisted link secret and the invite id, so
+    # only a backend holding the secret can reconstruct the vendor's link.
+    # Unsealing is verified against the stored token hash before use.
+
+    def _keystream(self, invite_id: str, length: int) -> bytes:
+        blocks = b""
+        counter = 0
+        while len(blocks) < length:
+            blocks += hmac.new(
+                self._link_secret, f"{invite_id}:{counter}".encode("utf-8"), hashlib.sha256
+            ).digest()
+            counter += 1
+        return blocks[:length]
+
+    def _seal_token(self, invite_id: str, token: str) -> str:
+        raw = token.encode("utf-8")
+        keystream = self._keystream(invite_id, len(raw))
+        return bytes(a ^ b for a, b in zip(raw, keystream)).hex()
+
+    def _unseal_token(self, invite: VendorInvite) -> str | None:
+        if not invite.token_seal:
+            return None
+        try:
+            sealed = bytes.fromhex(invite.token_seal)
+        except ValueError:
+            return None
+        keystream = self._keystream(invite.invite_id, len(sealed))
+        raw = bytes(a ^ b for a, b in zip(sealed, keystream))
+        try:
+            token = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if not hmac.compare_digest(self._hash_token(token), invite.token_hash):
+            # Sealed under a different link secret (for example after a
+            # restart without a configured secret); no link can be offered.
+            return None
+        return token
+
+    def _intake_url(self, invite: VendorInvite) -> str | None:
+        token = self._unseal_token(invite)
+        if token is None:
+            return None
+        return f"{self.intake_base_url}#token={quote(token, safe='')}"
+
+    def _missing_items(self, submission: Submission) -> tuple[str, list[dict[str, Any]]]:
+        """Name what is still owed: submission gaps first, then open requirements."""
+        if not submission.intake_analysis_complete:
+            items: list[dict[str, Any]] = []
+            if not submission.evidence_artifact_ids:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Evidence files",
+                        "detail": "No evidence documents have been received yet.",
+                    }
+                )
+            if submission.trust_center_url is None:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Trust-center URL",
+                        "detail": "A public HTTPS trust-center link has not been provided.",
+                    }
+                )
+            if not items:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Intake analysis",
+                        "detail": (
+                            "Evidence was received but intake analysis has not run, so "
+                            "remaining questions are not yet visible. Open your "
+                            "invitation link to continue."
+                        ),
+                    }
+                )
+            return "awaiting_submission", items
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in covered or criterion.requirement_id in answered:
+                    continue
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "label": ", ".join(criterion.expected_evidence) or criterion.requirement_id,
+                        "detail": criterion.remediation_guidance or criterion.question,
+                    }
+                )
+        items.sort(key=lambda item: item["requirement_id"] or "")
+        return "questions_open", items
 
     # Immutable run versions --------------------------------------------------
 

@@ -21,6 +21,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as s3vectors from 'aws-cdk-lib/aws-s3vectors';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
@@ -1050,6 +1051,52 @@ export class PlatformStack extends cdk.Stack {
       providerPolicy.attachToRole(this.proxyFunction.role);
     }
 
+    // Weekly vendor-evidence reminder sweep. Scheduler assumes a role that can
+    // invoke only this Lambda, and the trust policy is pinned to this account
+    // and exact schedule ARN to prevent confused-deputy use.
+    const reminderScheduleName = `csub-vendor-reminders-${appEnv}`;
+    const reminderScheduleArn = cdk.Stack.of(this).formatArn({
+      service: 'scheduler',
+      resource: 'schedule',
+      resourceName: `default/${reminderScheduleName}`,
+      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const reminderSchedulerRole = new iam.Role(this, 'ReminderSchedulerRole', {
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnEquals: { 'aws:SourceArn': reminderScheduleArn },
+        },
+      }),
+      inlinePolicies: {
+        InvokeReminderLambda: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              actions: ['lambda:InvokeFunction'],
+              resources: [this.proxyFunction.functionArn],
+            }),
+          ],
+        }),
+      },
+    });
+    new scheduler.CfnSchedule(this, 'VendorReminderSchedule', {
+      name: reminderScheduleName,
+      description: 'Weekly VETTED vendor evidence reminder sweep.',
+      scheduleExpression: 'cron(0 9 ? * MON *)',
+      scheduleExpressionTimezone: 'America/Los_Angeles',
+      flexibleTimeWindow: { mode: 'OFF' },
+      state: 'ENABLED',
+      target: {
+        arn: this.proxyFunction.functionArn,
+        roleArn: reminderSchedulerRole.roleArn,
+        input: JSON.stringify({ scheduled_task: 'reminders_run' }),
+        retryPolicy: {
+          maximumEventAgeInSeconds: 3600,
+          maximumRetryAttempts: 2,
+        },
+      },
+    });
+
     const cognitoAuthorizer = new HttpUserPoolAuthorizer('ReviewerAuthorizer', this.userPool, {
       userPoolClients: [this.userPoolClient],
     });
@@ -1093,6 +1140,7 @@ export class PlatformStack extends cdk.Stack {
     const protectedRoutes: Array<[string, apigwv2.HttpMethod[]]> = [
       ['/cases', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}', [apigwv2.HttpMethod.GET]],
+      ['/cases/{id}/research', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/documents', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/cases/{id}/analyze', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
@@ -1102,7 +1150,11 @@ export class PlatformStack extends cdk.Stack {
       ['/cases/{id}/servicenow/preview', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/servicenow/commit', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/invites', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/reminders', [apigwv2.HttpMethod.GET]],
+      ['/cases/{id}/reminders/pause', [apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/reminders/resume', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/review-runs', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/reminders/run', [apigwv2.HttpMethod.POST]],
       ['/review-queue', [apigwv2.HttpMethod.GET]],
       ['/integration-events', [apigwv2.HttpMethod.GET]],
       ['/vendors', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
@@ -1143,15 +1195,19 @@ export class PlatformStack extends cdk.Stack {
       ['/vendor/invites/current/trust-center', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/answers', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/coverage', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/analyze', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/finalize', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/status', [apigwv2.HttpMethod.GET]],
       // Backward-compatible aliases; tokens remain header-only.
       ['/intake', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/intake/evidence', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/intake/trust-center', [apigwv2.HttpMethod.POST]],
       ['/intake/answers', [apigwv2.HttpMethod.POST]],
       ['/intake/coverage', [apigwv2.HttpMethod.POST]],
+      ['/intake/analyze', [apigwv2.HttpMethod.POST]],
       ['/intake/questions', [apigwv2.HttpMethod.GET]],
       ['/intake/finalize', [apigwv2.HttpMethod.POST]],
+      ['/intake/status', [apigwv2.HttpMethod.GET]],
     ] as Array<[string, apigwv2.HttpMethod[]]>) {
       // Opaque invite tokens are accepted only in Authorization: Bearer.
       // No public route contains a token path or query parameter.

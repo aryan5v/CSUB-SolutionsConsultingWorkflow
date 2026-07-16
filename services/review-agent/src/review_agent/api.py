@@ -13,7 +13,7 @@ import hashlib
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .adapters.email import EmailSender, build_email_sender
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
@@ -46,7 +46,9 @@ from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
 from .research import VendorResearchProvider, build_research_provider
+from .timestamps import parse_utc_timestamp
 from .samples import escalation_case, low_risk_case, sample_records
+from .vendor.delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
@@ -84,6 +86,21 @@ def _default_packet_storage(config: AppConfig) -> StorageClient:
     )
 
 
+def vendor_link_settings() -> dict[str, Any]:
+    """Env-configured vendor intake-link settings, shared with the Lambda wiring.
+
+    ``VENDOR_INTAKE_BASE_URL`` is the public origin of the vendor intake page
+    (the simulated default mirrors the email adapter's non-routable sender
+    domain). ``VENDOR_LINK_SECRET`` keys the sealed invite tokens so reminder
+    emails can repeat the vendor's intake link across restarts; when unset each
+    backend instance uses a process-local secret.
+    """
+    secret = os.environ.get("VENDOR_LINK_SECRET") or None
+    return {
+        "intake_base_url": os.environ.get("VENDOR_INTAKE_BASE_URL")
+        or "https://vetted.invalid/intake",
+        "link_secret": secret.encode("utf-8") if secret else None,
+    }
 
 
 _PUBLIC_EVIDENCE_FIELDS = frozenset(
@@ -111,6 +128,8 @@ _PUBLIC_EVIDENCE_FIELDS = frozenset(
 def _public_evidence_fields(value: dict[str, Any]) -> dict[str, Any]:
     """Allowlist public evidence state so internal leases and claims cannot escape."""
     return {key: item for key, item in value.items() if key in _PUBLIC_EVIDENCE_FIELDS}
+
+
 class LocalApiError(RuntimeError):
     """Expected application error with an HTTP-compatible status and code."""
 
@@ -160,8 +179,10 @@ class LocalReviewApi:
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
         email_sender: EmailSender | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
         evidence_uploads: EvidenceUploadIssuer | None = None,
         config: AppConfig | None = None,
+        clock: Callable[[], datetime.datetime] | None = None,
         research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
             _RESEARCH_PROVIDER_UNSET
         ),
@@ -204,14 +225,18 @@ class LocalReviewApi:
         self._writeback_config = writeback_config or LocalWritebackConfig()
         self._connector = MockServiceNowConnector()
         self._vendor_repository = InMemoryVendorRepository()
-        local_clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        local_clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
+        self._clock = local_clock
+        self._delivery_claim_store = delivery_claim_store or InMemoryDeliveryClaimStore()
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
         self._vendor = VendorBackend(
             self._vendor_repository,
             self._profiles,
             clock=local_clock,
+            **vendor_link_settings(),
             research_provider=self._research_provider,
+            delivery_claim_store=self._delivery_claim_store,
         )
         catalog_entries = []
         for record in records:
@@ -899,6 +924,93 @@ class LocalReviewApi:
         validate_definition(status, "vendor-intake", "ReviewStatus")
         return status
 
+    def run_reminder_sweep(self) -> dict[str, Any]:
+        """Email weekly reminders for missing or incomplete evidence (issue #37).
+
+        Idempotent per case and cadence period: the backend claims the
+        deterministic ``reminder:{case_id}:{period}`` key **before** sending,
+        so a concurrent or retried sweep that loses the claim sends nothing.
+        A failed delivery marks the claim failed — the next sweep retries
+        (bounded) instead of waiting a full interval — and every attempt is
+        persisted as an auditable ``email.reminder`` event with its truthful
+        delivery mode.
+        """
+        sent: list[dict[str, Any]] = []
+        for candidate in self._vendor_call(self._vendor.reminder_candidates):
+            claim = self._vendor.claim_reminder(
+                dedupe_key=candidate["dedupe_key"],
+                case_id=candidate["case_id"],
+                invite_id=candidate["invite_id"],
+            )
+            if claim is None:
+                continue  # another sweep already claimed this period
+            subject, body = self._reminder_email(candidate)
+            delivery = self._send_email(
+                to=candidate["contact_email"], subject=subject, body=body
+            )
+            self._vendor.record_reminder(
+                invite_id=candidate["invite_id"],
+                case_id=candidate["case_id"],
+                dedupe_key=candidate["dedupe_key"],
+                summary=subject,
+                delivery=delivery,
+                claim=claim,
+            )
+            sent.append(
+                {
+                    "invite_id": candidate["invite_id"],
+                    "case_id": candidate["case_id"],
+                    "stage": candidate["stage"],
+                    "missing_count": len(candidate["missing"]),
+                    "delivery": delivery.get("delivery"),
+                }
+            )
+        return {"sent": sent, "count": len(sent), "simulated": True}
+
+    @staticmethod
+    def _reminder_email(candidate: dict[str, Any]) -> tuple[str, str]:
+        """Deterministic reminder copy naming each missing item (issue #37)."""
+        lines = [
+            f"Hello {candidate['contact_name']},",
+            "",
+            f"The campus technology review for {candidate['product_name']} "
+            f"(case {candidate['case_id']}) is still waiting on the following:",
+            "",
+        ]
+        lines.extend(f"- {item['label']}: {item['detail']}" for item in candidate["missing"])
+        lines.append("")
+        if candidate.get("intake_url"):
+            lines.extend(
+                [
+                    "Continue your submission with your secure invitation link:",
+                    candidate["intake_url"],
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "If you are having trouble producing an item, reply to this email "
+                "with a status or an estimated date.",
+                "If you are not sure what we are looking for, reply and the campus "
+                "team will help.",
+                "",
+                "This reminder repeats weekly until the submission is complete. "
+                "Your invitation link continues to work until it expires.",
+            ]
+        )
+        subject = f"Reminder: evidence still needed for {candidate['product_name']}"
+        return subject, "\n".join(lines)
+
+    def reminder_history(self, case_id: str) -> dict[str, Any]:
+        """Reviewer-facing reminder attempts and pause state for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.reminder_history(case_id))
+
+    def set_reminders_paused(self, case_id: str, paused: bool) -> dict[str, Any]:
+        """Reviewer control: pause or resume automated reminders for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.set_reminders_paused(case_id, paused))
+
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
 
@@ -1396,9 +1508,12 @@ class LocalReviewApi:
             invite for invite in invites if invite.status is InviteStatus.SUBMITTED
         ]
         if submitted:
-            invite = max(submitted, key=lambda item: item.submitted_at or item.issued_at)
+            invite = max(
+                submitted,
+                key=lambda item: parse_utc_timestamp(item.submitted_at or item.issued_at),
+            )
         else:
-            invite = max(invites, key=lambda item: item.issued_at)
+            invite = max(invites, key=lambda item: parse_utc_timestamp(item.issued_at))
         try:
             contact = self._vendor.get_contact(invite.contact_id)
         except VendorBackendError:
@@ -1406,15 +1521,7 @@ class LocalReviewApi:
         headline, body_template = outcome
         subject = f"VETTED review outcome for {product_name}: {headline}"
         body = body_template.format(product=product_name)
-        try:
-            delivery = self._email_sender.send(to=contact.email, subject=subject, body=body)
-        except Exception:  # noqa: BLE001 - never let notification block the decision
-            delivery = {
-                "delivery": "failed",
-                "simulated": False,
-                "channel": "email",
-                "to": contact.email,
-            }
+        delivery = self._send_email(to=contact.email, subject=subject, body=body)
         self._vendor.record_notification(
             case_id=case_id,
             summary=subject,
@@ -1422,6 +1529,26 @@ class LocalReviewApi:
             event_type="email.notification",
             dedupe_key=dedupe_key,
         )
+
+    def _send_email(self, *, to: str, subject: str, body: str) -> dict[str, Any]:
+        """Call the sender without trusting its result shape or success label.
+
+        The raw ``to`` value is intentionally ephemeral: downstream audit
+        projection hashes it and persists only ``recipient_sha256``.
+        """
+        try:
+            raw_delivery = self._email_sender.send(to=to, subject=subject, body=body)
+        except Exception:  # noqa: BLE001 - delivery failures are recorded data
+            raw_delivery = None
+        mode = raw_delivery.get("delivery") if isinstance(raw_delivery, dict) else None
+        if mode not in {"live", "simulated"}:
+            mode = "failed"
+        return {
+            "delivery": mode,
+            "simulated": mode == "simulated",
+            "channel": "email",
+            "to": to,
+        }
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
         """Send/record a truthful notification (live Slack only when configured)."""

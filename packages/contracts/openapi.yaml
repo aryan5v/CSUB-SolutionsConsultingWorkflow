@@ -335,6 +335,30 @@ paths:
       summary: Finalize the vendor submission once.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Immutable finalized submission.}}
+  /reminders/run:
+    post:
+      tags: [vendor-intake]
+      summary: Run the weekly reminder sweep for missing or incomplete vendor evidence.
+      description: At most one reminder per case per cadence period; a deterministic reminder:{case_id}:{period} claim is persisted before each send so concurrent or retried sweeps never duplicate one. Failed deliveries are retried (bounded) on later sweeps. Each attempt is recorded as an email.reminder integration event with its truthful delivery mode and a hashed recipient. Intended to be triggered weekly by a scheduler.
+      responses: {"200": {description: Reminders sent this sweep (empty when none are due).}}
+  /cases/{id}/reminders:
+    get:
+      tags: [vendor-intake]
+      summary: Reminder delivery history and pause state for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Recorded reminder attempts with delivery results, plus the paused flag.}}
+  /cases/{id}/reminders/pause:
+    post:
+      tags: [vendor-intake]
+      summary: Pause automated evidence reminders for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Reminders paused.}}
+  /cases/{id}/reminders/resume:
+    post:
+      tags: [vendor-intake]
+      summary: Resume automated evidence reminders for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Reminders resumed.}}
   /vendor/invites/{token}/status:
     get:
       tags: [vendor-intake]
