@@ -597,24 +597,38 @@ class VendorBackend:
         "vpat_acr": "accessibility",
     }
 
-    def _case_profiles(self, case_id: str | None) -> list[Any]:
-        active = self.profiles.active_profiles()
-        if case_id is None:
-            return active
-        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
-        if not isinstance(case, VendorCase) or not case.required_evidence:
-            return active
+    def _case_profile_selection(self, case: VendorCase) -> list[Any] | None:
+        """Active profiles narrowed to the case's policy result, or ``None``.
+
+        ``None`` means no narrowing applies — the case has no stored policy
+        result, its evidence keys are unmapped, or no active profile matches —
+        and callers fail open to the full active-profile set, since narrowing
+        may only ever hide requirements when the mapping is known-good.
+        """
+        if not case.required_evidence:
+            return None
         wanted = {
             self._EVIDENCE_PROFILE_KEYS[key]
             for key in case.required_evidence
             if key in self._EVIDENCE_PROFILE_KEYS
         }
         if not wanted:
-            return active
-        selected = [profile for profile in active if profile.profile_key in wanted]
-        # A workspace whose active profiles use other keys keeps the full set:
-        # narrowing may hide requirements, so an empty selection fails open.
-        return selected or active
+            return None
+        selected = [
+            profile
+            for profile in self.profiles.active_profiles()
+            if profile.profile_key in wanted
+        ]
+        return selected or None
+
+    def _case_profiles(self, case_id: str | None) -> list[Any]:
+        if case_id is not None:
+            case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+            if isinstance(case, VendorCase):
+                selection = self._case_profile_selection(case)
+                if selection is not None:
+                    return selection
+        return self.profiles.active_profiles()
 
     def unresolved_questions(self, token: str) -> list[dict[str, Any]]:
         invite = self._valid_invite(token)
@@ -700,10 +714,10 @@ class VendorBackend:
                 else []
             ),
             "checklist": self._checklist(submission),
-            # Vendor-visible honesty (issue #63): say when the requirement set
-            # was derived from the campus intake rather than the full profile.
+            # Vendor-visible honesty (issue #63): claim adaptation only when
+            # the checklist was actually narrowed, never on a fail-open case.
             "required_evidence": list(case.required_evidence),
-            "adapted_to_intake": bool(case.required_evidence),
+            "adapted_to_intake": self._case_profile_selection(case) is not None,
         }
 
     def _checklist(self, submission: Submission) -> list[dict[str, Any]]:

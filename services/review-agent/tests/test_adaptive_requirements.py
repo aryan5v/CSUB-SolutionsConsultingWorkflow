@@ -149,6 +149,10 @@ class AdaptiveRequirementsTests(unittest.TestCase):
             sorted(item["requirement_id"] for item in questions),
             ["A11Y.VPAT.001", "SEC.DATA.001"],
         )
+        # A fail-open case must never claim its checklist was adapted.
+        status = self.backend.review_status(token)
+        self.assertFalse(status["adapted_to_intake"])
+        self.assertEqual(status["required_evidence"], ["insurance_coi"])
 
 
 if __name__ == "__main__":
