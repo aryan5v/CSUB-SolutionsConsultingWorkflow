@@ -160,6 +160,33 @@ class WorkflowSliceTests(unittest.TestCase):
         self.assertTrue(sink.events)
         self.assertTrue(all(e.correlation_id == "run-correlated" for e in sink.events))
 
+    def test_writeback_on_a_legacy_state_still_correlates_audit_events(self) -> None:
+        # Legacy snapshots are allowed to carry run_id=None, and write-back
+        # resumes one directly without passing validate_intake or confirm_match.
+        # Those audit events must still carry a correlation id -- that is the
+        # whole point of issue #50 -- so the id is minted at the audit boundary.
+        state, _sink, _cp = self._run(medium_risk_case(), "CASE-LEGACY")
+        sink = InMemoryAuditSink()
+        wf = _workflow(sink, InMemoryCheckpointer(), id_factory=lambda: "run-late")
+        connector = MockServiceNowConnector()
+        connector.seed_record(record_id="R1", table="sc_req_item", fields={"state": "open"})
+        connector.configure_case(case_id="CASE-LEGACY", table="sc_req_item", record_id="R1")
+        decision = HumanDecision(
+            case_id="CASE-LEGACY",
+            decision_version=1,
+            reviewer_id="rev@example.edu",
+            action=ReviewAction.APPROVE,
+            decided_at=CLOCK,
+            approved_fields={"state": "approved", "u_risk_route": "medium"},
+        )
+        state.run_id = None  # a snapshot written before run_id existed
+        wf.preview_writeback(state, connector, decision)
+        wf.commit_writeback(
+            state, connector, decision, second_confirmation=True, expected_version=1
+        )
+        self.assertTrue(sink.events)
+        self.assertTrue(all(event.correlation_id == "run-late" for event in sink.events))
+
     def test_metrics_emitted_for_specialists_and_citations(self) -> None:
         sink = InMemoryMetricsSink()
         wf = _workflow(InMemoryAuditSink(), InMemoryCheckpointer(), metrics=sink)
@@ -173,6 +200,14 @@ class WorkflowSliceTests(unittest.TestCase):
             r["properties"] for r in sink.records if r["name"] == "citations.rejected_count"
         )
         self.assertEqual(properties["run_id"], state.run_id)
+        # Every workflow metric carries the step dimension so CloudWatch can
+        # filter/aggregate by step; run_id/case_id stay in properties because
+        # they are high-cardinality.
+        by_name = {r["name"]: r for r in sink.records}
+        self.assertEqual(by_name["specialists.latency_ms"]["dimensions"]["step"], "run_specialists")
+        self.assertEqual(
+            by_name["citations.rejected_count"]["dimensions"]["step"], "check_and_repair"
+        )
         self.assertEqual(properties["case_id"], "CASE-METRICS")
 
 

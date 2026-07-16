@@ -184,14 +184,14 @@ class ReviewWorkflow:
             "specialists.latency_ms",
             (time.monotonic() - started) * 1000,
             unit="Milliseconds",
-            dimensions={"workflow_version": state.workflow_version},
+            dimensions=self._metric_dimensions(state, "run_specialists"),
         )
         if errors:
             self._metrics.emit(
                 "specialists.failure",
                 len(errors),
                 unit="Count",
-                dimensions={"workflow_version": state.workflow_version},
+                dimensions=self._metric_dimensions(state, "run_specialists"),
                 properties={"run_id": state.run_id, "case_id": state.case_id, "specialists": sorted(errors)},
             )
             raise ModelStructureError(
@@ -232,7 +232,7 @@ class ReviewWorkflow:
             "citations.rejected_count",
             len(check.rejected),
             unit="Count",
-            dimensions={"workflow_version": state.workflow_version},
+            dimensions=self._metric_dimensions(state, "check_and_repair"),
             properties={"run_id": state.run_id, "case_id": state.case_id, "ok": check.ok},
         )
         return state
@@ -390,6 +390,12 @@ class ReviewWorkflow:
         decision_version: int | None = None,
         **detail: object,
     ) -> None:
+        # Mint here as well as in the entry nodes: write-back resumes a durable
+        # snapshot and can reach this without passing validate_intake or
+        # confirm_match, and legacy snapshots are allowed to carry run_id=None.
+        # Without this those audit events record correlation_id=None, which is
+        # exactly the run correlation issue #50 exists to provide.
+        self._ensure_run_id(state)
         self._seq += 1
         self._audit.record(
             event_id=f"{state.case_id}-{self._seq:03d}",

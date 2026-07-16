@@ -22,6 +22,11 @@ from ..observability.metrics import MetricsEmitter, NullMetricsEmitter
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import AppConfig
 
+# One bound shared by the transport and the retry policy so they cannot drift:
+# the SDK socket timeout is what actually terminates a hung request, and the
+# retry policy's per-attempt timeout is the backstop around it.
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
 
 @runtime_checkable
 class ModelClient(Protocol):
@@ -96,6 +101,7 @@ class BedrockModelClient:
         guardrail_version: str = "DRAFT",
         max_tokens: int = 1024,
         temperature: float | None = None,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: Any | None = None,
     ) -> None:
         self._model_id = model_id
@@ -104,6 +110,7 @@ class BedrockModelClient:
         self._guardrail_version = guardrail_version
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
         self._client = client
 
     @property
@@ -113,8 +120,26 @@ class BedrockModelClient:
     def _bedrock(self) -> Any:
         if self._client is None:
             import boto3  # lazy: only needed when talking to live AWS
+            from botocore.config import Config
 
-            self._client = boto3.client("bedrock-runtime", region_name=self._region)
+            # The socket timeout is what actually terminates a hung request: a
+            # caller-side thread timeout cannot cancel an in-flight call, so
+            # without this a slow model would keep burning a live request (and
+            # its tokens) after the caller stopped waiting.
+            #
+            # botocore's own retries are disabled: it would retry a throttle or
+            # 5xx up to 3 times *inside* one attempt, multiplying against
+            # RetryPolicy.max_attempts. _call_with_retry is the single place
+            # that decides whether to retry, so the budget stays truthful.
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=self._region,
+                config=Config(
+                    connect_timeout=self._timeout_seconds,
+                    read_timeout=self._timeout_seconds,
+                    retries={"max_attempts": 1, "mode": "standard"},
+                ),
+            )
         return self._client
 
     def complete_json(self, *, system: str, prompt: str, context: dict) -> dict:
@@ -228,7 +253,19 @@ class RetryPolicy:
 
     max_attempts: int = 3
     base_delay_seconds: float = 0.5
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        # Reject an unusable policy where it is built rather than at the call
+        # site: max_attempts < 1 would skip the retry loop entirely and surface
+        # as an UnboundLocalError from a hung model call, which is a confusing
+        # place to learn the configuration was wrong.
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if self.base_delay_seconds < 0:
+            raise ValueError("base_delay_seconds must be non-negative")
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
 
 
 DEFAULT_RETRY_POLICY = RetryPolicy()
@@ -280,11 +317,17 @@ def _call_with_retry(
     exception propagates immediately so the caller's structural-repair path
     handles it instead. Returns ``(result, retry_count)``.
 
-    Each attempt runs in a throwaway single-worker executor so a hung call can
-    be bounded by ``timeout_seconds`` even though ``ModelClient.complete_json``
-    itself is synchronous. A timed-out call is not forcibly killed (Python
-    cannot interrupt a running thread); the executor is shut down without
-    waiting so the caller is not blocked on it.
+    The request itself is bounded by the adapter's transport timeout
+    (``BedrockModelClient`` sets botocore connect/read timeouts), which is what
+    actually terminates a hung call. The executor here is only a backstop that
+    keeps the *caller* from blocking past ``timeout_seconds`` -- including for a
+    ``ModelClient`` implementation that has no transport timeout of its own.
+
+    Python cannot interrupt a running thread, so a timed-out worker is
+    abandoned rather than killed. That is safe only because the underlying
+    request is separately bounded: an adapter without its own timeout can still
+    leak a thread per timed-out attempt, so give any live client a transport
+    timeout at or below ``timeout_seconds``.
     """
     last_error: BaseException
     for attempt_index in range(policy.max_attempts):

@@ -8,13 +8,18 @@ fenced or prose-wrapped model replies.
 
 from __future__ import annotations
 
+import sys
+import types
 import unittest
+from unittest import mock
 
 import _bootstrap  # noqa: F401
 
 from review_agent.adapters.model import (
+    DEFAULT_TIMEOUT_SECONDS,
     BedrockModelClient,
     DeterministicModelClient,
+    RetryPolicy,
     build_model_client,
 )
 from review_agent.config import AppConfig, AwsConfig, ModelConfig
@@ -142,6 +147,63 @@ class FactoryTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             build_model_client(config)
+
+
+class BedrockTransportBoundsTests(unittest.TestCase):
+    """The live client must bound the request itself, not just the caller.
+
+    boto3/botocore are not installed in the stdlib-only gate, so the lazy import
+    inside ``_bedrock`` is satisfied with stand-in modules that record the
+    client kwargs.
+    """
+
+    def _build_client(self, **kwargs) -> dict:
+        captured: dict = {}
+
+        class _Config:
+            def __init__(self, **config_kwargs) -> None:
+                captured["config"] = config_kwargs
+
+        fake_boto3 = types.ModuleType("boto3")
+
+        def _client(service: str, **client_kwargs):
+            captured["service"] = service
+            captured["client_kwargs"] = client_kwargs
+            return _FakeConverse("{}")
+
+        fake_boto3.client = _client  # type: ignore[attr-defined]
+        fake_botocore = types.ModuleType("botocore")
+        fake_botocore_config = types.ModuleType("botocore.config")
+        fake_botocore_config.Config = _Config  # type: ignore[attr-defined]
+
+        modules = {
+            "boto3": fake_boto3,
+            "botocore": fake_botocore,
+            "botocore.config": fake_botocore_config,
+        }
+        with mock.patch.dict(sys.modules, modules):
+            BedrockModelClient(model_id="m", region="us-west-2", **kwargs)._bedrock()
+        return captured
+
+    def test_socket_timeouts_bound_the_request(self) -> None:
+        # A caller-side thread timeout cannot cancel an in-flight call, so the
+        # transport is what actually stops a hung model request.
+        captured = self._build_client(timeout_seconds=12.5)
+        self.assertEqual(captured["service"], "bedrock-runtime")
+        self.assertEqual(captured["config"]["connect_timeout"], 12.5)
+        self.assertEqual(captured["config"]["read_timeout"], 12.5)
+
+    def test_botocore_retries_are_disabled_so_budgets_do_not_multiply(self) -> None:
+        # botocore would retry a throttle/5xx inside a single attempt, which
+        # multiplies against RetryPolicy.max_attempts. _call_with_retry is the
+        # only place that decides to retry.
+        captured = self._build_client()
+        self.assertEqual(captured["config"]["retries"], {"max_attempts": 1, "mode": "standard"})
+
+    def test_timeout_defaults_to_the_shared_bound(self) -> None:
+        captured = self._build_client()
+        self.assertEqual(captured["config"]["read_timeout"], DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(DEFAULT_TIMEOUT_SECONDS, RetryPolicy().timeout_seconds)
 
 
 if __name__ == "__main__":

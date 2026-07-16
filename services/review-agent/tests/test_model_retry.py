@@ -151,5 +151,27 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertIn("model.invoke.failure", sink.names())
 
 
+class RetryPolicyValidationTests(unittest.TestCase):
+    """An unusable policy is rejected where it is built, not mid-call."""
+
+    def test_max_attempts_below_one_is_rejected(self) -> None:
+        # Zero attempts would skip the retry loop and surface as an
+        # UnboundLocalError from a model call, far from the real mistake.
+        with self.assertRaises(ValueError):
+            RetryPolicy(max_attempts=0)
+
+    def test_negative_base_delay_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            RetryPolicy(base_delay_seconds=-1.0)
+
+    def test_non_positive_timeout_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            RetryPolicy(timeout_seconds=0)
+
+    def test_a_single_attempt_is_valid(self) -> None:
+        # max_attempts=1 means "no retries", which is a legitimate choice.
+        self.assertEqual(RetryPolicy(max_attempts=1).max_attempts, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
