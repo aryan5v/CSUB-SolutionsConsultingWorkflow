@@ -16,11 +16,12 @@ _CASE_ROUTE = re.compile(r"^/cases/([^/]+)(?:/(.*))?$")
 _RESOURCE_ROUTE = re.compile(r"^/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?$")
 _INVITE_ROUTE = re.compile(r"^/invites/([^/]+)/(revoke|resend)$")
 _VENDOR_TOKEN_ROUTE = re.compile(
-    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|findings|status))?$"
+    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|findings|status|thread))?$"
 )
 _PROFILE_ROUTE = re.compile(r"^/review-profiles/([^/]+)(?:/(fixture-test|activate|rollback))?$")
 _CATALOG_CONFIRM_ROUTE = re.compile(r"^/catalog/matches/([^/]+)/confirm$")
 _IMPORT_ROUTE = re.compile(r"^/servicenow/imports/([^/]+)/(preview|create)$")
+_THREAD_RESOLVE_ROUTE = re.compile(r"^thread/([^/]+)/resolve$")
 
 
 def create_server(
@@ -69,6 +70,9 @@ def create_server(
                     return
                 if method == "GET" and path == "/integration-events":
                     self._json(HTTPStatus.OK, application.integration_events())
+                    return
+                if method == "GET" and path == "/thread-inbox":
+                    self._json(HTTPStatus.OK, application.thread_inbox())
                     return
                 if method == "POST" and path == "/reminders/run":
                     self._json(HTTPStatus.OK, application.run_reminder_sweep())
@@ -269,6 +273,10 @@ def create_server(
                 result = application.vendor_evidence_findings(token)
             elif method == "GET" and action == "status":
                 result = application.vendor_review_status(token)
+            elif method == "GET" and action == "thread":
+                result = application.vendor_thread(token)
+            elif method == "POST" and action == "thread":
+                result = application.vendor_post_message(token, self._body())
             elif method == "POST" and action == "finalize":
                 result = application.vendor_finalize(token)
             else:
@@ -319,6 +327,19 @@ def create_server(
                 self._json(HTTPStatus.CREATED, application.issue_vendor_invite(case_id, self._body()))
             elif method == "GET" and suffix == "invites":
                 self._json(HTTPStatus.OK, application.list_case_invites(case_id))
+            elif method == "GET" and suffix == "thread":
+                self._json(HTTPStatus.OK, application.case_thread(case_id))
+            elif method == "POST" and suffix == "thread":
+                self._json(HTTPStatus.CREATED, application.post_case_reply(case_id, self._body()))
+            elif method == "POST" and suffix == "thread/read":
+                self._json(HTTPStatus.OK, application.mark_case_thread_read(case_id, self._body()))
+            elif method == "POST" and (thread_resolve := _THREAD_RESOLVE_ROUTE.match(suffix)):
+                self._json(
+                    HTTPStatus.OK,
+                    application.resolve_case_message(
+                        case_id, thread_resolve.group(1), self._body()
+                    ),
+                )
             elif method == "GET" and suffix == "reminders":
                 self._json(HTTPStatus.OK, application.reminder_history(case_id))
             elif method == "POST" and suffix == "reminders/pause":

@@ -135,7 +135,14 @@ class VendorReviewStatusTests(unittest.TestCase):
                 "checklist",
                 "required_evidence",
                 "adapted_to_intake",
+                "thread",
             },
+        )
+        # The thread summary is vendor-safe: counts only, no reviewer identity
+        # or internal notes (issue #41).
+        self.assertEqual(
+            set(status["thread"]),
+            {"message_count", "has_reviewer_reply", "open_question_count"},
         )
         self.assertIsNone(status["vendor_visible_comment"])
         self.assertEqual(status["next_actions"], [])

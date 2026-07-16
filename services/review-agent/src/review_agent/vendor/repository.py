@@ -18,6 +18,7 @@ from ..contracts.vendor import (
     ReviewProfileVersion,
     ReviewRun,
     Submission,
+    ThreadMessage,
     Vendor,
     VendorCase,
     VendorContact,
@@ -113,4 +114,5 @@ RECORD_KINDS: dict[type[object], str] = {
     ReviewProfileVersion: "profile",
     ReviewRun: "run",
     IntegrationEvent: "event",
+    ThreadMessage: "thread_message",
 }

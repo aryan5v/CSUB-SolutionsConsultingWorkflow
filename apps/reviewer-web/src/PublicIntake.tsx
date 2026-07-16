@@ -6,11 +6,14 @@ import {
   reviewApi,
   reviewStageLabel,
   suppressResolvedQuestions,
+  vendorMessageCategoryLabel,
   type EvidenceArtifact,
   type EvidenceUploadResult,
   type VendorInviteView,
+  type VendorMessageCategory,
   type VendorQuestion,
   type VendorReviewStatus,
+  type VendorThreadMessage,
 } from "./api";
 import { EvidenceProcessingList, evidenceNeedsPolling } from "./EvidenceProcessing";
 import "./landing.css";
@@ -94,6 +97,167 @@ export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
       ) : (
         <p className="vp-field-hint">The checklist appears after intake analysis.</p>
       )}
+    </section>
+  );
+}
+
+const VENDOR_MESSAGE_CATEGORIES: VendorMessageCategory[] = [
+  "question",
+  "cannot_obtain",
+  "eta",
+  "concern",
+];
+
+// Case-scoped clarification thread (issue #41): the vendor asks what a document
+// means, reports it cannot be obtained, shares an ETA, or raises a concern, and
+// sees the campus team's public replies on the same secure page. Message text is
+// rendered as plain text (React escapes it) and never interpreted.
+export function VendorThreadPanel({
+  token,
+  requirementOptions = [],
+}: {
+  token: string;
+  requirementOptions?: string[];
+}) {
+  const [messages, setMessages] = useState<VendorThreadMessage[]>([]);
+  const [category, setCategory] = useState<VendorMessageCategory>("question");
+  const [body, setBody] = useState("");
+  const [requirementId, setRequirementId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    reviewApi
+      .vendorThread(token)
+      .then((items) => {
+        if (active) {
+          setMessages(items);
+          setReady(true);
+        }
+      })
+      .catch((reason) => {
+        if (active) {
+          setError(messageFor(reason));
+          setReady(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [token]);
+
+  const submit = async () => {
+    if (!body.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      await reviewApi.postVendorMessage(token, {
+        category,
+        body: body.trim(),
+        requirement_id: requirementId || null,
+      });
+      const items = await reviewApi.vendorThread(token);
+      setMessages(items);
+      setBody("");
+      setRequirementId("");
+    } catch (reason) {
+      setError(messageFor(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="vp-intake-card" aria-labelledby="thread-heading">
+      <div>
+        <p className="vp-eyebrow">QUESTIONS &amp; CLARIFICATIONS</p>
+        <h2 id="thread-heading">Ask the campus team</h2>
+        <p className="vp-field-hint">
+          Not sure what a document means, or cannot obtain one? Ask here. Replies
+          from your campus reviewer appear on this secure page.
+        </p>
+      </div>
+      {ready && messages.length > 0 && (
+        <ul className="vp-file-list" aria-label="Conversation history">
+          {messages.map((message) => (
+            <li key={message.message_id}>
+              <span>
+                <strong>
+                  {message.author_role === "reviewer" ? "Campus reviewer" : "You"}
+                  {" · "}
+                  {vendorMessageCategoryLabel(message.category)}
+                </strong>
+                <small>
+                  {new Date(message.created_at).toLocaleString()}
+                  {message.requirement_id ? ` · ${message.requirement_id}` : ""}
+                </small>
+                <span className="vp-thread-body">{message.body}</span>
+              </span>
+              {message.author_role === "vendor" && (
+                <b className={message.resolved ? "vp-file-saved" : "vp-file-ready"}>
+                  {message.resolved ? "Answered" : "Sent"}
+                </b>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="vp-field">
+        <label htmlFor="thread-category">Message type</label>
+        <select
+          id="thread-category"
+          value={category}
+          onChange={(event) => setCategory(event.target.value as VendorMessageCategory)}
+          disabled={busy}
+        >
+          {VENDOR_MESSAGE_CATEGORIES.map((value) => (
+            <option key={value} value={value}>
+              {vendorMessageCategoryLabel(value)}
+            </option>
+          ))}
+        </select>
+      </div>
+      {requirementOptions.length > 0 && (
+        <div className="vp-field">
+          <label htmlFor="thread-requirement">About a specific item (optional)</label>
+          <select
+            id="thread-requirement"
+            value={requirementId}
+            onChange={(event) => setRequirementId(event.target.value)}
+            disabled={busy}
+          >
+            <option value="">Not specific to one item</option>
+            {requirementOptions.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      <div className="vp-field">
+        <label htmlFor="thread-body">Your message</label>
+        <textarea
+          id="thread-body"
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          placeholder="For example: We cannot share our penetration test under NDA — can we provide a summary letter instead?"
+          disabled={busy}
+        />
+      </div>
+      {error && <p className="vp-form-alert" role="alert">{error}</p>}
+      <div className="vp-intake-actions">
+        <button
+          className="vp-btn vp-btn-outline"
+          type="button"
+          onClick={submit}
+          disabled={busy || !body.trim()}
+        >
+          {busy ? "Sending…" : "Send message"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -318,6 +482,12 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
                 <p>{reviewStatus.vendor.name} · Submission {reviewStatus.submission_status}</p>
               </section>
               <ReviewStatusCard status={reviewStatus} />
+              {initialToken && (
+                <VendorThreadPanel
+                  token={initialToken}
+                  requirementOptions={reviewStatus.checklist.map((item) => item.requirement_id)}
+                />
+              )}
             </div>
           )}
 
@@ -362,6 +532,13 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
                   </fieldset>
                 ))}
               </section>
+
+              {initialToken && (
+                <VendorThreadPanel
+                  token={initialToken}
+                  requirementOptions={questions.map((question) => question.requirement_id)}
+                />
+              )}
 
               {error && <p className="vp-form-alert" role="alert">{error}</p>}
               {notice && <p className="vp-form-notice" role="status" aria-live="polite">{notice}</p>}

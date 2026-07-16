@@ -79,6 +79,9 @@ from .contracts.vendor import (
     SoftwareCatalogEntry,
     Submission,
     SubmissionStatus,
+    ThreadAuthorRole,
+    ThreadMessage,
+    ThreadVisibility,
     Vendor,
     VendorCase,
     VendorContact,
@@ -120,6 +123,8 @@ _PUBLIC_ROUTES = {
     ("POST", "/vendor/invites/current/finalize"),
     ("GET", "/vendor/invites/current/findings"),
     ("GET", "/vendor/invites/current/status"),
+    ("GET", "/vendor/invites/current/thread"),
+    ("POST", "/vendor/invites/current/thread"),
     ("GET", "/intake"),
     ("POST", "/intake"),
     ("POST", "/intake/evidence"),
@@ -132,6 +137,8 @@ _PUBLIC_ROUTES = {
     ("POST", "/intake/finalize"),
     ("GET", "/intake/findings"),
     ("GET", "/intake/status"),
+    ("GET", "/intake/thread"),
+    ("POST", "/intake/thread"),
 }
 
 
@@ -978,6 +985,13 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "finding": lambda value: EvidenceValidationFinding(**value),
     "reminder_claim": lambda value: ReminderClaim(**value),
     "policy_criteria": lambda value: PolicyCriteria.from_dict(value),
+    "thread_message": lambda value: ThreadMessage(
+        **{
+            **value,
+            "author_role": ThreadAuthorRole(value["author_role"]),
+            "visibility": ThreadVisibility(value["visibility"]),
+        }
+    ),
 }
 
 
@@ -1345,6 +1359,8 @@ def _dispatch(
         return api.create_case(body), 201, True
     if method == "GET" and path == "/integration-events":
         return api.integration_events(), 200, False
+    if method == "GET" and path == "/thread-inbox":
+        return api.thread_inbox(), 200, False
     if method == "POST" and path == "/reminders/run":
         result = api.run_reminder_sweep()
         return result, 200, result["count"] > 0
@@ -1498,6 +1514,21 @@ def _dispatch_case(
         return api.issue_vendor_invite(case_id, body), 201, True
     if method == "GET" and suffix == "invites":
         return api.list_case_invites(case_id), 200, False
+    if method == "GET" and suffix == "thread":
+        return api.case_thread(case_id), 200, False
+    if method == "POST" and suffix == "thread":
+        payload = dict(body)
+        payload["reviewer_id"] = reviewer_id
+        return api.post_case_reply(case_id, payload), 201, True
+    if method == "POST" and suffix == "thread/read":
+        return api.mark_case_thread_read(case_id, body), 200, True
+    thread_resolve = re.fullmatch(r"thread/([^/]+)/resolve", suffix)
+    if method == "POST" and thread_resolve:
+        return (
+            api.resolve_case_message(case_id, _safe_id(thread_resolve.group(1)), body),
+            200,
+            True,
+        )
     if method == "GET" and suffix == "reminders":
         return api.reminder_history(case_id), 200, False
     if method == "POST" and suffix == "reminders/pause":
@@ -1532,6 +1563,7 @@ def _dispatch_intake(
         "/vendor/invites/current/finalize": "/intake/finalize",
         "/vendor/invites/current/findings": "/intake/findings",
         "/vendor/invites/current/status": "/intake/status",
+        "/vendor/invites/current/thread": "/intake/thread",
     }
     path = aliases.get(path, path)
     if method == "GET" and path == "/intake":
@@ -1549,6 +1581,8 @@ def _dispatch_intake(
         ("POST", "/intake/finalize"): lambda: api.vendor_finalize(token),
         ("GET", "/intake/findings"): lambda: api.vendor_evidence_findings(token),
         ("GET", "/intake/status"): lambda: api.vendor_review_status(token),
+        ("GET", "/intake/thread"): lambda: api.vendor_thread(token),
+        ("POST", "/intake/thread"): lambda: api.vendor_post_message(token, body),
     }
     operation = operations.get((method, path))
     if operation is None:
@@ -2039,6 +2073,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "finding": "finding_id",
         "reminder_claim": "dedupe_key",
         "policy_criteria": "criteria_version_id",
+        "thread_message": "message_id",
     }
     key = keys.get(kind)
     if key is None:

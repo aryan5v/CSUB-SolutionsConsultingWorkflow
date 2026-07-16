@@ -205,6 +205,84 @@ class ReminderClaim:
         return asdict(self)
 
 
+class ThreadAuthorRole(str, Enum):
+    VENDOR = "vendor"
+    REVIEWER = "reviewer"
+
+
+class ThreadVisibility(str, Enum):
+    # Vendor messages and reviewer replies the vendor may read.
+    PUBLIC = "public"
+    # Reviewer-only notes on the thread; never serialized to the vendor.
+    INTERNAL = "internal"
+
+
+# Vendor-authored message categories (issue #41): a clarifying question about a
+# requested document, a report that the document cannot be obtained, an ETA, or
+# a general concern. Reviewer replies use ``reply``.
+VENDOR_MESSAGE_CATEGORIES: frozenset[str] = frozenset(
+    {"question", "cannot_obtain", "eta", "concern"}
+)
+REVIEWER_REPLY_CATEGORY = "reply"
+# Untrusted free text is bounded so a single message can never be used to flood
+# storage or the reviewer inbox; the frontend escapes it on render.
+MAX_THREAD_BODY_CHARS = 4000
+# Per-case ceiling on vendor-authored messages, a coarse rate limit that keeps
+# one scoped link from generating unbounded thread volume.
+MAX_VENDOR_THREAD_MESSAGES = 50
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadMessage:
+    """One immutable case-scoped clarification-thread message (issue #41).
+
+    Message ``body``, ``author_role``, ``author_id``, ``category``, and
+    ``created_at`` are write-once history: services only ever replace the record
+    to flip the mutable ``read_by_reviewer`` / ``resolved`` flags. The body is
+    stored and surfaced as untrusted data — it never influences policy criteria,
+    requirements, or agent instructions. Reviewer identity (``author_id``) and
+    ``INTERNAL`` reviewer notes are absent from the vendor serializer, so a
+    vendor sees only public replies and never which reviewer authored them.
+    """
+
+    message_id: str
+    case_id: str
+    author_role: ThreadAuthorRole
+    category: str
+    body: str
+    created_at: str
+    requirement_id: str | None = None
+    submission_id: str | None = None
+    submission_version: int | None = None
+    author_id: str | None = None
+    visibility: ThreadVisibility = ThreadVisibility.PUBLIC
+    resolved: bool = False
+    read_by_reviewer: bool = False
+    in_reply_to: str | None = None
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_reviewer_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["author_role"] = self.author_role.value
+        data["visibility"] = self.visibility.value
+        return data
+
+    def to_vendor_dict(self) -> dict[str, Any]:
+        """Vendor-safe projection: no reviewer identity, no internal notes."""
+        return {
+            "message_id": self.message_id,
+            "case_id": self.case_id,
+            "author_role": self.author_role.value,
+            "category": self.category,
+            "body": self.body,
+            "created_at": self.created_at,
+            "requirement_id": self.requirement_id,
+            "submission_version": self.submission_version,
+            "resolved": self.resolved,
+            "in_reply_to": self.in_reply_to,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceArtifact:
     artifact_id: str
