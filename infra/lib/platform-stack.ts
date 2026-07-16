@@ -1135,6 +1135,7 @@ export class PlatformStack extends cdk.Stack {
       ['/cases/{id}', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/research', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/documents', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/evidence-findings', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/analyze', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/review', [apigwv2.HttpMethod.POST]],
@@ -1191,6 +1192,7 @@ export class PlatformStack extends cdk.Stack {
       ['/vendor/invites/current/analyze', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/finalize', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/status', [apigwv2.HttpMethod.GET]],
+      ['/vendor/invites/current/findings', [apigwv2.HttpMethod.GET]],
       // Backward-compatible aliases; tokens remain header-only.
       ['/intake', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/intake/evidence', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
@@ -1201,6 +1203,7 @@ export class PlatformStack extends cdk.Stack {
       ['/intake/questions', [apigwv2.HttpMethod.GET]],
       ['/intake/finalize', [apigwv2.HttpMethod.POST]],
       ['/intake/status', [apigwv2.HttpMethod.GET]],
+      ['/intake/findings', [apigwv2.HttpMethod.GET]],
     ] as Array<[string, apigwv2.HttpMethod[]]>) {
       // Opaque invite tokens are accepted only in Authorization: Bearer.
       // No public route contains a token path or query parameter.
