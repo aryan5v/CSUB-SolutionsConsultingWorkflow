@@ -56,6 +56,40 @@ aws bedrock list-foundation-models --region "$AWS_REGION"
 - Require a deterministic approved human decision before connector write permissions are used.
 - Keep the ServiceNow mock enabled by default; a future live/Serac connector requires a separate reviewed configuration and role.
 
+## Slack notifications
+
+Reviewer notifications are delivered to Slack **only** when a webhook credential
+is resolvable; otherwise the system records a clearly labeled *simulated* event
+and never claims a real delivery (`review_agent.adapters.notifications`). The
+notifier resolves a webhook in this order: an explicit argument, the
+`SLACK_WEBHOOK_URL` environment variable, then a Secrets Manager secret named by
+`SLACK_SECRET_ARN`. Any failure to resolve the secret degrades to the simulated
+fallback and never crashes the request path.
+
+**Deployed (Secrets Manager):** create a Slack app with an *Incoming Webhook* in
+a demo workspace, then store the webhook in Secrets Manager. The secret value may
+be the raw webhook URL or a JSON envelope `{"webhook_url": "https://hooks.slack.com/..."}`.
+Pass the secret ARN at synth time; the Lambda is granted `secretsmanager:GetSecretValue`
+and the ARN is injected as `SLACK_SECRET_ARN` (no infra change required):
+
+```bash
+aws secretsmanager create-secret \
+  --name csub/slack-webhook \
+  --secret-string 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+
+cdk deploy -c slackSecretArn=arn:aws:secretsmanager:us-west-2:<account>:secret:csub/slack-webhook-XXXXXX
+```
+
+Resolved webhooks are cached per ARN for the life of a warm Lambda container.
+
+**Local live-ping demo:** export the webhook directly so the local server posts a
+real Slack message during the demo moment; omit it to stay fully simulated:
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ \
+  PYTHONPATH=services/review-agent/src python3 -m review_agent.server --port 8787
+```
+
 ## Teardown
 
 The deployment implementation must provide a repeatable destroy path and document any retained buckets or tables. Before teardown, export only approved audit results, empty retained prototype data as authorized, remove secrets, verify stacks are deleted, and confirm that budget alarms and temporary identities no longer remain.
