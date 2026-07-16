@@ -37,12 +37,19 @@ paths:
   /cases/{id}/documents:
     post:
       tags: [cases]
-      summary: Register uploaded evidence metadata (content stored separately, untrusted).
+      summary: Register case-scoped evidence metadata and return a checksum-bound quarantine upload.
       operationId: addCaseDocument
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       responses:
-        "201": { description: Document metadata registered. }
+        "201": { description: Document registered with a short-lived upload. }
         "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [cases]
+      summary: List case-scoped evidence processing states and provenance.
+      operationId: listCaseDocuments
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200": { description: Case evidence states; never includes evidence bytes. }
   /cases/{id}/analyze:
     post:
       tags: [cases]
@@ -258,6 +265,19 @@ paths:
       summary: Revoke and replace an invitation with a new opaque token.
       parameters: [{name: invite_id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Replacement token returned once.}}
+  /vendor/invites/current/evidence:
+    parameters: []
+    get:
+      tags: [vendor-intake]
+      summary: List only the bearer invitation's current evidence processing states and provenance.
+      security: [{VendorInviteBearer: []}]
+      responses: {"200": {description: Scoped evidence states without document bytes, internal leases, or claim tokens.}}
+    post:
+      tags: [vendor-intake]
+      summary: Register bearer-scoped untrusted evidence and return a checksum-bound quarantine upload.
+      security: [{VendorInviteBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
+      responses: {"200": {description: Evidence metadata and short-lived upload registration.}}
   /vendor/invites/{token}:
     get:
       tags: [vendor-intake]
@@ -277,9 +297,14 @@ paths:
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Unresolved stable requirement questions.}}
   /vendor/invites/{token}/evidence:
+    get:
+      tags: [vendor-intake]
+      summary: List only this invitation's evidence processing states and provenance.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Scoped evidence states without document bytes.}}
     post:
       tags: [vendor-intake]
-      summary: Register untrusted evidence metadata only.
+      summary: Register untrusted evidence and return a checksum-bound quarantine upload.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
       responses: {"200": {description: Evidence metadata registered.}}
@@ -405,6 +430,12 @@ paths:
       parameters: [{name: external_id, in: path, required: true, schema: {type: string}}]
       responses: {"201": {description: Case created from simulated import.}}
 components:
+  securitySchemes:
+    VendorInviteBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-invitation-token
+      description: Case-scoped invitation token accepted only in the Authorization header.
   schemas:
     QueueItem: { $ref: "./schemas/review-queue-item.schema.json" }
     CaseActionEnvelope: { $ref: "./schemas/case-action-response.schema.json" }

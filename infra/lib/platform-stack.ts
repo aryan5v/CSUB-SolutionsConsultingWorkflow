@@ -16,8 +16,10 @@ import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as s3vectors from 'aws-cdk-lib/aws-s3vectors';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -76,6 +78,9 @@ export class PlatformStack extends cdk.Stack {
   public readonly api: apigwv2.HttpApi;
   public readonly analysisQueue: sqs.Queue;
   public readonly analysisDlq: sqs.Queue;
+  public readonly evidenceQueue: sqs.Queue;
+  public readonly evidenceDlq: sqs.Queue;
+  public readonly evidenceProcessor: lambda.Function;
   public readonly guardrail?: bedrock.CfnGuardrail;
   public readonly agentRuntime?: agentcore.CfnRuntime;
 
@@ -107,11 +112,11 @@ export class PlatformStack extends cdk.Stack {
     this.evidenceBucket = new s3.Bucket(this, 'EvidenceBucket', {
       ...bucketDefaults,
       versioned: true,
-      // Presigned PUT uploads originate from the reviewer SPA; scope CORS to
-      // PUT/GET only. Origins are constrained at the presign step, not here.
+      // Browser uploads use checksum-bound presigned POST forms. Origins are
+      // still constrained at the API registration boundary.
       cors: [
         {
-          allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
+          allowedMethods: [s3.HttpMethods.POST, s3.HttpMethods.GET],
           allowedOrigins: ['*'],
           allowedHeaders: ['*'],
           maxAge: 3000,
@@ -206,6 +211,7 @@ export class PlatformStack extends cdk.Stack {
     makeTable('IntegrationEventTable', str('event_id'), num('occurred_at'), 'ttl');
     makeTable('AuditTable', str('case_id'), num('sequence'));
     makeTable('IdempotencyTable', str('idempotency_key'), undefined, 'ttl');
+    makeTable('EvidenceStateTable', str('scope_id'), str('artifact_id'));
 
     // ====================================================================
     // Cognito reviewer pool (no self-service signup)
@@ -399,19 +405,25 @@ export class PlatformStack extends cdk.Stack {
 
     const logRetention = toLogRetention(retentionDays);
     const proxyLogGroup = new logs.LogGroup(this, 'ProxyLogGroup', {
-      logGroupName: `/csub/${appEnv}/case-proxy`,
+      logGroupName: `/vetted/${appEnv}/case-proxy`,
       retention: logRetention,
       encryptionKey: this.logEncryptionKey,
       removalPolicy,
     });
     const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogGroup', {
-      logGroupName: `/csub/${appEnv}/api-access`,
+      logGroupName: `/vetted/${appEnv}/api-access`,
       retention: logRetention,
       encryptionKey: this.logEncryptionKey,
       removalPolicy,
     });
     const authLogGroup = new logs.LogGroup(this, 'AuthLogGroup', {
       logGroupName: `/vetted/${appEnv}/auth-api`,
+      retention: logRetention,
+      encryptionKey: this.logEncryptionKey,
+      removalPolicy,
+    });
+    const evidenceProcessorLogGroup = new logs.LogGroup(this, 'EvidenceProcessorLogGroup', {
+      logGroupName: `/vetted/${appEnv}/evidence-processor`,
       retention: logRetention,
       encryptionKey: this.logEncryptionKey,
       removalPolicy,
@@ -461,6 +473,76 @@ export class PlatformStack extends cdk.Stack {
       deadLetterQueue: { queue: this.analysisDlq, maxReceiveCount: 5 },
       removalPolicy,
     });
+
+    this.evidenceDlq = new sqs.Queue(this, 'EvidenceProcessingDlq', {
+      queueName: `csub-evidence-processing-dlq-${appEnv}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: cdk.Duration.days(Math.min(retentionDays, 14)),
+      removalPolicy,
+    });
+    this.evidenceQueue = new sqs.Queue(this, 'EvidenceProcessingQueue', {
+      queueName: `csub-evidence-processing-${appEnv}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      visibilityTimeout: cdk.Duration.minutes(6),
+      deadLetterQueue: { queue: this.evidenceDlq, maxReceiveCount: 5 },
+      removalPolicy,
+    });
+    this.evidenceProcessor = new lambda.Function(this, 'EvidenceProcessorFunction', {
+      functionName: `csub-evidence-processor-${appEnv}`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'review_agent.evidence.lambda_processor.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', '..', 'services', 'review-agent', 'src'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          exclude: ['**/__pycache__/**', '**/*.pyc', '**/*.pyo'],
+        },
+      ),
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(60),
+      logGroup: evidenceProcessorLogGroup,
+      environment: {
+        APP_ENV: appEnv,
+        EVIDENCE_BUCKET: this.evidenceBucket.bucketName,
+        EVIDENCE_STATE_TABLE: this.tables.EvidenceStateTable.tableName,
+        EVIDENCE_KMS_KEY_ID: dataKey.keyArn,
+      },
+    });
+    this.evidenceProcessor.addEventSource(
+      new lambdaEventSources.SqsEventSource(this.evidenceQueue, {
+        batchSize: 5,
+        reportBatchItemFailures: true,
+        maxConcurrency: 5,
+      }),
+    );
+    this.evidenceBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3notifications.SqsDestination(this.evidenceQueue),
+      { prefix: 'quarantine/' },
+    );
+    this.tables.EvidenceStateTable.grantReadWriteData(this.evidenceProcessor);
+    dataKey.grantEncryptDecrypt(this.evidenceProcessor);
+    this.evidenceProcessor.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject', 's3:GetObjectVersion'],
+        resources: [this.evidenceBucket.arnForObjects('quarantine/*')],
+      }),
+    );
+    this.evidenceProcessor.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        resources: [this.evidenceBucket.arnForObjects('case-evidence/*')],
+      }),
+    );
+    this.evidenceProcessor.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['textract:DetectDocumentText'],
+        resources: ['*'],
+      }),
+    );
 
     // ====================================================================
     // Guardrail (content + prompt-attack + PII + contextual grounding)
@@ -861,6 +943,8 @@ export class PlatformStack extends cdk.Stack {
         CONTRACTS_SCHEMA_DIR: '/opt/schemas',
         ALLOWED_ORIGINS: allowedOrigins.join(','),
         EVIDENCE_BUCKET: this.evidenceBucket.bucketName,
+        EVIDENCE_STATE_TABLE: this.tables.EvidenceStateTable.tableName,
+        EVIDENCE_KMS_KEY_ID: dataKey.keyArn,
         GENERATED_BUCKET: this.generatedBucket.bucketName,
         ANALYSIS_QUEUE_URL: this.analysisQueue.queueUrl,
         MAX_JSON_BYTES: '1048576',
@@ -899,7 +983,6 @@ export class PlatformStack extends cdk.Stack {
       table.grantReadWriteData(this.proxyFunction);
     }
     foundationStack.casesTable.grantReadWriteData(this.proxyFunction);
-    this.evidenceBucket.grantReadWrite(this.proxyFunction);
     this.analysisQueue.grantSendMessages(this.proxyFunction);
     dataKey.grantEncryptDecrypt(this.proxyFunction);
     if (slackSecret) {
@@ -929,8 +1012,8 @@ export class PlatformStack extends cdk.Stack {
         ],
       }),
       new iam.PolicyStatement({
-        actions: ['s3:GetObject', 's3:PutObject'],
-        resources: [this.evidenceBucket.arnForObjects('*')],
+        actions: ['s3:PutObject'],
+        resources: [this.evidenceBucket.arnForObjects('quarantine/*')],
       }),
       new iam.PolicyStatement({
         actions: ['s3:GetObject', 's3:PutObject'],
@@ -1010,7 +1093,7 @@ export class PlatformStack extends cdk.Stack {
     const protectedRoutes: Array<[string, apigwv2.HttpMethod[]]> = [
       ['/cases', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}', [apigwv2.HttpMethod.GET]],
-      ['/cases/{id}/documents', [apigwv2.HttpMethod.POST]],
+      ['/cases/{id}/documents', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/cases/{id}/analyze', [apigwv2.HttpMethod.POST]],
       ['/cases/{id}/stream', [apigwv2.HttpMethod.GET]],
       ['/cases/{id}/review', [apigwv2.HttpMethod.POST]],
@@ -1056,14 +1139,14 @@ export class PlatformStack extends cdk.Stack {
       ['/vendor/invites/current', [apigwv2.HttpMethod.GET]],
       ['/vendor/invites/current/open', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/questions', [apigwv2.HttpMethod.GET]],
-      ['/vendor/invites/current/evidence', [apigwv2.HttpMethod.POST]],
+      ['/vendor/invites/current/evidence', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/trust-center', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/answers', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/coverage', [apigwv2.HttpMethod.POST]],
       ['/vendor/invites/current/finalize', [apigwv2.HttpMethod.POST]],
       // Backward-compatible aliases; tokens remain header-only.
       ['/intake', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
-      ['/intake/evidence', [apigwv2.HttpMethod.POST]],
+      ['/intake/evidence', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/intake/trust-center', [apigwv2.HttpMethod.POST]],
       ['/intake/answers', [apigwv2.HttpMethod.POST]],
       ['/intake/coverage', [apigwv2.HttpMethod.POST]],
@@ -1113,8 +1196,65 @@ export class PlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    const evidenceDlqAlarm = new cloudwatch.Alarm(this, 'EvidenceProcessingDlqAlarm', {
+      alarmDescription: 'Evidence processing exhausted retries and reached the DLQ.',
+      metric: this.evidenceDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const evidenceQueueAgeAlarm = new cloudwatch.Alarm(this, 'EvidenceQueueAgeAlarm', {
+      alarmDescription: 'Evidence processing queue age exceeded five minutes.',
+      metric: this.evidenceQueue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(1),
+      }),
+      threshold: 300,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const evidenceProcessorErrorAlarm = new cloudwatch.Alarm(this, 'EvidenceProcessorErrorAlarm', {
+      alarmDescription: 'Evidence processor Lambda returned an error.',
+      metric: this.evidenceProcessor.metricErrors({ period: cdk.Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const evidenceProcessorThrottleAlarm = new cloudwatch.Alarm(this, 'EvidenceProcessorThrottleAlarm', {
+      alarmDescription: 'Evidence processor Lambda was throttled.',
+      metric: this.evidenceProcessor.metricThrottles({ period: cdk.Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const evidenceProcessorDurationAlarm = new cloudwatch.Alarm(this, 'EvidenceProcessorDurationAlarm', {
+      alarmDescription: 'Evidence processor duration approached its 60-second timeout.',
+      metric: this.evidenceProcessor.metricDuration({
+        period: cdk.Duration.minutes(5),
+        statistic: cloudwatch.Stats.MAXIMUM,
+      }),
+      threshold: 55000,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // Knowledge Base ingestion-failure alarm — only when vector stores/KBs exist.
-    const dashboardAlarms: cloudwatch.IAlarm[] = [apiErrorAlarm, proxyErrorAlarm, dlqAlarm];
+    const dashboardAlarms: cloudwatch.IAlarm[] = [
+      apiErrorAlarm,
+      proxyErrorAlarm,
+      dlqAlarm,
+      evidenceDlqAlarm,
+      evidenceQueueAgeAlarm,
+      evidenceProcessorErrorAlarm,
+      evidenceProcessorThrottleAlarm,
+      evidenceProcessorDurationAlarm,
+    ];
     if (config.enableVectorStores) {
       const kbIngestionAlarm = new cloudwatch.Alarm(this, 'KbIngestionFailureAlarm', {
         alarmDescription: 'Knowledge Base ingestion documents failed.',
@@ -1148,6 +1288,22 @@ export class PlatformStack extends cdk.Stack {
       new cloudwatch.GraphWidget({
         title: 'Analysis DLQ depth',
         left: [this.analysisDlq.metricApproximateNumberOfMessagesVisible()],
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Evidence queue depth and age',
+        left: [
+          this.evidenceQueue.metricApproximateNumberOfMessagesVisible(),
+          this.evidenceDlq.metricApproximateNumberOfMessagesVisible(),
+        ],
+        right: [this.evidenceQueue.metricApproximateAgeOfOldestMessage()],
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Evidence Lambda errors, throttles, and duration',
+        left: [this.evidenceProcessor.metricDuration()],
+        right: [
+          this.evidenceProcessor.metricErrors(),
+          this.evidenceProcessor.metricThrottles(),
+        ],
       }),
       new cloudwatch.AlarmStatusWidget({
         title: 'Alarms',
@@ -1216,6 +1372,12 @@ export class PlatformStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
     new cdk.CfnOutput(this, 'EvidenceBucketName', { value: this.evidenceBucket.bucketName });
+    new cdk.CfnOutput(this, 'EvidenceStateTableName', {
+      value: this.tables.EvidenceStateTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'EvidenceProcessingQueueUrl', {
+      value: this.evidenceQueue.queueUrl,
+    });
     new cdk.CfnOutput(this, 'EcrRepositoryUri', { value: this.ecrRepository.repositoryUri });
     new cdk.CfnOutput(this, 'AnalysisQueueUrl', { value: this.analysisQueue.queueUrl });
     new cdk.CfnOutput(this, 'AgentCoreServicesEnabled', {

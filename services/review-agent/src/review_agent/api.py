@@ -36,6 +36,7 @@ from .contracts.schema import ContractValidationError, validate, validate_defini
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
 from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
+from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
 from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
@@ -83,6 +84,33 @@ def _default_packet_storage(config: AppConfig) -> StorageClient:
     )
 
 
+
+
+_PUBLIC_EVIDENCE_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "case_id",
+        "product_id",
+        "filename",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "processing_state",
+        "source_version_id",
+        "detected_content_type",
+        "source_location",
+        "warnings",
+        "failure_code",
+        "untrusted",
+        "model_use_allowed",
+        "upload",
+    }
+)
+
+
+def _public_evidence_fields(value: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist public evidence state so internal leases and claims cannot escape."""
+    return {key: item for key, item in value.items() if key in _PUBLIC_EVIDENCE_FIELDS}
 class LocalApiError(RuntimeError):
     """Expected application error with an HTTP-compatible status and code."""
 
@@ -132,6 +160,7 @@ class LocalReviewApi:
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
         email_sender: EmailSender | None = None,
+        evidence_uploads: EvidenceUploadIssuer | None = None,
         config: AppConfig | None = None,
         research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
             _RESEARCH_PROVIDER_UNSET
@@ -154,6 +183,9 @@ class LocalReviewApi:
         self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
         self._notifier: Notifier = notifier or build_notifier(self._config)
         self._email_sender: EmailSender = email_sender or build_email_sender(self._config)
+        self._evidence_uploads: EvidenceUploadIssuer = (
+            evidence_uploads or build_evidence_upload_issuer()
+        )
         records = sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
@@ -298,27 +330,63 @@ class LocalReviewApi:
 
     def add_document(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self._require_case(case_id)
+        self._validate_vendor_payload(payload, "vendor-intake", "EvidenceMetadata")
         filename = self._required_text(payload, "filename")
-        document_id = str(payload.get("document_id") or f"DOC-{len(record.documents) + 1:03d}")
-        metadata = {
-            "document_id": document_id,
-            "filename": filename,
-            "content_type": str(payload.get("content_type") or "application/octet-stream"),
-            "scope": str(payload.get("scope") or "case"),
-            "untrusted": True,
-        }
-        record.documents.append(metadata)
-        record.state.document_ids.append(document_id)
-        record.audit.record(
-            event_id=f"{case_id}-document-{len(record.documents):03d}",
-            event_type="document.registered",
-            case_id=case_id,
-            occurred_at=self._now(),
-            actor_type=self._requester_actor(),
-            workflow_version=record.state.workflow_version,
-            detail={"document_id": document_id, "content_type": metadata["content_type"]},
+        digest = str(payload["sha256"]).lower()
+        existing = next(
+            (item for item in record.documents if item.get("sha256") == digest),
+            None,
         )
-        return metadata
+        if existing is not None:
+            if any(
+                existing.get(key) != payload.get(key)
+                for key in ("filename", "content_type", "size_bytes")
+            ):
+                raise LocalApiError(
+                    409,
+                    "evidence_identity_conflict",
+                    "sha256 is already registered with different immutable metadata",
+                )
+            metadata = existing
+        else:
+            document_id = f"DOC-{len(record.documents) + 1:03d}"
+            metadata = {
+                "document_id": document_id,
+                "artifact_id": document_id,
+                "filename": filename,
+                "content_type": payload["content_type"],
+                "size_bytes": payload["size_bytes"],
+                "sha256": digest,
+                "scope": "case",
+                "untrusted": True,
+            }
+            record.documents.append(metadata)
+            record.state.document_ids.append(document_id)
+            record.audit.record(
+                event_id=f"{case_id}-document-{len(record.documents):03d}",
+                event_type="document.registered",
+                case_id=case_id,
+                occurred_at=self._now(),
+                actor_type=self._requester_actor(),
+                workflow_version=record.state.workflow_version,
+                detail={"document_id": document_id, "content_type": metadata["content_type"]},
+            )
+        _case, product, vendor = self._vendor_call(
+            lambda: self._vendor.case_upload_context(case_id)
+        )
+        registration = self._evidence_uploads.issue(
+            workspace_id=self._vendor.workspace_id,
+            case_id=case_id,
+            product_id=product.product_id,
+            vendor_id=vendor.vendor_id,
+            submission_id=f"case:{case_id}",
+            artifact_id=str(metadata["artifact_id"]),
+            filename=str(metadata["filename"]),
+            content_type=str(metadata["content_type"]),
+            size_bytes=int(metadata["size_bytes"]),
+            sha256=str(metadata["sha256"]),
+        )
+        return {**metadata, **_public_evidence_fields(registration)}
 
     def analyze_case(
         self,
@@ -720,7 +788,71 @@ class LocalReviewApi:
 
     def vendor_add_evidence(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._validate_vendor_payload(payload, "vendor-intake", "EvidenceMetadata")
-        return self._vendor_call(lambda: self._vendor.add_evidence(token, payload).to_dict())
+        artifact = self._vendor_call(lambda: self._vendor.add_evidence(token, payload))
+        invite, submission, product, vendor, artifact = self._vendor_call(
+            lambda: self._vendor.evidence_upload_context(token, artifact.artifact_id)
+        )
+        registration = self._evidence_uploads.issue(
+            workspace_id=artifact.workspace_id,
+            case_id=invite.case_id,
+            product_id=product.product_id,
+            vendor_id=vendor.vendor_id,
+            submission_id=submission.submission_id,
+            artifact_id=artifact.artifact_id,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            size_bytes=artifact.size_bytes,
+            sha256=artifact.sha256,
+        )
+        return {**artifact.to_dict(), **_public_evidence_fields(registration)}
+
+    def vendor_evidence_status(self, token: str) -> dict[str, Any]:
+        invite, _submission, artifacts = self._vendor_call(
+            lambda: self._vendor.submission_evidence(token)
+        )
+        statuses = {
+            item["artifact_id"]: _public_evidence_fields(item)
+            for item in self._evidence_uploads.statuses(
+                workspace_id=self._vendor.workspace_id,
+                case_id=invite.case_id,
+                artifact_ids=[artifact.artifact_id for artifact in artifacts],
+            )
+        }
+        return {
+            "items": [
+                {**artifact.to_dict(), **statuses.get(artifact.artifact_id, {})}
+                for artifact in artifacts
+            ]
+        }
+
+    def case_evidence_status(self, case_id: str) -> dict[str, Any]:
+        case_record = self._require_case(case_id)
+        vendor_artifacts = self._vendor.case_evidence(case_id)
+        base_items = [artifact.to_dict() for artifact in vendor_artifacts]
+        base_items.extend(dict(document) for document in case_record.documents)
+        artifact_ids = [
+            str(item.get("artifact_id") or item.get("document_id"))
+            for item in base_items
+        ]
+        statuses = {
+            item["artifact_id"]: _public_evidence_fields(item)
+            for item in self._evidence_uploads.statuses(
+                workspace_id=self._vendor.workspace_id,
+                case_id=case_id,
+                artifact_ids=artifact_ids,
+            )
+        }
+        return {
+            "items": [
+                {
+                    **item,
+                    **statuses.get(
+                        str(item.get("artifact_id") or item.get("document_id")), {}
+                    ),
+                }
+                for item in base_items
+            ]
+        }
 
     def vendor_set_trust_center(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._validate_vendor_payload(payload, "vendor-intake", "TrustCenter")

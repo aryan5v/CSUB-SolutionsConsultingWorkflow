@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Check, Copy, FileCheck2, Link2, Plus, RefreshCw, Send, ShieldCheck, UserCheck } from "lucide-react";
+import { Check, Copy, FileCheck2, Link2, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, ShieldX, UserCheck } from "lucide-react";
 import { DitherButton } from "@/components/dither-kit/button";
 import {
   ReviewApiError,
   requiresReviewerConfirmation,
   reviewApi,
+  vendorInviteUrl,
   type CatalogCandidate,
   type InviteProjection,
   type ReviewProfileVersion,
@@ -13,12 +14,16 @@ import {
   type VendorProduct,
   type VendorRecord,
 } from "./api";
+import { applyRotatedInvite } from "./inviteState";
 import "./workspace.css";
 
 type Notify = (message: string) => void;
 
 function errorMessage(error: unknown): string {
-  return error instanceof ReviewApiError || error instanceof Error ? error.message : "The vendor API request failed.";
+  if (error instanceof ReviewApiError) {
+    return `${error.message}${error.correlationId ? ` Reference: ${error.correlationId}.` : ""}`;
+  }
+  return error instanceof Error ? error.message : "The vendor API request failed.";
 }
 
 function statusLabel(status: InviteProjection["status"]): string {
@@ -167,9 +172,29 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
     try {
       const issued = await reviewApi.issueInvite(caseId, selectedContactId);
       setInvites((current) => [issued.invite, ...current]);
-      const url = `${window.location.origin}/intake#token=${encodeURIComponent(issued.token)}`;
+      const url = vendorInviteUrl(window.location.origin, issued.token);
       setInviteUrl(url);
       notify("Tracked invitation issued. Its opaque token is shown once in the URL fragment.");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  };
+
+  const rotateInvite = async (inviteId: string) => {
+    setBusy(true); setError("");
+    try {
+      const rotated = await reviewApi.rotateInvite(inviteId);
+      setInvites((current) => applyRotatedInvite(current, inviteId, rotated.invite));
+      setInviteUrl(vendorInviteUrl(window.location.origin, rotated.token));
+      notify("Invitation rotated. The old link is terminal and the new opaque link is shown once.");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  };
+
+  const revokeInvite = async (inviteId: string) => {
+    setBusy(true); setError("");
+    try {
+      const revoked = await reviewApi.revokeInvite(inviteId);
+      setInvites((current) => current.map((invite) => invite.invite_id === inviteId ? revoked : invite));
+      setInviteUrl("");
+      notify("Invitation revoked. Its link can no longer open the vendor intake.");
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
@@ -213,7 +238,7 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
 
       <aside className="vendor-record-sidebar">
         <section className="workspace-panel record-summary"><p className="workspace-eyebrow">Current record</p><h2>{selectedProduct?.name ?? "Select a product"}</h2><p>{selectedVendor?.name ?? "No vendor selected"}</p><dl><div><dt>Contact</dt><dd>{selectedContact?.name ?? "Not selected"}</dd></div><div><dt>Internal owner</dt><dd>Alex Reviewer</dd></div><div><dt>Case</dt><dd>{caseId || "Not created"}</dd></div><div><dt>Next step</dt><dd>{nextStep}</dd></div><div><dt>Evidence coverage</dt><dd>{evidenceCoverage}</dd></div><div><dt>Profile versions</dt><dd>{activeProfiles.length ? activeProfiles.map((item) => `${item.profile_key} v${item.version}`).join(", ") : "No active profile returned"}</dd></div><div><dt>Review runs</dt><dd>{runs.length ? runs.map((item) => `v${item.run_version}`).join(", ") : "No run yet"}</dd></div></dl></section>
-        <section className="workspace-panel record-tracking"><div className="record-panel-heading"><div><p className="workspace-eyebrow">Invitation tracking</p><h2>Created → opened → submitted</h2></div><ShieldCheck size={17} /></div>{invites.length ? <ol>{invites.map((invite) => <li key={invite.invite_id}><span className={`invite-state invite-state-${invite.status}`}><i /></span><div><strong>{statusLabel(invite.status)}</strong><small>Issued {new Date(invite.issued_at).toLocaleString()}</small>{invite.opened_at && <small>Opened {new Date(invite.opened_at).toLocaleString()}</small>}{invite.submitted_at && <small>Submitted {new Date(invite.submitted_at).toLocaleString()}</small>}</div></li>)}</ol> : <p>No invitation has been issued for this case.</p>}</section>
+        <section className="workspace-panel record-tracking"><div className="record-panel-heading"><div><p className="workspace-eyebrow">Invitation tracking</p><h2>Created → opened → submitted</h2></div><ShieldCheck size={17} /></div>{invites.length ? <ol>{invites.map((invite) => { const hasReplacement = invites.some((candidate) => candidate.replaced_invite_id === invite.invite_id); const canRevoke = ["issued", "opened", "in_progress"].includes(invite.status); return <li key={invite.invite_id}><span className={`invite-state invite-state-${invite.status}`}><i /></span><div><strong>{statusLabel(invite.status)}</strong><small>Issued {new Date(invite.issued_at).toLocaleString()}</small>{invite.opened_at && <small>Opened {new Date(invite.opened_at).toLocaleString()}</small>}{invite.submitted_at && <small>Submitted {new Date(invite.submitted_at).toLocaleString()}</small>}<div className="record-action-row">{!hasReplacement && <button className="workspace-button" onClick={() => rotateInvite(invite.invite_id)} disabled={busy}><RotateCcw size={12} />Rotate link</button>}{canRevoke && <button className="workspace-button" onClick={() => revokeInvite(invite.invite_id)} disabled={busy}><ShieldX size={12} />Revoke</button>}</div></div></li>; })}</ol> : <p>No invitation has been issued for this case.</p>}</section>
         <section className="workspace-panel record-candidates"><p className="workspace-eyebrow">Catalog candidates</p><h2>Match, then verify</h2><p className="catalog-boundary">A catalog row may support review. It is not blanket approval for this product, use case, or evidence version.</p>{candidates.length ? candidates.map((candidate) => { const needsConfirmation = requiresReviewerConfirmation(candidate); const confirmed = confirmedCandidates.has(candidate.record_id); return <article key={candidate.record_id}><div><strong>{candidate.canonical_name}</strong><small>{candidate.match_method.replace("_", " + ")} · Row {candidate.source_row} · {Math.round(candidate.score * 100)}%</small></div>{needsConfirmation ? <button onClick={() => confirmCandidate(candidate)} disabled={busy || confirmed}>{confirmed ? <Check size={13} /> : <UserCheck size={13} />}{confirmed ? "Confirmed" : "Confirm match"}</button> : <span>Structured match</span>}</article>; }) : <p>Create a case to search the catalog.</p>}</section>
       </aside>
     </div>}

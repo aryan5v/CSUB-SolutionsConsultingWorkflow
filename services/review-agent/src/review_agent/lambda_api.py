@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -72,6 +73,7 @@ from .contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
 from .ingestion.software_workbook import XlsxWorkbookReader, normalize_workbook
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
@@ -92,6 +94,7 @@ _PUBLIC_ROUTES = {
     ("GET", "/vendor/invites/current"),
     ("POST", "/vendor/invites/current/open"),
     ("GET", "/vendor/invites/current/questions"),
+    ("GET", "/vendor/invites/current/evidence"),
     ("POST", "/vendor/invites/current/evidence"),
     ("POST", "/vendor/invites/current/trust-center"),
     ("POST", "/vendor/invites/current/answers"),
@@ -102,6 +105,7 @@ _PUBLIC_ROUTES = {
     ("GET", "/intake"),
     ("POST", "/intake"),
     ("POST", "/intake/evidence"),
+    ("GET", "/intake/evidence"),
     ("POST", "/intake/trust-center"),
     ("POST", "/intake/answers"),
     ("POST", "/intake/coverage"),
@@ -112,10 +116,25 @@ _PUBLIC_ROUTES = {
 }
 
 
+class SnapshotConflictError(LocalApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            409,
+            "concurrent_update",
+            "the workspace changed during this request; refresh and retry",
+        )
+
+
 class WorkspaceStore(Protocol):
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None: ...
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None: ...
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None: ...
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]: ...
 
@@ -128,13 +147,28 @@ class InMemoryWorkspaceStore:
     def __init__(self) -> None:
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._catalogs: dict[str, list[dict[str, Any]]] = {}
+        self._lock = threading.RLock()
 
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
-        value = self._snapshots.get(workspace_id)
-        return _json_clone(value) if value is not None else None
+        with self._lock:
+            value = self._snapshots.get(workspace_id)
+            return _json_clone(value) if value is not None else None
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
-        self._snapshots[workspace_id] = _json_clone(snapshot)
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
+        with self._lock:
+            current = self._snapshots.get(workspace_id)
+            current_revision = (
+                int(current.get("persistence_revision", 0)) if current is not None else None
+            )
+            if current_revision != expected_revision:
+                raise SnapshotConflictError()
+            self._snapshots[workspace_id] = _json_clone(snapshot)
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         return _json_clone(self._catalogs.get(workspace_id, []))
@@ -155,6 +189,7 @@ class FileWorkspaceStore:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path).expanduser()
+        self._lock = threading.RLock()
 
     def _read(self) -> dict[str, Any]:
         if not self._path.is_file():
@@ -171,13 +206,27 @@ class FileWorkspaceStore:
         self._path.write_text(_json_dumps(data), encoding="utf-8")
 
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
-        value = self._read()["snapshots"].get(workspace_id)
-        return _json_clone(value) if value is not None else None
+        with self._lock:
+            value = self._read()["snapshots"].get(workspace_id)
+            return _json_clone(value) if value is not None else None
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
-        data = self._read()
-        data["snapshots"][workspace_id] = _json_clone(snapshot)
-        self._write(data)
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
+        with self._lock:
+            data = self._read()
+            current = data["snapshots"].get(workspace_id)
+            current_revision = (
+                int(current.get("persistence_revision", 0)) if current is not None else None
+            )
+            if current_revision != expected_revision:
+                raise SnapshotConflictError()
+            data["snapshots"][workspace_id] = _json_clone(snapshot)
+            self._write(data)
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         return _json_clone(self._read()["catalogs"].get(workspace_id, []))
@@ -294,21 +343,71 @@ class DynamoWorkspaceStore:
             raise RuntimeError("workspace snapshot is malformed")
         return _decimal_to_native(value)
 
-    def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+    def save_snapshot(
+        self,
+        workspace_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         encoded = _json_dumps(snapshot)
         if len(encoded.encode("utf-8")) >= 350_000:
             raise RuntimeError("workspace snapshot exceeds the safe DynamoDB item limit")
-        self._tables["cases"].put_item(
-            Item={
-                "case_id": _physical(workspace_id, "snapshot"),
-                "workspace_id": workspace_id,
-                "record_type": "workspace_snapshot",
-                "schema_version": _SCHEMA_VERSION,
-                "snapshot": encoded,
-                "updated_at": _utc_now(),
+        revision = int(snapshot.get("persistence_revision", 0))
+        item = {
+            "case_id": _physical(workspace_id, "snapshot"),
+            "workspace_id": workspace_id,
+            "record_type": "workspace_snapshot",
+            "schema_version": _SCHEMA_VERSION,
+            "revision": revision,
+            "snapshot": encoded,
+            "updated_at": _utc_now(),
+        }
+        if expected_revision is None:
+            options: dict[str, Any] = {
+                "ConditionExpression": "attribute_not_exists(#case_id)",
+                "ExpressionAttributeNames": {"#case_id": "case_id"},
             }
-        )
-        self._write_projections(workspace_id, snapshot)
+        else:
+            condition = (
+                "attribute_exists(#case_id) AND "
+                "(attribute_not_exists(#revision) OR #revision = :expected_revision)"
+                if expected_revision == 0
+                else "#revision = :expected_revision"
+            )
+            options = {
+                "ConditionExpression": condition,
+                "ExpressionAttributeNames": (
+                    {"#case_id": "case_id", "#revision": "revision"}
+                    if expected_revision == 0
+                    else {"#revision": "revision"}
+                ),
+                "ExpressionAttributeValues": {
+                    ":expected_revision": expected_revision,
+                },
+            }
+        table = self._tables["cases"]
+        try:
+            table.put_item(Item=item, **options)
+        except Exception as error:
+            response = getattr(error, "response", None)
+            error_detail = response.get("Error") if isinstance(response, dict) else None
+            error_code = error_detail.get("Code") if isinstance(error_detail, dict) else None
+            if error_code == "ConditionalCheckFailedException":
+                raise SnapshotConflictError() from error
+            raise
+        try:
+            self._write_projections(workspace_id, snapshot)
+        except Exception:
+            print(
+                _json_dumps(
+                    {
+                        "event_type": "projection_write_failed",
+                        "revision": revision,
+                        "status": 202,
+                    }
+                )
+            )
 
     def load_catalog(self, workspace_id: str) -> list[dict[str, Any]]:
         items = self._scan_workspace(self._tables["product"], workspace_id, "catalog")
@@ -333,6 +432,7 @@ class DynamoWorkspaceStore:
                 )
 
     def _write_projections(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+        revision = int(snapshot.get("persistence_revision", 0))
         repository = snapshot.get("repository", {})
         records = repository.get("records", {}) if isinstance(repository, dict) else {}
         mapping = {
@@ -348,62 +448,87 @@ class DynamoWorkspaceStore:
             "event": "integration",
             "case": "cases",
         }
+        current: dict[tuple[object, ...], tuple[str, dict[str, Any]]] = {}
+        desired: dict[tuple[object, ...], tuple[str, dict[str, Any]]] = {}
+
+        def remember_current(table_name: str, item: dict[str, Any]) -> None:
+            current[self._projection_identity(table_name, item)] = (table_name, item)
+
+        def remember_desired(table_name: str, item: dict[str, Any]) -> None:
+            item["projection_revision"] = revision
+            desired[self._projection_identity(table_name, item)] = (table_name, item)
+
         for kind, table_name in mapping.items():
             table = self._tables[table_name]
             for item in self._scan_workspace(table, workspace_id, kind):
-                self._delete_projection(table_name, item)
+                remember_current(table_name, item)
             values = records.get(kind, []) if isinstance(records, dict) else []
             for value in values:
                 if isinstance(value, dict):
-                    self._put_projection(table_name, workspace_id, kind, value)
+                    remember_desired(
+                        table_name,
+                        self._projection_item(table_name, workspace_id, kind, value),
+                    )
+
         cases = snapshot.get("cases", {})
         for item in self._scan_workspace(self._tables["cases"], workspace_id, "review_case"):
-            self._delete_projection("cases", item)
+            remember_current("cases", item)
         for item in self._scan_workspace(self._tables["audit"], workspace_id, "audit"):
-            self._delete_projection("audit", item)
+            remember_current("audit", item)
         for item in self._scan_workspace(
             self._tables["idempotency"], workspace_id, "simulated_servicenow_commit"
         ):
-            self._delete_projection("idempotency", item)
+            remember_current("idempotency", item)
         if isinstance(cases, dict):
             for case_id, value in cases.items():
                 if not isinstance(value, dict):
                     continue
-                self._tables["cases"].put_item(
-                    Item={
+                remember_desired(
+                    "cases",
+                    {
                         "case_id": _physical(workspace_id, f"review#{case_id}"),
                         "workspace_id": workspace_id,
                         "record_type": "review_case",
                         "payload": _json_dumps(value),
-                    }
+                    },
                 )
                 for sequence, event in enumerate(value.get("audit_events", []), start=1):
-                    self._tables["audit"].put_item(
-                        Item={
+                    remember_desired(
+                        "audit",
+                        {
                             "case_id": _physical(workspace_id, case_id),
                             "sequence": sequence,
                             "workspace_id": workspace_id,
                             "record_type": "audit",
                             "payload": _json_dumps(event),
-                        }
+                        },
                     )
         connector = snapshot.get("connector", {})
         committed = connector.get("committed", {}) if isinstance(connector, dict) else {}
         if isinstance(committed, dict):
+            ttl = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000
             for key, value in committed.items():
-                self._tables["idempotency"].put_item(
-                    Item={
+                remember_desired(
+                    "idempotency",
+                    {
                         "idempotency_key": _physical(workspace_id, key),
                         "workspace_id": workspace_id,
                         "record_type": "simulated_servicenow_commit",
                         "payload": _json_dumps(value),
-                        "ttl": int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000,
-                    }
+                        "ttl": ttl,
+                    },
                 )
 
-    def _put_projection(
+        operations: list[tuple[str, str, dict[str, Any]]] = []
+        for identity, (table_name, item) in current.items():
+            if identity not in desired:
+                operations.append(("delete", table_name, self._projection_key(table_name, item)))
+        operations.extend(("put", table_name, item) for table_name, item in desired.values())
+        self._transact_projection_operations(workspace_id, revision, operations)
+
+    def _projection_item(
         self, table_name: str, workspace_id: str, kind: str, value: dict[str, Any]
-    ) -> None:
+    ) -> dict[str, Any]:
         record_id = _record_id(kind, value)
         item = {
             "workspace_id": workspace_id,
@@ -437,10 +562,11 @@ class DynamoWorkspaceStore:
             item["ttl"] = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) + 7_776_000
         elif table_name == "cases":
             item["case_id"] = _physical(workspace_id, f"vendor#{record_id}")
-        self._tables[table_name].put_item(Item=item)
+        return item
 
-    def _delete_projection(self, table_name: str, item: dict[str, Any]) -> None:
-        key_fields = {
+    @staticmethod
+    def _projection_key_fields(table_name: str) -> tuple[str, ...]:
+        return {
             "vendor": ("vendor_id",),
             "product": ("product_id", "version"),
             "contact": ("contact_id",),
@@ -453,18 +579,82 @@ class DynamoWorkspaceStore:
             "idempotency": ("idempotency_key",),
             "cases": ("case_id",),
         }[table_name]
-        if not all(field in item for field in key_fields):
+
+    @classmethod
+    def _projection_key(cls, table_name: str, item: dict[str, Any]) -> dict[str, Any]:
+        fields = cls._projection_key_fields(table_name)
+        if not all(field in item for field in fields):
             raise RuntimeError(f"persisted {table_name} projection has an invalid key")
-        self._tables[table_name].delete_item(
-            Key={field: item[field] for field in key_fields}
+        return {field: item[field] for field in fields}
+
+    @classmethod
+    def _projection_identity(cls, table_name: str, item: dict[str, Any]) -> tuple[object, ...]:
+        key = cls._projection_key(table_name, item)
+        return (table_name, *(key[field] for field in cls._projection_key_fields(table_name)))
+
+    @staticmethod
+    def _dynamo_value(value: object) -> dict[str, object]:
+        if isinstance(value, bool):
+            return {"BOOL": value}
+        if isinstance(value, str):
+            return {"S": value}
+        if isinstance(value, (int, decimal.Decimal)):
+            return {"N": str(value)}
+        raise TypeError(f"unsupported projection transaction value: {type(value).__name__}")
+
+    @classmethod
+    def _dynamo_item(cls, item: dict[str, Any]) -> dict[str, dict[str, object]]:
+        return {key: cls._dynamo_value(value) for key, value in item.items()}
+
+    def _transact_projection_operations(
+        self,
+        workspace_id: str,
+        revision: int,
+        operations: list[tuple[str, str, dict[str, Any]]],
+    ) -> None:
+        if not operations:
+            return
+        client = self._tables["cases"].meta.client
+        snapshot_check = {
+            "TableName": self._tables["cases"].name,
+            "Key": self._dynamo_item({"case_id": _physical(workspace_id, "snapshot")}),
+            "ConditionExpression": "#revision = :revision",
+            "ExpressionAttributeNames": {"#revision": "revision"},
+            "ExpressionAttributeValues": {":revision": self._dynamo_value(revision)},
+        }
+        projection_condition = (
+            "attribute_not_exists(#projection_revision) "
+            "OR #projection_revision <= :projection_revision"
         )
+        for offset in range(0, len(operations), 99):
+            transaction: list[dict[str, Any]] = [{"ConditionCheck": snapshot_check}]
+            for action, table_name, value in operations[offset : offset + 99]:
+                mutation = {
+                    "TableName": self._tables[table_name].name,
+                    "ConditionExpression": projection_condition,
+                    "ExpressionAttributeNames": {
+                        "#projection_revision": "projection_revision"
+                    },
+                    "ExpressionAttributeValues": {
+                        ":projection_revision": self._dynamo_value(revision)
+                    },
+                }
+                if action == "put":
+                    mutation["Item"] = self._dynamo_item(value)
+                    transaction.append({"Put": mutation})
+                else:
+                    mutation["Key"] = self._dynamo_item(value)
+                    transaction.append({"Delete": mutation})
+            client.transact_write_items(TransactItems=transaction)
 
     @staticmethod
     def _scan_workspace(table: Any, workspace_id: str, record_type: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         start_key = None
         while True:
-            kwargs = {"ExclusiveStartKey": start_key} if start_key else {}
+            kwargs: dict[str, Any] = {"ConsistentRead": True}
+            if start_key:
+                kwargs["ExclusiveStartKey"] = start_key
             response = table.scan(**kwargs)
             page = response.get("Items", [])
             if not isinstance(page, list):
@@ -549,7 +739,16 @@ def seed_workspace(
         repository.put("catalog", entry.record_id, entry, workspace_id=workspace_id)
     store.replace_catalog(workspace_id, [entry.to_dict() for entry in entries])
     snapshot = snapshot_api(api, workspace_id=workspace_id)
-    store.save_snapshot(workspace_id, snapshot)
+    current = store.load_snapshot(workspace_id)
+    expected_revision = (
+        int(current.get("persistence_revision", 0)) if current is not None else None
+    )
+    snapshot["persistence_revision"] = (expected_revision or 0) + 1
+    store.save_snapshot(
+        workspace_id,
+        snapshot,
+        expected_revision=expected_revision,
+    )
     return {
         "workspace_id": workspace_id,
         "seeded_cases": len(api._cases),
@@ -617,13 +816,17 @@ def snapshot_api(api: LocalReviewApi, *, workspace_id: str) -> dict[str, Any]:
 
 
 def restore_api(
-    snapshot: dict[str, Any], catalog_values: list[dict[str, Any]], *, workspace_id: str
+    snapshot: dict[str, Any],
+    catalog_values: list[dict[str, Any]],
+    *,
+    workspace_id: str,
+    evidence_uploads: EvidenceUploadIssuer | None = None,
 ) -> LocalReviewApi:
     if snapshot.get("schema_version") != _SCHEMA_VERSION:
         raise RuntimeError("unsupported workspace snapshot version")
     if snapshot.get("workspace_id") != workspace_id:
         raise RuntimeError("workspace snapshot isolation check failed")
-    api = LocalReviewApi(seed_demo=False)
+    api = LocalReviewApi(seed_demo=False, evidence_uploads=evidence_uploads)
     repository = InMemoryVendorRepository()
     repository_data = snapshot.get("repository")
     if not isinstance(repository_data, dict):
@@ -697,6 +900,7 @@ def create_handler(
     *,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     allowed_origins: Iterable[str] = (),
+    evidence_uploads: EvidenceUploadIssuer | None = None,
 ) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
     origins = frozenset(origin for origin in allowed_origins if origin)
 
@@ -725,7 +929,13 @@ def create_handler(
             snapshot = store.load_snapshot(workspace_id)
             if snapshot is None:
                 raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
-            api = restore_api(snapshot, store.load_catalog(workspace_id), workspace_id=workspace_id)
+            revision = int(snapshot.get("persistence_revision", 0))
+            api = restore_api(
+                snapshot,
+                store.load_catalog(workspace_id),
+                workspace_id=workspace_id,
+                evidence_uploads=evidence_uploads,
+            )
             result, status, mutated = _dispatch(
                 api,
                 method,
@@ -736,7 +946,13 @@ def create_handler(
                 reviewer_id=reviewer_id,
             )
             if mutated:
-                store.save_snapshot(workspace_id, snapshot_api(api, workspace_id=workspace_id))
+                next_snapshot = snapshot_api(api, workspace_id=workspace_id)
+                next_snapshot["persistence_revision"] = revision + 1
+                store.save_snapshot(
+                    workspace_id,
+                    next_snapshot,
+                    expected_revision=revision,
+                )
             _log(correlation_id, "request.completed", status)
             return _response(
                 status,
@@ -749,7 +965,13 @@ def create_handler(
             _log(correlation_id, "request.rejected", error.status)
             return _response(
                 error.status,
-                {"error": {"code": error.code, "message": str(error)}},
+                {
+                    "error": {
+                        "code": error.code,
+                        "message": str(error),
+                        "correlation_id": correlation_id,
+                    }
+                },
                 correlation_id,
                 origin=_header(event, "origin"),
                 allowed_origins=origins,
@@ -758,7 +980,13 @@ def create_handler(
             _log(correlation_id, "request.failed", 500)
             return _response(
                 500,
-                {"error": {"code": "internal_error", "message": "request failed"}},
+                {
+                    "error": {
+                        "code": "internal_error",
+                        "message": "request failed",
+                        "correlation_id": correlation_id,
+                    }
+                },
                 correlation_id,
                 origin=_header(event, "origin"),
                 allowed_origins=origins,
@@ -900,6 +1128,8 @@ def _dispatch_case(
         return api.get_case_research(case_id), 200, False
     if method == "POST" and suffix == "documents":
         return api.add_document(case_id, body), 201, True
+    if method == "GET" and suffix == "documents":
+        return api.case_evidence_status(case_id), 200, False
     if method == "POST" and suffix == "analyze":
         confirmed = body.get("confirmed_match_id")
         if confirmed is not None and not isinstance(confirmed, str):
@@ -959,6 +1189,7 @@ def _dispatch_intake(
         return api.resolve_vendor_invite(token, mark_open=True), 200, True
     operations: dict[tuple[str, str], Callable[[], dict[str, Any]]] = {
         ("POST", "/intake/evidence"): lambda: api.vendor_add_evidence(token, body),
+        ("GET", "/intake/evidence"): lambda: api.vendor_evidence_status(token),
         ("POST", "/intake/trust-center"): lambda: api.vendor_set_trust_center(token, body),
         ("POST", "/intake/answers"): lambda: api.vendor_save_answers(token, body),
         ("POST", "/intake/coverage"): lambda: api.vendor_add_coverage(token, body),
@@ -1632,17 +1863,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _store: WorkspaceStore | None = None
+_evidence_uploads: EvidenceUploadIssuer | None = None
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    global _store
+    global _store, _evidence_uploads
     if _store is None:
         _store = DynamoWorkspaceStore.from_environment()
+    if _evidence_uploads is None:
+        _evidence_uploads = build_evidence_upload_issuer()
     origins = [item.strip() for item in os.environ.get("ALLOWED_ORIGINS", "").split(",") if item.strip()]
     application = create_handler(
         _store,
         workspace_id=os.environ.get("WORKSPACE_ID", DEFAULT_WORKSPACE_ID),
         allowed_origins=origins,
+        evidence_uploads=_evidence_uploads,
     )
     return application(event, context)
 
