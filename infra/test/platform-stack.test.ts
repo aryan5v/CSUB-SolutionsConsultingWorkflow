@@ -191,7 +191,7 @@ describe('VETTED Better Auth same-origin session layer', () => {
     platform.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs22.x',
       Architectures: ['arm64'],
-      Handler: 'dist/index.handler',
+      Handler: 'index.handler',
       Environment: {
         Variables: Match.objectLike({
           NODE_ENV: 'production',

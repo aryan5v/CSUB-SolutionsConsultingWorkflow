@@ -808,18 +808,14 @@ export class PlatformStack extends cdk.Stack {
       functionName: `vetted-auth-${appEnv}`,
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
-      handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'services', 'auth-api'), {
+      handler: 'index.handler',
+      // The auth-api build (infra presynth -> auth:build) emits a self-contained
+      // esbuild bundle at dist/index.js, so the Lambda asset is just that
+      // directory. Packaging the whole service directory pulled in node_modules
+      // (including a .bin/esbuild symlink) which the sealed-release verifier
+      // rejects as an unsupported archive member.
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'services', 'auth-api', 'dist'), {
         assetHashType: cdk.AssetHashType.SOURCE,
-        exclude: [
-          'node_modules/**',
-          'src/**',
-          'test/**',
-          'package.json',
-          'package-lock.json',
-          'tsconfig.json',
-          '.npmrc',
-        ],
       }),
       memorySize: 512,
       timeout: cdk.Duration.seconds(15),
