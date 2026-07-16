@@ -71,6 +71,9 @@ export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
           </ul>
         </div>
       )}
+      {status.review_stage === "changes_requested" && status.submission_status === "draft" && (
+        <p className="vp-field-hint">Your prior uploads and answers stay attached. Supplement what is missing, then finalize again.</p>
+      )}
       {status.adapted_to_intake && (
         <div className="vp-intake-adaptive-note" role="note">
           <strong>Tailored to this request</strong>
@@ -367,7 +370,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
               {notice && <p className="vp-form-notice" role="status" aria-live="polite">{notice}</p>}
               <div className="vp-intake-actions">
                 <button className="vp-btn vp-btn-outline" type="button" onClick={saveProgress} disabled={busy || finalized}>{busy ? "Saving…" : "Save progress"}</button>
-                <button className="vp-btn vp-btn-ink" type="button" onClick={finalize} disabled={busy || finalized}>{finalized ? "Submission finalized" : "Finalize submission"}</button>
+                <button className="vp-btn vp-btn-ink" type="button" onClick={finalize} disabled={busy || finalized}>{finalized ? "Submission finalized" : reviewStatus?.review_stage === "changes_requested" ? "Re-finalize submission" : "Finalize submission"}</button>
               </div>
               <p className="vp-field-hint">Finalizing locks this evidence version for review.</p>
             </div>

@@ -284,7 +284,7 @@ class ReRunLimitTests(unittest.TestCase):
         backend.finalize_submission(issued["token"])
         return backend, "CASE-1"
 
-    def test_one_rerun_limit_with_instructions_and_invalidation(self) -> None:
+    def test_rerun_limit_with_instructions_and_invalidation(self) -> None:
         backend, case_id = self._backend()
         run_one = backend.create_review_run(case_id)
         self.assertEqual(run_one.run_version, 1)
@@ -294,8 +294,10 @@ class ReRunLimitTests(unittest.TestCase):
         self.assertEqual(run_two.instructions, "Re-check accessibility with the new VPAT.")
         self.assertFalse(run_two.decision_valid)
         self.assertFalse(run_two.write_preview_valid)
+        run_three = backend.create_review_run(case_id, "Post-resubmit rerun after vendor changes.")
+        self.assertEqual(run_three.run_version, 3)
         with self.assertRaises(VendorBackendError) as limited:
-            backend.create_review_run(case_id, "second rerun should be rejected")
+            backend.create_review_run(case_id, "fourth rerun should be rejected")
         self.assertEqual(limited.exception.code, "rerun_limit_reached")
 
 
@@ -355,6 +357,59 @@ class LifecycleTransitionTests(unittest.TestCase):
             },
         )
         self.assertEqual(api._vendor.get_case_lifecycle("CHG-1"), "changes_requested")
+
+    def test_request_changes_reopens_vendor_submission(self) -> None:
+        api = LocalReviewApi(seed_demo=False)
+        created = api.create_case(low_risk_case().to_dict())
+        case_id = created["case_id"]
+        vendor = api.list_vendors()["items"][0]
+        contact = api.create_vendor_contact(
+            {
+                "vendor_id": vendor["vendor_id"],
+                "name": "Vendor Contact",
+                "email": "contact@vendor.example",
+            }
+        )
+        issued = api.issue_vendor_invite(case_id, {"contact_id": contact["contact_id"]})
+        token = issued["token"]
+        api.vendor_add_evidence(
+            token,
+            {
+                "filename": "soc2.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 10,
+                "sha256": "a" * 64,
+            },
+        )
+        api.vendor_set_trust_center(token, {"trust_center_url": "https://trust.vendor.example"})
+        api.vendor_run_intake_analysis(token)
+        api.vendor_finalize(token)
+
+        api.analyze_case(case_id)
+        api.review_case(
+            case_id,
+            {
+                "case_id": case_id,
+                "decision_version": 1,
+                "reviewer_id": "reviewer@example.edu",
+                "action": "request_info",
+                "decided_at": "2026-07-15T08:00:00+00:00",
+                "comments": "Please attach the current VPAT.",
+            },
+        )
+        self.assertEqual(api._vendor.get_case_lifecycle(case_id), "changes_requested")
+
+        view = api.resolve_vendor_invite(token)
+        self.assertEqual(view["submission"]["status"], "draft")
+        self.assertEqual(view["submission"]["version"], 2)
+        status = api.vendor_review_status(token)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(status["vendor_visible_comment"], "Please attach the current VPAT.")
+
+        api.vendor_finalize(token)
+        rerun = api.create_review_run(case_id, {"instructions": "Recheck after vendor resubmit."})
+        self.assertEqual(rerun["run_version"], 1)
+        self.assertIsNone(api._require_case(case_id).state.human_decision)
 
 
 class SlackTruthfulnessTests(unittest.TestCase):
