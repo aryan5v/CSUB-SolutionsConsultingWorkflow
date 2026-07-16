@@ -1,4 +1,4 @@
-name: Deploy VETTED
+name: Deploy Vetted
 
 on:
   push:
@@ -84,7 +84,6 @@ jobs:
             apps/reviewer-web/package-lock.json
             infra/package-lock.json
             services/auth-api/package-lock.json
-            services/case-api/package-lock.json
 
       - name: Check out release source
         if: steps.release.outputs.operation != 'rollback'
@@ -243,7 +242,7 @@ jobs:
           scripts/deploy/run_release.sh "$OPERATION" "$RELEASE_SHA" \
             "$RUNNER_TEMP/release-bundle"
           {
-            echo "## VETTED release completed"
+            echo "## Vetted release completed"
             echo "- Operation: \`$OPERATION\`"
             echo "- Commit: \`$RELEASE_SHA\`"
             echo "- Application: https://$CLOUDFRONT_DOMAIN"
@@ -256,7 +255,7 @@ jobs:
           RELEASE_SHA: ${{ needs.build.outputs.sha }}
         run: |
           {
-            echo "## VETTED release failed"
+            echo "## Vetted release failed"
             echo "Automatic recovery was attempted when a distinct healthy release existed."
             echo "Inspect the append-only records under \`_deployment-state/$RELEASE_SHA/\` and CloudFormation stack events."
             echo "Do not retry an \`UPDATE_ROLLBACK_FAILED\` stack; recover through the documented SSO runbook."

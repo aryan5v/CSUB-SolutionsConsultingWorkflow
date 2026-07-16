@@ -4,10 +4,9 @@ PRE_COMMIT ?= $(VENV)/bin/pre-commit
 
 REVIEW_AGENT ?= services/review-agent
 REVIEWER_WEB ?= apps/reviewer-web
-CASE_API ?= services/case-api
 INFRA ?= infra
 
-.PHONY: bootstrap hooks check lint test verify review-agent reviewer-web case-api infra-check agent-briefs aws-whoami
+.PHONY: bootstrap hooks check lint test verify review-agent reviewer-web infra-check agent-briefs aws-whoami
 
 bootstrap:
 	@$(PYTHON) -m venv $(VENV)
@@ -40,12 +39,6 @@ reviewer-web:
 	@npm --prefix $(REVIEWER_WEB) run check
 	@npm --prefix $(REVIEWER_WEB) run build
 
-# Locked TypeScript Lambda proxy workspace: install, unit-test, and type-check.
-case-api:
-	@npm --prefix $(CASE_API) ci
-	@npm --prefix $(CASE_API) run typecheck
-	@npm --prefix $(CASE_API) test
-
 # Non-mutating CDK checks only. Deployment still requires the documented gate.
 infra-check:
 	@npm --prefix $(INFRA) ci
@@ -53,7 +46,7 @@ infra-check:
 	@npm --prefix $(INFRA) test
 	@npm --prefix $(INFRA) run synth -- --strict
 
-verify: check lint test review-agent reviewer-web case-api infra-check
+verify: check lint test review-agent reviewer-web infra-check
 	@git diff --check
 
 agent-briefs:

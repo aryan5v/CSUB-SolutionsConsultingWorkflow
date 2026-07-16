@@ -14,7 +14,7 @@ This directory owns the AWS CDK TypeScript application. The first infrastructure
 - Bedrock models, Guardrails, Knowledge Bases, and S3 Vectors.
 - Bedrock AgentCore Runtime, Memory, and restricted Browser.
 - CloudWatch logs, metrics, alarms, and dashboards; CloudTrail for write-action auditing.
-- Secrets Manager for VETTED Better Auth/session and future connector credentials.
+- Secrets Manager for Vetted Better Auth/session and future connector credentials.
 
 ## Required configuration
 
@@ -108,7 +108,7 @@ customer-managed KMS key and `cases` table are passed by object reference
 - **DynamoDB (PITR on all):** vendor, product (catalog), contact, invite
   (keyed by `token_hash`, never plaintext), submission, review, profile
   (immutable `(user_id, version)`), integration-event, audit, and idempotency.
-- **Cognito + VETTED Better Auth:** reviewer user pool with verified-email
+- **Cognito + Vetted Better Auth:** reviewer user pool with verified-email
   self-signup enabled for the sanitized demo, the existing secretless public
   client retained for reviewer-API migration, and a separate confidential
   authorization-code/PKCE client used only by Better Auth. Better Auth runs as
@@ -212,7 +212,7 @@ approval is recorded. Discover and pin the embedding/foundation model IDs after
 authenticating (`aws bedrock list-foundation-models`), then pass them via
 context — never hard-code model IDs, account IDs, URLs, or credentials.
 
-### VETTED authentication build and signup
+### Vetted authentication build and signup
 
 Build `services/auth-api` before synth/deploy so `dist/index.mjs` is present:
 
@@ -225,7 +225,7 @@ npm --prefix services/auth-api run build
 
 `AuthBaseUrl`, `AuthCognitoClientId`, and `AuthCognitoCallbackUrl` are public
 configuration outputs. The Cognito client secret and Better Auth session secret
-remain only in Secrets Manager. The VETTED `/signup` experience starts the
+remain only in Secrets Manager. The Vetted `/signup` experience starts the
 Better Auth generic OIDC endpoint with `providerId: "cognito"` and
 `requestSignUp: true`; Cognito verifies the email and the application treats the
 account as a reviewer in the seeded `csub-demo` workspace. This demo setting

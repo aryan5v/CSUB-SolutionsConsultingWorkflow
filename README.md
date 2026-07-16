@@ -1,12 +1,14 @@
-# VETTED
+# Vetted
 
 [![CI](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml/badge.svg)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/ci.yml)
-[![Deploy VETTED](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml)
+[![Deploy](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/aryan5v/CSUB-SolutionsConsultingWorkflow/actions/workflows/deploy.yml)
 
 An AWS-first, human-reviewed technology-review platform for CSU AI Summer Camp
-2026. VETTED uses the supplied CSUB Box dataset to check software records, apply
-source-linked review rules, draft low- and medium-risk outcomes, and demonstrate
-simulated ServiceNow write-back.
+2026. Vetted turns a ServiceNow ticket into a tracked vendor evidence
+submission, runs deterministic policy routing with parallel security and
+accessibility analysis, and drafts a cited packet a reviewer approves —
+closing the loop with a simulated ServiceNow write-back and Slack
+notifications.
 
 ## Context
 
@@ -63,10 +65,18 @@ the phased Twenty-to-vendor adaptation plan.
 - [x] Partner workflow converted into a prototype PRD
 - [x] Three-day implementation plan approved
 - [x] AWS and bounded-agent architecture selected
-- [ ] Ingest and validate the supplied Box dataset
+- [x] Ingest the approved-software export locally (place the XLSX under `data/raw/`, which stays out of Git)
 - [x] Complete connected local low-, medium-, and safe-escalation vertical slices
 - [x] Deploy the approved AWS environment
-- [ ] Evaluate, harden, and demo the prototype
+- [x] Vendor lifecycle: adaptive per-case requirements, save-and-resume intake, request-changes resubmission, weekly reminders, and vendor-safe status
+- [x] Integrations: simulated ServiceNow ticket import with automatic invitation issuance and two-step write-back; Slack notifications (live when a webhook is configured)
+- [ ] Final demo rehearsal and recording ([`docs/DEMO.md`](docs/DEMO.md))
+
+Not yet in the executing path (documented future work): live ServiceNow (#35),
+Bedrock orchestration hardening and evaluations (#50), evidence content
+validation (#48), vendor clarification threads (#41), and expiring-evidence
+re-review (#53). LangGraph/AgentCore/Knowledge Bases mentioned in early
+planning documents are aspirational, not wired.
 
 Merges to `main` automatically create a verified, immutable AWS release. The
 delivery workflow preflights both CloudFormation stacks before mutation, runs

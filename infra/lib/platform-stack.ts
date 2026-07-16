@@ -215,7 +215,9 @@ export class PlatformStack extends cdk.Stack {
     makeTable('EvidenceStateTable', str('scope_id'), str('artifact_id'));
 
     // ====================================================================
-    // Cognito reviewer pool (no self-service signup)
+    // Cognito reviewer pool. Verified-email self signup stays enabled for the
+    // seeded demo workspace (asserted in platform-stack.test.ts); a production
+    // rollout would switch to administrator-created reviewer accounts.
     // ====================================================================
     this.userPool = new cognito.UserPool(this, 'ReviewerPool', {
       userPoolName: `csub-reviewer-${appEnv}`,

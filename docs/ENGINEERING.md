@@ -6,8 +6,8 @@ The repository is a small polyglot monorepo with explicit ownership boundaries:
 
 ```text
 apps/reviewer-web/       React/Vite requester and reviewer interface
-services/case-api/       TypeScript Lambda/API Gateway case and connector API
-services/review-agent/   Python LangGraph, ingestion, policy, tools, and packet logic
+services/auth-api/       TypeScript Lambda for reviewer session/auth (Cognito + Better Auth)
+services/review-agent/   Python orchestration, ingestion, policy, tools, and packet logic
 packages/contracts/      OpenAPI and JSON Schema contracts shared across languages
 infra/                   AWS CDK TypeScript application and deployment runbooks
 tests/                   Contract, integration, end-to-end, gold-case, and adversarial tests
@@ -16,7 +16,7 @@ scripts/                 Dependency-light repository automation
 
 Do not place new application code in a generic root `src/` directory. A component belongs to exactly one deployable workspace. Cross-language interfaces originate in `packages/contracts/`; generated clients are outputs, not hand-edited sources.
 
-Within `services/review-agent`, keep ingestion, deterministic policy, LangGraph orchestration, model adapters, and external tools as separate modules. Provider SDK calls stay behind interfaces so tests can use local fakes.
+Within `services/review-agent`, keep ingestion, deterministic policy, workflow orchestration, model adapters, and external tools as separate modules. Provider SDK calls stay behind interfaces so tests can use local fakes.
 
 ## Dependency and tool policy
 

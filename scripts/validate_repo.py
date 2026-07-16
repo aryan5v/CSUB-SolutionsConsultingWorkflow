@@ -29,7 +29,6 @@ REQUIRED_FILES = (
     "docs/decisions/0002-engineering-foundation.md",
     "infra/README.md",
     "packages/contracts/README.md",
-    "services/case-api/README.md",
     "services/review-agent/README.md",
     "tests/README.md",
 )

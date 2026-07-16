@@ -1513,7 +1513,7 @@ class LocalReviewApi:
             "match_detail": match_detail,
             "stage": stage_labels.get(state.status, state.status.value.replace("_", " ").title()),
             "updated": "Local API",
-            "owner": "Alex Reviewer",
+            "owner": "Solutions Consulting",
             "state": state.to_dict(),
         }
 
