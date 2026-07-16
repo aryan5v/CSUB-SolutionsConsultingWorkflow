@@ -543,3 +543,50 @@ describe("live and adaptive behavior", () => {
     expect(reviewer.getAccessToken).not.toHaveBeenCalled();
   });
 });
+
+describe("vendor contacts live CRUD", () => {
+  it("lists contacts from the live /vendor-contacts endpoint", async () => {
+    const contact = {
+      workspace_id: "csub-demo",
+      contact_id: "contact-1",
+      vendor_id: "vendor-1",
+      name: "Jordan Vendor",
+      email: "jordan@vendor.example",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [contact] }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const contacts = await client.listContacts();
+
+    expect(contacts).toEqual([contact]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts", expect.any(Object));
+  });
+
+  it("scopes the live contact list by vendor id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await client.listContacts("vendor-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts?vendor_id=vendor-1", expect.any(Object));
+  });
+
+  it("creates a contact with a POST to /vendor-contacts", async () => {
+    const created = {
+      workspace_id: "csub-demo",
+      contact_id: "contact-2",
+      vendor_id: "vendor-1",
+      name: "Riley Vendor",
+      email: "riley@vendor.example",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(created));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    const result = await client.createContact({ vendor_id: "vendor-1", name: "Riley Vendor", email: "riley@vendor.example" });
+
+    expect(result).toEqual(created);
+    expect(fetchMock).toHaveBeenCalledWith("/api/vendor-contacts", expect.objectContaining({ method: "POST" }));
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ vendor_id: "vendor-1", name: "Riley Vendor", email: "riley@vendor.example" });
+  });
+});
