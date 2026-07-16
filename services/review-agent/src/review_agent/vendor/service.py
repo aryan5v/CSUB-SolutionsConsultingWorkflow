@@ -852,7 +852,7 @@ class VendorBackend:
             message
             for message in self._list("thread_message", ThreadMessage)
             if message.case_id == invite.case_id
-            and message.author_role is ThreadAuthorRole.VENDOR
+            and message.author_role == ThreadAuthorRole.VENDOR
         ]
         if len(existing) >= MAX_VENDOR_THREAD_MESSAGES:
             raise VendorBackendError(
