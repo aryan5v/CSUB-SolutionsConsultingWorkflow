@@ -332,6 +332,8 @@ class LocalReviewApi:
                 "requested_for_name": "Sample Requester",
                 "requested_for_email": "requester@example.edu",
                 "requested_for_department": "Library",
+                "u_vendor_contact_name": "Vendor Contact",
+                "u_vendor_contact_email": "contact@vendor.example",
             },
         )
 
@@ -1177,6 +1179,23 @@ class LocalReviewApi:
 
     def create_from_servicenow_import(self, external_id: str) -> dict[str, Any]:
         preview = self.preview_servicenow_import(external_id)
+        # Idempotent ticket intake: repeated delivery of the same ticket must
+        # not create a second case (issue #65). The import audit event carries
+        # the external id, so it doubles as the durable dedupe record.
+        for case_id, existing in self._cases.items():
+            for event in existing.audit_sink.events:
+                if (
+                    event.event_type == "servicenow.imported"
+                    and event.detail.get("external_id") == external_id
+                ):
+                    return {
+                        "preview": preview,
+                        "case": {"case_id": case_id, "state": existing.state.to_dict()},
+                        "invite": None,
+                        "intake_url": None,
+                        "invite_pending": None,
+                        "already_imported": True,
+                    }
         created = self.create_case(preview["mapped_values"])
         record = self._require_case(created["case_id"])
         record.audit.record(
@@ -1192,7 +1211,65 @@ class LocalReviewApi:
                 "simulated": True,
             },
         )
-        return {"preview": preview, "case": created}
+        invite_dict, intake_url, invite_pending = self._issue_import_invite(
+            created["case_id"], preview
+        )
+        self._notify(
+            created["case_id"],
+            "servicenow.imported",
+            f"Ticket {external_id} created case {created['case_id']}"
+            + (" with a tracked vendor invitation." if intake_url else "."),
+        )
+        return {
+            "preview": preview,
+            "case": created,
+            "invite": invite_dict,
+            "intake_url": intake_url,
+            "invite_pending": invite_pending,
+            "already_imported": False,
+        }
+
+    def _issue_import_invite(
+        self, case_id: str, preview: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        """Issue the vendor invitation for an imported ticket (issue #65).
+
+        Returns ``(invite, intake_url, pending_reason)``. A ticket without
+        contact details creates the case only and states why no invitation
+        was issued; invitation failures degrade the same way rather than
+        failing the import.
+        """
+        contact_info = preview.get("vendor_contact") or {}
+        name = (contact_info.get("name") or "").strip()
+        email = (contact_info.get("email") or "").strip()
+        if not name or not email:
+            return None, None, "no vendor contact on ticket"
+        vendor_name = str(preview["mapped_values"].get("vendor_name", ""))
+        vendor = next(
+            (
+                item
+                for item in self._vendor.list_vendors()
+                if item.name.casefold() == vendor_name.casefold()
+            ),
+            None,
+        )
+        if vendor is None:
+            return None, None, "vendor record was not registered"
+        contact = next(
+            (
+                item
+                for item in self._vendor.list_contacts(vendor.vendor_id)
+                if item.email.casefold() == email.casefold()
+            ),
+            None,
+        )
+        try:
+            if contact is None:
+                contact = self._vendor.create_contact(vendor.vendor_id, name, email)
+            issued = self._vendor.issue_invite(case_id, contact.contact_id)
+        except VendorBackendError as error:
+            return None, None, f"invitation could not be issued: {error.code}"
+        return issued["invite"], f"/intake#token={issued['token']}", None
 
     def integration_events(self) -> dict[str, Any]:
         return {

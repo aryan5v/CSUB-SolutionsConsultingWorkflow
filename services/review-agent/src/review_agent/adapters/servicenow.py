@@ -89,7 +89,7 @@ _TABLE_SCHEMAS: dict[str, dict] = {
     }
 }
 
-_IMPORT_MAPPING_VERSION = "csub-demo-import-v1"
+_IMPORT_MAPPING_VERSION = "csub-demo-import-v2"
 _IMPORT_FIELD_MAPPING: dict[str, str] = {
     "short_description": "product_name",
     "u_vendor": "vendor_name",
@@ -181,6 +181,14 @@ class MockServiceNowConnector:
             "department": source.get("requested_for_department"),
         }
         mapped["requester"] = requester
+        # Optional side-channel fields (mapping v2, issue #65): a ticket that
+        # names the vendor contact lets the import issue the tracked intake
+        # invitation automatically. Absent fields degrade gracefully — they
+        # never join the strict case-intake mapping above.
+        vendor_contact = {
+            "name": source.get("u_vendor_contact_name"),
+            "email": source.get("u_vendor_contact_email"),
+        }
         return {
             "simulated": True,
             "mapping_version": _IMPORT_MAPPING_VERSION,
@@ -189,6 +197,7 @@ class MockServiceNowConnector:
             "source": source,
             "field_mapping": dict(_IMPORT_FIELD_MAPPING),
             "mapped_values": mapped,
+            "vendor_contact": vendor_contact,
         }
 
     def preview_update(self, case_id: str, decision_version: int) -> WritePreview:

@@ -71,15 +71,25 @@ class CatalogAndImportTests(unittest.TestCase):
         first = api.preview_servicenow_import("RITM0098200")
         second = api.preview_servicenow_import("RITM0098200")
         self.assertEqual(first, second)
-        self.assertEqual(first["mapping_version"], "csub-demo-import-v1")
+        self.assertEqual(first["mapping_version"], "csub-demo-import-v2")
         self.assertTrue(first["simulated"])
         self.assertEqual(first["field_mapping"]["short_description"], "product_name")
         created = api.create_from_servicenow_import("RITM0098200")
         case_id = created["case"]["case_id"]
         events = api.get_audit_events(case_id)
         imported = next(event for event in events if event["event_type"] == "servicenow.imported")
-        self.assertEqual(imported["detail"]["mapping_version"], "csub-demo-import-v1")
+        self.assertEqual(imported["detail"]["mapping_version"], "csub-demo-import-v2")
         self.assertTrue(imported["detail"]["simulated"])
+        # Ticket intake auto-issues the tracked vendor invitation (issue #65).
+        self.assertFalse(created["already_imported"])
+        self.assertIsNone(created["invite_pending"])
+        self.assertIsNotNone(created["invite"])
+        self.assertNotIn("token_hash", created["invite"])
+        self.assertTrue(created["intake_url"].startswith("/intake#token="))
+        # Repeated delivery of the same ticket is deduplicated.
+        repeat = api.create_from_servicenow_import("RITM0098200")
+        self.assertTrue(repeat["already_imported"])
+        self.assertEqual(repeat["case"]["case_id"], case_id)
 
     def test_contracts_reject_untrusted_extra_fields_and_bad_hashes(self) -> None:
         from review_agent.contracts.schema import validate_definition
