@@ -73,7 +73,7 @@ class VendorBackendError(ValueError):
 
 
 class VendorBackend:
-    MAX_RUN_VERSION = 2
+    MAX_RUN_VERSION = 3
 
     def __init__(
         self,
@@ -397,7 +397,8 @@ class VendorBackend:
         product = self._require("product", invite.product_id, VendorProduct)
         vendor = self._require("vendor", product.vendor_id, Vendor)
         contact = self._require("contact", invite.contact_id, VendorContact)
-        return {
+        review = self._vendor_review_projection(case)
+        payload = {
             "invite": {
                 "invite_id": invite.invite_id,
                 "case_id": invite.case_id,
@@ -414,6 +415,9 @@ class VendorBackend:
             "submission": submission.to_vendor_dict(),
             "questions": self.unresolved_questions(token),
         }
+        if review is not None:
+            payload["review"] = review
+        return payload
 
     # Vendor-only draft operations; token determines case and scope -----------
 
@@ -1158,6 +1162,73 @@ class VendorBackend:
                 matched.append(artifact.artifact_id)
         return matched
 
+    def record_changes_requested(
+        self,
+        case_id: str,
+        *,
+        comment: str | None,
+        next_actions: tuple[str, ...] | None = None,
+    ) -> VendorCase:
+        case = self._require("case", case_id, VendorCase)
+        actions = next_actions if next_actions is not None else (
+            "Supplement the requested evidence or answers.",
+            "Finalize again when you are ready for the reviewer to continue.",
+        )
+        updated = replace(
+            case,
+            vendor_visible_comment=comment.strip() if comment and comment.strip() else None,
+            vendor_next_actions=actions,
+        )
+        self._put("case", case.case_id, updated)
+        return updated
+
+    def reopen_submission(self, case_id: str) -> Submission | None:
+        """Return a finalized vendor submission to draft so the same invite can be edited."""
+        submitted = [
+            invite
+            for invite in self._list("invite", VendorInvite)
+            if invite.case_id == case_id and invite.status is InviteStatus.SUBMITTED
+        ]
+        if not submitted:
+            return None
+        invite = max(submitted, key=lambda item: item.submitted_at or "")
+        submission = self._submission_for_invite(invite.invite_id)
+        if submission.status is not SubmissionStatus.FINALIZED:
+            raise VendorBackendError(
+                "submission_not_finalized",
+                "submission is not finalized",
+                status=409,
+            )
+        now = self._now()
+        now_dt = self._now_datetime()
+        expires_at = invite.expires_at
+        expires = datetime.datetime.fromisoformat(expires_at)
+        if expires - now_dt <= datetime.timedelta(days=1):
+            expires_at = (now_dt + datetime.timedelta(days=7)).isoformat()
+        reopened = replace(
+            submission,
+            status=SubmissionStatus.DRAFT,
+            version=submission.version + 1,
+            finalized_at=None,
+            updated_at=now,
+        )
+        reopened_invite = replace(
+            invite,
+            status=InviteStatus.IN_PROGRESS,
+            submitted_at=None,
+            expires_at=expires_at,
+        )
+        self._put("submission", reopened.submission_id, reopened)
+        self._put("invite", reopened_invite.invite_id, reopened_invite)
+        self._event(
+            "submission.reopened",
+            "submission",
+            reopened.submission_id,
+            case_id=case_id,
+            detail={"version": reopened.version},
+        )
+        return reopened
+
     def finalize_submission(self, token: str) -> Submission:
         invite = self._valid_invite(token)
         submission = self._draft_submission(invite)
@@ -1199,7 +1270,12 @@ class VendorBackend:
              CaseLifecycle.APPROVED}
         ),
         CaseLifecycle.CHANGES_REQUESTED: frozenset(
-            {CaseLifecycle.NEEDS_REVIEW, CaseLifecycle.ANALYZING, CaseLifecycle.CHANGES_REQUESTED}
+            {
+                CaseLifecycle.NEEDS_REVIEW,
+                CaseLifecycle.ANALYZING,
+                CaseLifecycle.CHANGES_REQUESTED,
+                CaseLifecycle.SUBMITTED,
+            }
         ),
         CaseLifecycle.DECLINED: frozenset(
             {CaseLifecycle.NEEDS_REVIEW, CaseLifecycle.ANALYZING, CaseLifecycle.CHANGES_REQUESTED,
@@ -1666,12 +1742,11 @@ class VendorBackend:
         previous = (
             self._require("run", previous_id, ReviewRun) if previous_id is not None else None
         )
-        # Exactly one rerun per demo case: run 1 is the initial run, run 2 is the
-        # single permitted rerun with custom instructions (issue #27).
+        # Demo cases allow the initial run plus reruns after vendor resubmission.
         if previous is not None and previous.run_version >= self.MAX_RUN_VERSION:
             raise VendorBackendError(
                 "rerun_limit_reached",
-                "only one rerun is permitted per demo case",
+                "review rerun limit reached for this case",
                 status=409,
             )
         clean_instructions: str | None = None
@@ -1906,7 +1981,18 @@ class VendorBackend:
         if invite.status in {InviteStatus.ISSUED, InviteStatus.OPENED}:
             self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.IN_PROGRESS))
         case = self._require("case", invite.case_id, VendorCase)
-        self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
+        if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
+            self._put("case", case.case_id, replace(case, lifecycle=CaseLifecycle.IN_PROGRESS))
+
+    @staticmethod
+    def _vendor_review_projection(case: VendorCase) -> dict[str, Any] | None:
+        if case.lifecycle is not CaseLifecycle.CHANGES_REQUESTED:
+            return None
+        return {
+            "review_stage": "changes_requested",
+            "comment": case.vendor_visible_comment,
+            "next_actions": list(case.vendor_next_actions),
+        }
 
     def _valid_invite(self, token: str) -> VendorInvite:
         if not isinstance(token, str) or not token:

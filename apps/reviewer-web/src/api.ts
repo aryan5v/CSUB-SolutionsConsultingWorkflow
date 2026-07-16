@@ -234,13 +234,6 @@ export type VendorSubmission = {
   finalized_at: string | null;
 };
 export type VendorQuestion = { requirement_id: string; question: string; expected_evidence: string[] };
-export type VendorInviteReviewStatus = {
-  review_stage: string;
-  reviewer_comment: string | null;
-  next_actions: string[];
-  required_evidence: string[];
-  adapted_to_intake: boolean;
-};
 export type VendorInviteView = {
   invite: Pick<InviteProjection, "invite_id" | "case_id" | "expires_at" | "status">;
   vendor: Pick<VendorRecord, "vendor_id" | "name">;
@@ -248,7 +241,6 @@ export type VendorInviteView = {
   contact: Pick<VendorContact, "contact_id" | "name" | "email">;
   submission: VendorSubmission;
   questions: VendorQuestion[];
-  review_status?: VendorInviteReviewStatus | null;
 };
 // received: evidence artifact linked to the requirement; processing: unvalidated
 // free-text answer only; accepted/invalid/stale: set by evidence validation

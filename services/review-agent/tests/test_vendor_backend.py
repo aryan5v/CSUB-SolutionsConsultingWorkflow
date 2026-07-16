@@ -8,6 +8,7 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
+from review_agent.contracts.vendor import CaseLifecycle, SubmissionStatus
 from review_agent.profiles.service import ProfileError, ReviewProfileService
 from review_agent.vendor.repository import InMemoryVendorRepository
 from review_agent.vendor.service import VendorBackend, VendorBackendError
@@ -190,6 +191,60 @@ class VendorBackendTests(unittest.TestCase):
         first = self.backend.revoke_invite(issued["invite"]["invite_id"])
         second = self.backend.revoke_invite(issued["invite"]["invite_id"])
         self.assertEqual(second, first)
+
+    def test_reopen_preserves_prior_work_and_allows_resubmit(self) -> None:
+        token = self.issue()["token"]
+        self.backend.add_evidence(
+            token,
+            {
+                "filename": "soc2-report.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 100,
+                "sha256": "a" * 64,
+            },
+        )
+        self.backend.set_trust_center_url(token, "https://trust.vendor.example/security")
+        self.backend.run_intake_analysis(token)
+        self.backend.save_answers(token, {"A11Y.VPAT.001": "Initial VPAT note."})
+        first = self.backend.finalize_submission(token)
+        self.assertEqual(first.version, 1)
+        self.assertEqual(first.status, SubmissionStatus.FINALIZED)
+
+        self.backend.transition_case("CASE-1", CaseLifecycle.NEEDS_REVIEW)
+        self.backend.transition_case("CASE-1", CaseLifecycle.CHANGES_REQUESTED)
+        self.backend.record_changes_requested(
+            "CASE-1",
+            comment="Please attach the current VPAT.",
+        )
+        reopened = self.backend.reopen_submission("CASE-1")
+        self.assertIsNotNone(reopened)
+        assert reopened is not None
+        self.assertEqual(reopened.status, SubmissionStatus.DRAFT)
+        self.assertEqual(reopened.version, 2)
+        self.assertTrue(reopened.intake_analysis_complete)
+        self.assertEqual(reopened.answers["A11Y.VPAT.001"], "Initial VPAT note.")
+
+        resolved = self.backend.resolve_invite(token)
+        self.assertEqual(resolved["review"]["review_stage"], "changes_requested")
+        self.assertEqual(resolved["review"]["comment"], "Please attach the current VPAT.")
+        self.assertEqual(resolved["submission"]["status"], "draft")
+
+        self.backend.add_evidence(
+            token,
+            {
+                "filename": "vpat-report.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 120,
+                "sha256": "b" * 64,
+            },
+        )
+        second = self.backend.finalize_submission(token)
+        self.assertEqual(second.version, 2)
+        self.assertEqual(second.status, SubmissionStatus.FINALIZED)
+        self.assertEqual(
+            self.backend.get_case_lifecycle("CASE-1"),
+            "submitted",
+        )
 
     def test_cross_case_and_cross_workspace_isolation(self) -> None:
         self.backend.register_case(
