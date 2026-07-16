@@ -187,8 +187,10 @@ class VendorReviewStatusTests(unittest.TestCase):
 
     def test_revoked_and_expired_invites_cannot_read_status(self) -> None:
         invite_id = self.backend.list_invites("CASE-1")[0].invite_id
-        second = self.backend.issue_invite("CASE-1", self.contact.contact_id)
+        # The invitation lifecycle refuses a second active invite, so the first
+        # must be revoked before a replacement is issued for the same case.
         self.backend.revoke_invite(invite_id)
+        second = self.backend.issue_invite("CASE-1", self.contact.contact_id)
         with self.assertRaises(VendorBackendError) as revoked:
             self.backend.review_status(self.token)
         self.assertEqual(revoked.exception.code, "invite_revoked")
