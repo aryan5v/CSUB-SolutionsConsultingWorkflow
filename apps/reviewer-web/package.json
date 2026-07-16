@@ -10,7 +10,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@xyflow/react": "12.11.2",
     "better-auth": "1.6.23",
     "clsx": "2.1.1",
     "d3-scale": "4.0.2",

@@ -2,6 +2,7 @@ export type ReviewerAuthStatus = "checking" | "authenticated" | "signed_out" | "
 
 export type ReviewerAuthSnapshot = {
   status: ReviewerAuthStatus;
+  name?: string;
   email?: string;
   message?: string;
 };
@@ -22,6 +23,19 @@ export type CognitoAuthConfig = {
   redirectUri: string;
   logoutUri: string;
 };
+
+/**
+ * Development escape hatch for the local reviewer demo. It is deliberately
+ * ineffective in production builds and on non-loopback hosts.
+ */
+export function localReviewerAuthBypassEnabled(
+  environment: Record<string, string | boolean | undefined> = import.meta.env,
+  hostname = typeof window === "undefined" ? "" : window.location.hostname,
+): boolean {
+  return environment.DEV === true
+    && environment.VITE_LOCAL_AUTH_BYPASS === "true"
+    && (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1");
+}
 
 type AuthLocation = Pick<Location, "origin" | "pathname" | "search" | "hash">;
 type AuthHistory = Pick<History, "replaceState">;
@@ -184,7 +198,10 @@ export function createCognitoAuthProvider(
     session = candidate;
     const identity = candidate.idToken ? decodeJwtPayload(candidate.idToken) : null;
     const email = typeof identity?.email === "string" ? identity.email : undefined;
-    return publish({ status: "authenticated", email });
+    const name = typeof identity?.name === "string"
+      ? identity.name
+      : [identity?.given_name, identity?.family_name].filter((value): value is string => typeof value === "string").join(" ") || undefined;
+    return publish({ status: "authenticated", name, email });
   };
 
   const initializeOnce = async (): Promise<ReviewerAuthSnapshot> => {

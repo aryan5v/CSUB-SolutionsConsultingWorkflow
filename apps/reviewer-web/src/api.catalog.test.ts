@@ -65,7 +65,7 @@ describe("one custom rerun", () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/cases/TR-260714-014/analyze");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       rerun: true,
       custom_instruction: "recheck the VPAT against the requested version",
     });

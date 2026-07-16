@@ -162,7 +162,7 @@ export function createBetterAuthReviewerProvider(dependencies: ProviderDependenc
       return publish({ status: "error", message: provided.error?.message ?? "Your campus access token could not be retrieved. Sign in again." });
     }
     token = provided.data.accessToken;
-    return publish({ status: "authenticated", email: user.email });
+    return publish({ status: "authenticated", name: user.name, email: user.email });
   };
 
   return {
