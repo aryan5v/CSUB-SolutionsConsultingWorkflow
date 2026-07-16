@@ -1151,6 +1151,11 @@ export class PlatformStack extends cdk.Stack {
       ['/reminders/run', [apigwv2.HttpMethod.POST]],
       ['/review-queue', [apigwv2.HttpMethod.GET]],
       ['/integration-events', [apigwv2.HttpMethod.GET]],
+      // Post-approval expiry monitoring (issue #53): reviewers read the
+      // renewals projection and can trigger the sweep manually; the durable
+      // EventBridge Scheduler (below) invokes the same sweep automatically.
+      ['/renewals', [apigwv2.HttpMethod.GET]],
+      ['/renewals/run', [apigwv2.HttpMethod.POST]],
       ['/vendors', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
       ['/vendors/{id}', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH, apigwv2.HttpMethod.DELETE]],
       ['/vendor-products', [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST]],
@@ -1214,6 +1219,48 @@ export class PlatformStack extends cdk.Stack {
       path: '/slack/events',
       methods: [apigwv2.HttpMethod.POST],
       integration,
+    });
+
+    // ====================================================================
+    // Durable expiry-monitoring schedule (issue #53)
+    // ====================================================================
+    // Purpose: run the post-approval evidence expiry sweep (lead-time notices
+    //   and scoped re-review case creation) on a fixed cadence so coverage
+    //   lapses are caught without a human trigger. The Scheduler invokes the
+    //   existing deterministic Lambda directly (its IAM role is the
+    //   authorization — no reviewer JWT), passing {"scheduled_task":
+    //   "renewals_run"}; the same sweep is also exposed at POST /renewals/run
+    //   for manual reviewer use.
+    // Region: deploys in the stack region (us-west-2 per project guardrails).
+    // Cost: one AWS::Scheduler::Schedule (free tier covers well beyond one
+    //   daily invocation) plus one short Lambda run per day — negligible.
+    // Teardown: destroyed with the stack (removalPolicy DESTROY in demo envs);
+    //   no external state. See docs/decisions/0011-expiry-monitoring-schedule.md.
+    const renewalSchedulerRole = new iam.Role(this, 'RenewalSchedulerRole', {
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
+        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+      }),
+      description: 'Least-privilege EventBridge Scheduler role: invoke only the case proxy Lambda.',
+    });
+    renewalSchedulerRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'],
+        resources: [this.proxyFunction.functionArn],
+      }),
+    );
+    new scheduler.CfnSchedule(this, 'RenewalSweepSchedule', {
+      name: `csub-renewal-sweep-${appEnv}`,
+      description: 'Daily post-approval evidence expiry sweep (issue #53).',
+      state: 'ENABLED',
+      flexibleTimeWindow: { mode: 'OFF' },
+      scheduleExpression: 'rate(1 day)',
+      scheduleExpressionTimezone: 'America/Los_Angeles',
+      target: {
+        arn: this.proxyFunction.functionArn,
+        roleArn: renewalSchedulerRole.roleArn,
+        input: JSON.stringify({ scheduled_task: 'renewals_run' }),
+        retryPolicy: { maximumRetryAttempts: 2 },
+      },
     });
 
     // ====================================================================
