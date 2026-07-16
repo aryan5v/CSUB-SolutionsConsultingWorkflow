@@ -156,12 +156,45 @@ def fake_dynamo_tables() -> dict[str, FakeTable]:
     return tables
 
 
+class FakeEvidenceUploads:
+    def __init__(self) -> None:
+        self.records: dict[tuple[str, str, str], dict] = {}
+
+    def issue(self, **kwargs) -> dict:
+        value = {
+            **kwargs,
+            "processing_state": "queued",
+            "warnings": [],
+            "model_use_allowed": False,
+            "claim_token": "internal-claim-must-not-leak",
+            "upload": {
+                "url": "https://uploads.example/quarantine",
+                "method": "POST",
+                "fields": {"key": f"quarantine/{kwargs['workspace_id']}/{kwargs['case_id']}/{kwargs['artifact_id']}"},
+            },
+        }
+        self.records[(kwargs["workspace_id"], kwargs["case_id"], kwargs["artifact_id"])] = value
+        return value
+
+    def statuses(self, *, workspace_id: str, case_id: str, artifact_ids: list[str]) -> list[dict]:
+        return [
+            self.records[(workspace_id, case_id, artifact_id)]
+            for artifact_id in artifact_ids
+            if (workspace_id, case_id, artifact_id) in self.records
+        ]
+
+
 class LambdaApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = InMemoryWorkspaceStore()
         seed_workspace(self.store)
         self.origin = "https://demo.example"
-        self.handler = create_handler(self.store, allowed_origins=[self.origin])
+        self.evidence_uploads = FakeEvidenceUploads()
+        self.handler = create_handler(
+            self.store,
+            allowed_origins=[self.origin],
+            evidence_uploads=self.evidence_uploads,
+        )
 
     def event(
         self,
@@ -612,6 +645,33 @@ class LambdaApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(evidence_response["statusCode"], 200)
+        self.assertEqual(artifact["processing_state"], "queued")
+        self.assertNotIn("claim_token", artifact)
+        self.assertEqual(artifact["upload"]["method"], "POST")
+        self.assertNotIn("authorization", artifact["upload"]["fields"])
+        status_response, statuses = self.call(
+            "GET",
+            "/vendor/invites/current/evidence",
+            headers=headers,
+            authenticated=False,
+        )
+        self.assertEqual(status_response["statusCode"], 200)
+        self.assertEqual([item["artifact_id"] for item in statuses["items"]], [artifact["artifact_id"]])
+        self.assertNotIn("claim_token", json.dumps(statuses))
+        reviewer_response, reviewer_statuses = self.call(
+            "GET", "/cases/TR-260714-014/documents"
+        )
+        self.assertEqual(reviewer_response["statusCode"], 200)
+        self.assertIn(artifact["artifact_id"], [item["artifact_id"] for item in reviewer_statuses["items"]])
+        other_invite = self._issue_invite()
+        other_response, other_statuses = self.call(
+            "GET",
+            "/vendor/invites/current/evidence",
+            headers={"authorization": f"Bearer {other_invite['token']}"},
+            authenticated=False,
+        )
+        self.assertEqual(other_response["statusCode"], 200)
+        self.assertEqual(other_statuses["items"], [])
         trust_response, _ = self.call(
             "POST",
             "/vendor/invites/current/trust-center",
