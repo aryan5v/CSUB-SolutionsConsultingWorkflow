@@ -9,7 +9,7 @@ import _bootstrap  # noqa: F401
 from review_agent.audit.log import AuditLog, InMemoryAuditSink
 from review_agent.contracts.audit import ActorType, AuditEvent
 from review_agent.contracts.case import CaseIntake, DataClassification, Requester
-from review_agent.contracts.schema import ContractValidationError, validate
+from review_agent.contracts.schema import ContractValidationError, validate, validate_definition
 from review_agent.samples import low_risk_case, medium_risk_case, sample_records
 from review_agent.lookup.approved_software import ApprovedSoftwareIndex
 from review_agent.orchestration.graph import ReviewWorkflow
@@ -72,6 +72,33 @@ class ContractValidationTests(unittest.TestCase):
         invalid = {**payload, "line": 0}
         with self.assertRaises(ContractValidationError):
             validate(invalid, "source-coordinates")
+
+    def test_vendor_public_decision_fields_have_schema_bounds(self) -> None:
+        payload = {
+            "case_id": "CASE-1",
+            "decision_version": 1,
+            "reviewer_id": "reviewer@example.edu",
+            "action": "request_info",
+            "decided_at": "2026-07-15T20:30:00+00:00",
+            "vendor_visible_comment": "c" * 2000,
+            "vendor_next_actions": ["a" * 500] * 10,
+        }
+        self.assertIs(
+            validate_definition(payload, "servicenow-operations", "HumanDecision"),
+            payload,
+        )
+        with self.assertRaises(ContractValidationError):
+            validate_definition(
+                {**payload, "vendor_visible_comment": "c" * 2001},
+                "servicenow-operations",
+                "HumanDecision",
+            )
+        with self.assertRaises(ContractValidationError):
+            validate_definition(
+                {**payload, "vendor_next_actions": ["action"] * 11},
+                "servicenow-operations",
+                "HumanDecision",
+            )
 
     def test_email_validation_rejects_whitespace_controls_and_extra_at_signs(self) -> None:
         for email in (

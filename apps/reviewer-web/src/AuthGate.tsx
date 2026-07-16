@@ -1,9 +1,28 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { LockKeyhole, LogOut, ShieldCheck } from "lucide-react";
-import { reviewerAuth, type ReviewerAuthProvider, type ReviewerAuthSnapshot } from "./auth";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { LockKeyhole } from "lucide-react";
+import { localReviewerAuthBypassEnabled, reviewerAuth, type ReviewerAuthProvider, type ReviewerAuthSnapshot } from "./auth";
+import "./app.css";
 
-export function reviewerAuthenticationRequired(mode: "live" | "fixture"): boolean {
-  return mode === "live";
+export function reviewerAuthenticationRequired(mode: "live" | "fixture", localBypass = false): boolean {
+  return mode === "live" && !localBypass;
+}
+
+type ReviewerSession = {
+  name: string;
+  email: string;
+  mode: "authenticated" | "local-bypass" | "fixture";
+  signOut: () => void;
+};
+
+const ReviewerSessionContext = createContext<ReviewerSession>({
+  name: "Reviewer",
+  email: "reviewer@localhost",
+  mode: "fixture",
+  signOut: () => { window.location.assign("/"); },
+});
+
+export function useReviewerSession(): ReviewerSession {
+  return useContext(ReviewerSessionContext);
 }
 
 export default function AuthGate({
@@ -16,9 +35,17 @@ export default function AuthGate({
   provider?: ReviewerAuthProvider;
 }) {
   const [auth, setAuth] = useState<ReviewerAuthSnapshot>(() => provider.getSnapshot());
+  const localBypass = localReviewerAuthBypassEnabled();
+  const session = useMemo<ReviewerSession>(() => {
+    if (localBypass) return { name: "Local Reviewer", email: "reviewer@localhost", mode: "local-bypass", signOut: () => window.location.assign("/") };
+    if (mode === "fixture") return { name: "Fixture Reviewer", email: "reviewer@fixture.local", mode: "fixture", signOut: () => window.location.assign("/") };
+    const email = auth.email ?? "reviewer@csub.edu";
+    const emailName = email.split("@")[0].split(/[._-]/).filter(Boolean).map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`).join(" ");
+    return { name: (auth.name ?? emailName) || "Reviewer", email, mode: "authenticated", signOut: () => provider.signOut() };
+  }, [auth.email, auth.name, localBypass, mode, provider]);
 
   useEffect(() => {
-    if (!reviewerAuthenticationRequired(mode)) return;
+    if (!reviewerAuthenticationRequired(mode, localBypass)) return;
     const unsubscribe = provider.subscribe(setAuth);
     void provider.initialize().then(setAuth);
     const expiryCheck = window.setInterval(() => provider.getAccessToken(), 15_000);
@@ -26,19 +53,12 @@ export default function AuthGate({
       unsubscribe();
       window.clearInterval(expiryCheck);
     };
-  }, [mode, provider]);
+  }, [localBypass, mode, provider]);
 
-  if (!reviewerAuthenticationRequired(mode)) return children;
+  if (!reviewerAuthenticationRequired(mode, localBypass)) return <ReviewerSessionContext.Provider value={session}>{children}</ReviewerSessionContext.Provider>;
 
   if (auth.status === "authenticated") {
-    return <>
-      <div className="reviewer-session" role="status">
-        <ShieldCheck size={15} aria-hidden="true" />
-        <span>Authenticated reviewer{auth.email ? ` · ${auth.email}` : ""}</span>
-        <button type="button" onClick={() => provider.signOut()}><LogOut size={14} aria-hidden="true" />Sign out</button>
-      </div>
-      {children}
-    </>;
+    return <ReviewerSessionContext.Provider value={session}>{children}</ReviewerSessionContext.Provider>;
   }
 
   return <main className="auth-gate" id="main-content">
@@ -53,7 +73,6 @@ export default function AuthGate({
         <LockKeyhole size={15} aria-hidden="true" />Go to sign-in
       </button>}
       {auth.status === "error" && <div className="auth-error" role="alert">{auth.message}</div>}
-      <small>Campus single sign-on is the only way in. Live mode never falls back to fixture records.</small>
     </section>
   </main>;
 }

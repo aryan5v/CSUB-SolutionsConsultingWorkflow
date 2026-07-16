@@ -132,23 +132,23 @@ function CheckMark() {
 const steps: Array<{ n: string; title: string; body: string; tile: TileVariant }> = [
   {
     n: "01",
-    title: "AI reads the evidence",
+    title: "Specialists read the evidence",
     body:
-      "After intake and the approved-software lookup, security and accessibility specialists read the vendor and institutional documents in parallel. Approved research on official vendor domains fills gaps that the evidence supports. A citation checker removes any claim the sources do not back.",
+      "Security and accessibility profiles review case-specific HECVAT, SOC 2, VPAT/ACR, and related evidence in parallel. Each finding keeps its source.",
     tile: "doc",
   },
   {
     n: "02",
     title: "Deterministic rules set the route",
     body:
-      "Ordinary code, not the model, applies the versioned flowchart and decision-tree rules. It returns the risk route, the required evidence, the conflicts, and the citations. A model can explain that result. It cannot change it.",
+      "Versioned rules return the risk route, required evidence, conflicts, and citations. The assistant can explain the result, but the rules set it.",
     tile: "spark",
   },
   {
     n: "03",
     title: "A person makes the decision",
     body:
-      "Reviewers see the merged findings and the drafted low or medium risk packet, confirm any fuzzy match, then approve, reject, or ask for more information. Write-back needs a second explicit confirmation and goes to a mock ServiceNow connector.",
+      "A reviewer checks the findings, confirms non-exact matches, and approves, rejects, or requests more information. Mock ServiceNow write-back needs a second confirmation.",
     tile: "check",
   },
 ];
@@ -157,16 +157,16 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
   {
     title: "Approved-software flag",
     body:
-      "If the product is already on the export, Vetted shows it as a candidate. If it is not, the case gets a flag for review rather than an automatic rejection. Fuzzy or semantic matches still need a reviewer to confirm them.",
+      "Vetted checks the approved-software export and shows possible matches. A missing entry is a review flag, not an automatic rejection. Reviewers confirm non-exact matches.",
     iconBg: "#F7DC6F",
     icon: (
       <path d="M3 10H9M9 10L13 5H17M9 10L13 15H17M15 3L17 5L15 7M15 13L17 15L15 17" fill="none" stroke="#333333" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     ),
   },
   {
-    title: "Specialists draft, rules enforce",
+    title: "Security and accessibility specialists",
     body:
-      "Specialists extract and summarize security, accessibility, and evidence findings. The business-rules engine calculates the risk route and the required documents from the partner flowcharts and decision trees. The model drafts. The rules hold the policy.",
+      "Specialists extract and summarize findings in parallel. The rules engine calculates the route and required documents from versioned campus criteria.",
     iconBg: "#3178C6",
     icon: (
       <>
@@ -178,7 +178,7 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
   {
     title: "The reviewer decides",
     body:
-      "The reviewer gets a low-risk recommendation or an editable medium-risk TAAP and security packet. High-risk, contradictory, unsupported, or incomplete cases escalate. Nothing is approved, signed, or written to ServiceNow without a recorded human decision.",
+      "The reviewer receives an editable packet with security and accessibility findings. High-risk, conflicting, unsupported, or incomplete cases escalate.",
     iconBg: "#333333",
     icon: (
       <>
@@ -190,14 +190,15 @@ const features: Array<{ title: string; body: string; iconBg: string; icon: React
 ];
 
 const stats: Array<{ value: string; label: string }> = [
-  { value: "Extract", label: "specialists pull facts from policies, HECVAT, SOC 2, VPAT, and similar sources" },
-  { value: "Route", label: "deterministic rules set the risk path: low, medium, or escalate" },
-  { value: "Decide", label: "the reviewer approves, rejects, or asks for more information" },
+  { value: "Extract", label: "Specialists pull cited facts from the submitted evidence." },
+  { value: "Route", label: "Versioned rules set the risk path." },
+  { value: "Decide", label: "A reviewer makes the final call." },
 ];
 
 export default function Landing() {
   return (
     <div className="vp">
+      <a className="vp-skip" href="#main-content">Skip to main content</a>
       <div className="vp-band" aria-hidden="true" />
 
       <div className="vp-inner">
@@ -206,17 +207,15 @@ export default function Landing() {
             <img className="vp-brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
             Vetted
           </a>
-          <div className="vp-nav-actions">
-            <a className="vp-nav-login" href="/login">
-              Sign in
+          <nav className="vp-nav-actions" aria-label="Account">
+            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/login">
+              Reviewer sign in
             </a>
-            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/signup">
-              Create account
-            </a>
-          </div>
+          </nav>
         </header>
 
-        <section className="vp-hero" id="top">
+        <main id="main-content">
+        <section className="vp-hero" id="top" aria-labelledby="hero-title">
           <svg className="vp-dots" viewBox="0 0 480 150" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <defs>
               <pattern id="dotGrid" width="22" height="22" patternUnits="userSpaceOnUse">
@@ -232,7 +231,7 @@ export default function Landing() {
           </svg>
 
           <div className="vp-hero-copy land-fade-up">
-            <h1 className="vp-hero-title">
+            <h1 className="vp-hero-title" id="hero-title">
               Vetted.
               <br />
               Evidence in.
@@ -240,27 +239,26 @@ export default function Landing() {
               Decision out.
             </h1>
             <p className="vp-hero-lead land-fade-up-delay">
-              Requesters submit proposed software and vendor evidence. Vetted checks the approved-software export,
-              extracts facts with bounded specialists, applies deterministic policy rules, and drafts a cited packet.
-              A reviewer then makes the final call.
+              Vetted checks proposed software, reviews security and accessibility evidence, applies versioned rules,
+              and drafts a cited packet for a reviewer.
             </p>
             <div className="vp-cta-row land-fade-up-delay">
-              <a className="vp-btn vp-btn-ink" href="/signup">
-                Create account
+              <a className="vp-btn vp-btn-ink" href="/login">
+                Reviewer sign in
                 <ArrowIcon />
               </a>
-              <a className="vp-btn vp-btn-primary" href="/login">
-                Sign in
+              <a className="vp-btn vp-btn-primary" href="/intake">
+                Submit vendor evidence
               </a>
             </div>
-            <div className="vp-checks land-fade-up-delay-2">
-              {["AI reads the evidence", "Rules set the route", "People approve"].map((label) => (
-                <div key={label} className="vp-check">
+            <ul className="vp-checks land-fade-up-delay-2">
+              {["Security and accessibility specialists", "Rules set the route", "People approve"].map((label) => (
+                <li key={label} className="vp-check">
                   <CheckMark />
                   {label}
-                </div>
+                </li>
               ))}
-            </div>
+            </ul>
           </div>
 
           <div className="vp-scene land-fade-up-delay-2" aria-hidden="true">
@@ -285,22 +283,22 @@ export default function Landing() {
                   <circle cx="7.5" cy="7.5" r="7" fill="#3178C6" />
                   <path d="M4.5 7.8L6.6 9.9L10.5 5.5" fill="none" stroke="#FFFFFF" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                Flag only, still waiting on human review
+                Flagged for review
               </div>
             </div>
           </div>
         </section>
 
-        <section className="vp-trusted" id="product">
-          <div className="vp-trusted-label">Eight moving parts, one review path</div>
-          <div className="vp-trusted-row">
+        <section className="vp-trusted" id="product" aria-labelledby="parts-heading">
+          <h2 className="vp-trusted-label" id="parts-heading">Eight moving parts, one review path</h2>
+          <ul className="vp-trusted-row">
             {["UI", "APIs", "Storage", "LangGraph", "Rules", "Review", "ServiceNow mock", "AWS"].map((part) => (
-              <div key={part} className="vp-trusted-item">
-                <span className="vp-trusted-mark" />
+              <li key={part} className="vp-trusted-item">
+                <span className="vp-trusted-mark" aria-hidden="true" />
                 {part}
-              </div>
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
 
         <svg className="vp-waves" viewBox="0 0 1200 80" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -323,10 +321,10 @@ export default function Landing() {
           <path d="M0 46 C50 26 100 26 150 46 S250 66 300 46 S400 26 450 46 S550 66 600 46 S700 26 750 46 S850 66 900 46 S1000 26 1050 46 S1150 66 1200 46" fill="none" stroke="url(#waveAccent)" strokeWidth="1.5" />
         </svg>
 
-        <section className="vp-block" id="workflow">
+        <section className="vp-block" id="workflow" aria-labelledby="workflow-heading">
           <div className="vp-header">
             <p className="vp-eyebrow">HOW A REVIEW RUNS</p>
-            <h2 className="vp-h2">You hand over the documents. Three layers finish the review.</h2>
+            <h2 className="vp-h2" id="workflow-heading">From evidence to a reviewer decision.</h2>
           </div>
           <div className="vp-steps">
             {steps.map((step) => (
@@ -342,7 +340,7 @@ export default function Landing() {
           </div>
         </section>
 
-        <section className="vp-block" id="trust">
+        <section className="vp-block" id="trust" aria-labelledby="trust-heading">
           <svg className="vp-smoke" viewBox="-170 -170 530 530" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <defs>
               <radialGradient id="smokeA">
@@ -363,7 +361,7 @@ export default function Landing() {
 
           <div className="vp-header">
             <p className="vp-eyebrow">WHAT A FLAG MEANS</p>
-            <h2 className="vp-h2">A missing list entry is not a rejection.</h2>
+            <h2 className="vp-h2" id="trust-heading">A missing list entry is not a rejection.</h2>
           </div>
 
           <div className="vp-features">
@@ -390,7 +388,7 @@ export default function Landing() {
           ))}
         </section>
 
-        <section className="vp-cta-wrap" id="demo">
+        <section className="vp-cta-wrap" id="demo" aria-labelledby="cta-heading">
           <div className="vp-cta">
             <svg className="vp-cta-shader" viewBox="0 0 1056 320" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
               <defs>
@@ -407,10 +405,9 @@ export default function Landing() {
               <rect width="1056" height="320" fill="url(#ctaBlue)" />
             </svg>
             <div className="vp-cta-copy">
-              <h2 className="vp-cta-title">From request to mock ServiceNow, with a person in the middle.</h2>
+              <h2 className="vp-cta-title" id="cta-heading">Start a review with the evidence you have.</h2>
               <p className="vp-cta-lead">
-                The path runs frontend, APIs, storage, LangGraph specialists, business rules, the reviewer workspace,
-                and the mock ServiceNow connector, on AWS.
+                Track the request, evidence, policy route, reviewer decision, and mock ServiceNow handoff in one workspace.
               </p>
               <a className="vp-btn vp-btn-primary" href="/intake">
                 Submit a vendor for review
@@ -420,18 +417,18 @@ export default function Landing() {
             <Machine className="vp-cta-art" />
           </div>
         </section>
+        </main>
 
         <footer className="vp-footer">
           <div className="vp-footer-brand">
             <PixelLogo size={24} />
-            Vetted. AI reads, rules route, people decide.
+            Vetted. Specialists draft, rules route, people decide.
           </div>
-          <div className="vp-footer-links">
+          <nav className="vp-footer-links" aria-label="Footer">
             <a href="/login">Sign in</a>
-            <a href="/signup">Create account</a>
             <a href="/intake">Submit a vendor</a>
             <span className="vp-footer-copy">CSU AI Summer Camp 2026</span>
-          </div>
+          </nav>
         </footer>
       </div>
     </div>

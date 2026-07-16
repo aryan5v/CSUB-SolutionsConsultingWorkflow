@@ -65,6 +65,22 @@ class VendorHttpRouteTests(unittest.TestCase):
         self.assertEqual(status, 201)
         token = quote(invite["token"], safe="")
         self.assertNotIn("token_hash", invite["invite"])
+        # A brand-new invite is not yet due a reminder; the sweep and the
+        # reviewer reminder controls are reachable over HTTP.
+        sweep_status, sweep = self.request("/reminders/run", "POST", {})
+        self.assertEqual(sweep_status, 200)
+        self.assertEqual(sweep["count"], 0)
+        history_status, history = self.request(f"/cases/{self.case_id}/reminders")
+        self.assertEqual(history_status, 200)
+        self.assertEqual(history, {"case_id": self.case_id, "paused": False, "items": []})
+        self.assertEqual(
+            self.request(f"/cases/{self.case_id}/reminders/pause", "POST", {})[1]["paused"],
+            True,
+        )
+        self.assertEqual(
+            self.request(f"/cases/{self.case_id}/reminders/resume", "POST", {})[1]["paused"],
+            False,
+        )
         self.assertEqual(self.request(f"/vendor/invites/{token}")[0], 200)
         self.assertEqual(self.request(f"/vendor/invites/{token}/open", "POST", {})[0], 200)
         self.assertEqual(
@@ -116,7 +132,16 @@ class VendorHttpRouteTests(unittest.TestCase):
                 self.request(f"/vendor/invites/{token}/answers", "POST", {"answers": answers})[0],
                 200,
             )
+        status_code, review_status = self.request(f"/vendor/invites/{token}/status")
+        self.assertEqual(status_code, 200)
+        self.assertIn(review_status["review_stage"], {"collecting_evidence", "under_review"})
+        self.assertTrue(review_status["checklist"])
         self.assertEqual(self.request(f"/vendor/invites/{token}/finalize", "POST", {})[0], 200)
+        # The status projection stays readable after the submission is finalized.
+        status_code, submitted_status = self.request(f"/vendor/invites/{token}/status")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(submitted_status["submission_status"], "finalized")
+        self.assertEqual(submitted_status["review_stage"], "under_review")
         state = self.api._cases[self.case_id].state
         state.human_decision = cast(Any, object())
         state.write_preview = cast(Any, object())

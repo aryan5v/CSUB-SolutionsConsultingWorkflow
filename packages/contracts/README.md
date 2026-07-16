@@ -16,6 +16,7 @@ schemas/
   policy-result.schema.json      # Deterministic PolicyResult (FR-3)
   conflict.schema.json           # Conflict registry entry (FR-3, never model-resolved)
   evidence-record.schema.json    # EvidenceRecord (FR-4)
+  evidence-processing.schema.json # Quarantine state and source-linked extracted chunks (FR-4)
   citation.schema.json           # Citation grounding a claim (FR-5)
   packet.schema.json             # Low/medium-risk Packet (FR-6)
   audit-event.schema.json        # Structured AuditEvent (sec 7)

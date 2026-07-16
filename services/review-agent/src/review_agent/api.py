@@ -13,8 +13,9 @@ import hashlib
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
+from .adapters.email import EmailSender, build_email_sender
 from .adapters.extraction import EvidenceExtractor, build_evidence_extractor
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
 from .adapters.notifications import Notifier, build_notifier
@@ -35,7 +36,8 @@ from .contracts.packet import PacketSection
 from .contracts.schema import ContractValidationError, validate, validate_definition
 from .contracts.servicenow import HumanDecision, ReviewAction
 from .contracts.software import ApprovedSoftwareRecord
-from .contracts.vendor import CaseLifecycle, SoftwareCatalogEntry
+from .contracts.vendor import CaseLifecycle, InviteStatus, SoftwareCatalogEntry
+from .evidence.ingestion import EvidenceUploadIssuer, build_evidence_upload_issuer
 from .ingestion.software_workbook import normalized_identity
 from .lookup.approved_software import ApprovedSoftwareIndex
 from .orchestration.graph import ReviewWorkflow
@@ -45,11 +47,14 @@ from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
 from .research import VendorResearchProvider, build_research_provider
+from .timestamps import parse_utc_timestamp
 from .samples import escalation_case, low_risk_case, sample_records
+from .vendor.delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
 _FIXED_CLOCK = "2026-07-14T20:00:00+00:00"
+_UNSET = object()
 
 
 class _UnsetResearchProvider:
@@ -102,6 +107,50 @@ def _default_evidence_storage(config: AppConfig) -> StorageClient:
     return InMemoryStorage()
 
 
+def vendor_link_settings() -> dict[str, Any]:
+    """Env-configured vendor intake-link settings, shared with the Lambda wiring.
+
+    ``VENDOR_INTAKE_BASE_URL`` is the public origin of the vendor intake page
+    (the simulated default mirrors the email adapter's non-routable sender
+    domain). ``VENDOR_LINK_SECRET`` keys the sealed invite tokens so reminder
+    emails can repeat the vendor's intake link across restarts; when unset each
+    backend instance uses a process-local secret.
+    """
+    secret = os.environ.get("VENDOR_LINK_SECRET") or None
+    return {
+        "intake_base_url": os.environ.get("VENDOR_INTAKE_BASE_URL")
+        or "https://vetted.invalid/intake",
+        "link_secret": secret.encode("utf-8") if secret else None,
+    }
+
+
+_PUBLIC_EVIDENCE_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "case_id",
+        "product_id",
+        "filename",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "processing_state",
+        "source_version_id",
+        "detected_content_type",
+        "source_location",
+        "warnings",
+        "failure_code",
+        "untrusted",
+        "model_use_allowed",
+        "upload",
+    }
+)
+
+
+def _public_evidence_fields(value: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist public evidence state so internal leases and claims cannot escape."""
+    return {key: item for key, item in value.items() if key in _PUBLIC_EVIDENCE_FIELDS}
+
+
 class LocalApiError(RuntimeError):
     """Expected application error with an HTTP-compatible status and code."""
 
@@ -152,7 +201,11 @@ class LocalReviewApi:
         notifier: Notifier | None = None,
         evidence_storage: StorageClient | None = None,
         evidence_extractor: EvidenceExtractor | None = None,
+        email_sender: EmailSender | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
+        evidence_uploads: EvidenceUploadIssuer | None = None,
         config: AppConfig | None = None,
+        clock: Callable[[], datetime.datetime] | None = None,
         research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
             _RESEARCH_PROVIDER_UNSET
         ),
@@ -173,6 +226,10 @@ class LocalReviewApi:
         self._model_client = model_client or build_model_client(self._config)
         self._packet_storage: StorageClient = packet_storage or _default_packet_storage(self._config)
         self._notifier: Notifier = notifier or build_notifier(self._config)
+        self._email_sender: EmailSender = email_sender or build_email_sender(self._config)
+        self._evidence_uploads: EvidenceUploadIssuer = (
+            evidence_uploads or build_evidence_upload_issuer()
+        )
         records = sample_records() + [
             ApprovedSoftwareRecord(
                 record_id="approved-row-172",
@@ -191,7 +248,9 @@ class LocalReviewApi:
         self._writeback_config = writeback_config or LocalWritebackConfig()
         self._connector = MockServiceNowConnector()
         self._vendor_repository = InMemoryVendorRepository()
-        local_clock = lambda: datetime.datetime.now(datetime.timezone.utc)
+        local_clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
+        self._clock = local_clock
+        self._delivery_claim_store = delivery_claim_store or InMemoryDeliveryClaimStore()
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
         # Evidence bytes live behind the storage seam; locally an in-memory
@@ -210,7 +269,9 @@ class LocalReviewApi:
             clock=local_clock,
             evidence_storage=self._evidence_storage,
             extractor=self._evidence_extractor,
+            **vendor_link_settings(),
             research_provider=self._research_provider,
+            delivery_claim_store=self._delivery_claim_store,
         )
         catalog_entries = []
         for record in records:
@@ -329,27 +390,63 @@ class LocalReviewApi:
 
     def add_document(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self._require_case(case_id)
+        self._validate_vendor_payload(payload, "vendor-intake", "EvidenceMetadata")
         filename = self._required_text(payload, "filename")
-        document_id = str(payload.get("document_id") or f"DOC-{len(record.documents) + 1:03d}")
-        metadata = {
-            "document_id": document_id,
-            "filename": filename,
-            "content_type": str(payload.get("content_type") or "application/octet-stream"),
-            "scope": str(payload.get("scope") or "case"),
-            "untrusted": True,
-        }
-        record.documents.append(metadata)
-        record.state.document_ids.append(document_id)
-        record.audit.record(
-            event_id=f"{case_id}-document-{len(record.documents):03d}",
-            event_type="document.registered",
-            case_id=case_id,
-            occurred_at=self._now(),
-            actor_type=self._requester_actor(),
-            workflow_version=record.state.workflow_version,
-            detail={"document_id": document_id, "content_type": metadata["content_type"]},
+        digest = str(payload["sha256"]).lower()
+        existing = next(
+            (item for item in record.documents if item.get("sha256") == digest),
+            None,
         )
-        return metadata
+        if existing is not None:
+            if any(
+                existing.get(key) != payload.get(key)
+                for key in ("filename", "content_type", "size_bytes")
+            ):
+                raise LocalApiError(
+                    409,
+                    "evidence_identity_conflict",
+                    "sha256 is already registered with different immutable metadata",
+                )
+            metadata = existing
+        else:
+            document_id = f"DOC-{len(record.documents) + 1:03d}"
+            metadata = {
+                "document_id": document_id,
+                "artifact_id": document_id,
+                "filename": filename,
+                "content_type": payload["content_type"],
+                "size_bytes": payload["size_bytes"],
+                "sha256": digest,
+                "scope": "case",
+                "untrusted": True,
+            }
+            record.documents.append(metadata)
+            record.state.document_ids.append(document_id)
+            record.audit.record(
+                event_id=f"{case_id}-document-{len(record.documents):03d}",
+                event_type="document.registered",
+                case_id=case_id,
+                occurred_at=self._now(),
+                actor_type=self._requester_actor(),
+                workflow_version=record.state.workflow_version,
+                detail={"document_id": document_id, "content_type": metadata["content_type"]},
+            )
+        _case, product, vendor = self._vendor_call(
+            lambda: self._vendor.case_upload_context(case_id)
+        )
+        registration = self._evidence_uploads.issue(
+            workspace_id=self._vendor.workspace_id,
+            case_id=case_id,
+            product_id=product.product_id,
+            vendor_id=vendor.vendor_id,
+            submission_id=f"case:{case_id}",
+            artifact_id=str(metadata["artifact_id"]),
+            filename=str(metadata["filename"]),
+            content_type=str(metadata["content_type"]),
+            size_bytes=int(metadata["size_bytes"]),
+            sha256=str(metadata["sha256"]),
+        )
+        return {**metadata, **_public_evidence_fields(registration)}
 
     def analyze_case(
         self,
@@ -413,6 +510,31 @@ class LocalReviewApi:
             action = ReviewAction(str(payload["action"]))
         except (KeyError, ValueError) as error:
             raise LocalApiError(400, "invalid_action", "action must be approve, reject, or request_info") from error
+
+        raw_vendor_comment = payload.get("vendor_visible_comment")
+        vendor_visible_comment = (
+            raw_vendor_comment.strip() if isinstance(raw_vendor_comment, str) else None
+        )
+        if raw_vendor_comment is not None and not vendor_visible_comment:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_visible_comment",
+                "vendor_visible_comment must contain visible text",
+            )
+        raw_vendor_actions = payload.get("vendor_next_actions", [])
+        vendor_next_actions = tuple(item.strip() for item in raw_vendor_actions)
+        if any(not item for item in vendor_next_actions):
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions must contain visible text",
+            )
+        if action is not ReviewAction.REQUEST_INFO and vendor_next_actions:
+            raise LocalApiError(
+                400,
+                "invalid_vendor_next_actions",
+                "vendor_next_actions are only allowed when requesting information",
+            )
 
         if state.status is WorkflowStatus.ESCALATED and action is ReviewAction.APPROVE:
             raise LocalApiError(403, "escalation_locked", "an escalated case cannot be approved")
@@ -489,11 +611,21 @@ class LocalReviewApi:
             ReviewAction.REQUEST_INFO: CaseLifecycle.CHANGES_REQUESTED,
         }.get(action)
         if lifecycle_target is not None:
-            self._transition_vendor_case(case_id, lifecycle_target)
+            self._transition_vendor_case(
+                case_id,
+                lifecycle_target,
+                vendor_visible_comment=vendor_visible_comment,
+                vendor_next_actions=vendor_next_actions,
+            )
             self._notify(
                 case_id,
                 f"review.{lifecycle_target.value}",
                 f"Case {case_id} decision recorded: {action.value} (v{decision_version}).",
+            )
+            self._email_vendor_outcome(
+                case_id,
+                lifecycle_target,
+                product_name=record.state.case_input.product_name,
             )
         return self._case_payload(record)
 
@@ -716,7 +848,71 @@ class LocalReviewApi:
 
     def vendor_add_evidence(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._validate_vendor_payload(payload, "vendor-intake", "EvidenceMetadata")
-        return self._vendor_call(lambda: self._vendor.add_evidence(token, payload).to_dict())
+        artifact = self._vendor_call(lambda: self._vendor.add_evidence(token, payload))
+        invite, submission, product, vendor, artifact = self._vendor_call(
+            lambda: self._vendor.evidence_upload_context(token, artifact.artifact_id)
+        )
+        registration = self._evidence_uploads.issue(
+            workspace_id=artifact.workspace_id,
+            case_id=invite.case_id,
+            product_id=product.product_id,
+            vendor_id=vendor.vendor_id,
+            submission_id=submission.submission_id,
+            artifact_id=artifact.artifact_id,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            size_bytes=artifact.size_bytes,
+            sha256=artifact.sha256,
+        )
+        return {**artifact.to_dict(), **_public_evidence_fields(registration)}
+
+    def vendor_evidence_status(self, token: str) -> dict[str, Any]:
+        invite, _submission, artifacts = self._vendor_call(
+            lambda: self._vendor.submission_evidence(token)
+        )
+        statuses = {
+            item["artifact_id"]: _public_evidence_fields(item)
+            for item in self._evidence_uploads.statuses(
+                workspace_id=self._vendor.workspace_id,
+                case_id=invite.case_id,
+                artifact_ids=[artifact.artifact_id for artifact in artifacts],
+            )
+        }
+        return {
+            "items": [
+                {**artifact.to_dict(), **statuses.get(artifact.artifact_id, {})}
+                for artifact in artifacts
+            ]
+        }
+
+    def case_evidence_status(self, case_id: str) -> dict[str, Any]:
+        case_record = self._require_case(case_id)
+        vendor_artifacts = self._vendor.case_evidence(case_id)
+        base_items = [artifact.to_dict() for artifact in vendor_artifacts]
+        base_items.extend(dict(document) for document in case_record.documents)
+        artifact_ids = [
+            str(item.get("artifact_id") or item.get("document_id"))
+            for item in base_items
+        ]
+        statuses = {
+            item["artifact_id"]: _public_evidence_fields(item)
+            for item in self._evidence_uploads.statuses(
+                workspace_id=self._vendor.workspace_id,
+                case_id=case_id,
+                artifact_ids=artifact_ids,
+            )
+        }
+        return {
+            "items": [
+                {
+                    **item,
+                    **statuses.get(
+                        str(item.get("artifact_id") or item.get("document_id")), {}
+                    ),
+                }
+                for item in base_items
+            ]
+        }
 
     def vendor_set_trust_center(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._validate_vendor_payload(payload, "vendor-intake", "TrustCenter")
@@ -769,6 +965,98 @@ class LocalReviewApi:
             lambda: {"items": self._vendor.case_evidence_findings(case_id)}
         )
 
+    def vendor_review_status(self, token: str) -> dict[str, Any]:
+        status = self._vendor_call(lambda: self._vendor.review_status(token))
+        validate_definition(status, "vendor-intake", "ReviewStatus")
+        return status
+
+    def run_reminder_sweep(self) -> dict[str, Any]:
+        """Email weekly reminders for missing or incomplete evidence (issue #37).
+
+        Idempotent per case and cadence period: the backend claims the
+        deterministic ``reminder:{case_id}:{period}`` key **before** sending,
+        so a concurrent or retried sweep that loses the claim sends nothing.
+        A failed delivery marks the claim failed — the next sweep retries
+        (bounded) instead of waiting a full interval — and every attempt is
+        persisted as an auditable ``email.reminder`` event with its truthful
+        delivery mode.
+        """
+        sent: list[dict[str, Any]] = []
+        for candidate in self._vendor_call(self._vendor.reminder_candidates):
+            claim = self._vendor.claim_reminder(
+                dedupe_key=candidate["dedupe_key"],
+                case_id=candidate["case_id"],
+                invite_id=candidate["invite_id"],
+            )
+            if claim is None:
+                continue  # another sweep already claimed this period
+            subject, body = self._reminder_email(candidate)
+            delivery = self._send_email(
+                to=candidate["contact_email"], subject=subject, body=body
+            )
+            self._vendor.record_reminder(
+                invite_id=candidate["invite_id"],
+                case_id=candidate["case_id"],
+                dedupe_key=candidate["dedupe_key"],
+                summary=subject,
+                delivery=delivery,
+                claim=claim,
+            )
+            sent.append(
+                {
+                    "invite_id": candidate["invite_id"],
+                    "case_id": candidate["case_id"],
+                    "stage": candidate["stage"],
+                    "missing_count": len(candidate["missing"]),
+                    "delivery": delivery.get("delivery"),
+                }
+            )
+        return {"sent": sent, "count": len(sent), "simulated": True}
+
+    @staticmethod
+    def _reminder_email(candidate: dict[str, Any]) -> tuple[str, str]:
+        """Deterministic reminder copy naming each missing item (issue #37)."""
+        lines = [
+            f"Hello {candidate['contact_name']},",
+            "",
+            f"The campus technology review for {candidate['product_name']} "
+            f"(case {candidate['case_id']}) is still waiting on the following:",
+            "",
+        ]
+        lines.extend(f"- {item['label']}: {item['detail']}" for item in candidate["missing"])
+        lines.append("")
+        if candidate.get("intake_url"):
+            lines.extend(
+                [
+                    "Continue your submission with your secure invitation link:",
+                    candidate["intake_url"],
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "If you are having trouble producing an item, reply to this email "
+                "with a status or an estimated date.",
+                "If you are not sure what we are looking for, reply and the campus "
+                "team will help.",
+                "",
+                "This reminder repeats weekly until the submission is complete. "
+                "Your invitation link continues to work until it expires.",
+            ]
+        )
+        subject = f"Reminder: evidence still needed for {candidate['product_name']}"
+        return subject, "\n".join(lines)
+
+    def reminder_history(self, case_id: str) -> dict[str, Any]:
+        """Reviewer-facing reminder attempts and pause state for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.reminder_history(case_id))
+
+    def set_reminders_paused(self, case_id: str, paused: bool) -> dict[str, Any]:
+        """Reviewer control: pause or resume automated reminders for one case."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.set_reminders_paused(case_id, paused))
+
     def list_profiles(self) -> dict[str, Any]:
         return {"items": [profile.to_dict() for profile in self._profiles.list_versions()]}
 
@@ -779,6 +1067,55 @@ class LocalReviewApi:
                 payload["profile_key"], payload["criteria"]
             ).to_dict()
         )
+
+    def get_policy_criteria(self) -> dict[str, Any]:
+        """Active reviewer-editable evidence-validation criteria (issue #52)."""
+        return self._vendor.get_policy_criteria().to_dict()
+
+    def update_policy_criteria(
+        self, payload: dict[str, Any], *, reviewer_id: str | None
+    ) -> dict[str, Any]:
+        """Record a new criteria version from a reviewer edit.
+
+        Thresholds accept a positive integer or ``null`` (``null`` means "no
+        confirmed rule" and defers to manual review). Required-coverage entries
+        are a list of coverage keywords. The reviewer identity is attributed and
+        the change is audited.
+        """
+        if not isinstance(payload, dict):
+            raise LocalApiError(400, "validation_error", "policy criteria payload must be an object")
+        coverages_value = payload.get("coi_required_coverages", ["cyber"])
+        if not isinstance(coverages_value, list) or not all(
+            isinstance(item, str) for item in coverages_value
+        ):
+            raise LocalApiError(
+                400, "validation_error", "coi_required_coverages must be a list of strings"
+            )
+        provisional = payload.get("provisional", True)
+        if not isinstance(provisional, bool):
+            raise LocalApiError(400, "validation_error", "provisional must be a boolean")
+        return self._vendor_call(
+            lambda: self._vendor.update_policy_criteria(
+                updated_by=reviewer_id or "reviewer",
+                pentest_max_age_days=self._optional_threshold(payload, "pentest_max_age_days"),
+                pci_attestation_max_age_days=self._optional_threshold(
+                    payload, "pci_attestation_max_age_days"
+                ),
+                coi_required_coverages=tuple(coverages_value),
+                evidence_expiry_days=self._optional_threshold(payload, "evidence_expiry_days"),
+                provisional=provisional,
+            ).to_dict()
+        )
+
+    @staticmethod
+    def _optional_threshold(payload: dict[str, Any], key: str) -> int | None:
+        """A submitted threshold is a positive int or explicit null (TBD)."""
+        if key not in payload or payload[key] is None:
+            return None
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise LocalApiError(400, "validation_error", f"{key} must be a positive integer or null")
+        return value
 
     def update_profile_draft(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if set(payload) != {"criteria"} or not isinstance(payload["criteria"], list):
@@ -1186,15 +1523,127 @@ class LocalReviewApi:
             if profile.profile_key in {"security", "accessibility"}
         }
 
-    def _transition_vendor_case(self, case_id: str, target: CaseLifecycle) -> None:
+    def _transition_vendor_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> None:
         """Persist the vendor-case lifecycle transition, tolerating benign no-ops."""
+        kwargs: dict[str, Any] = {}
+        if vendor_visible_comment is not _UNSET:
+            kwargs["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            kwargs["vendor_next_actions"] = vendor_next_actions
         try:
-            self._vendor.transition_case(case_id, target)
+            self._vendor.transition_case(case_id, target, **kwargs)
         except VendorBackendError:
             # A lifecycle that cannot legally advance (e.g. an already-closed
             # case) must not mask the primary reviewer action; the workflow
             # state remains the source of truth for the write boundary.
             pass
+
+    # Deterministic outcome copy (issue #38). Recipients get the human decision
+    # verbatim; no model-generated text is sent to vendors.
+    _OUTCOME_EMAILS: dict[CaseLifecycle, tuple[str, str]] = {
+        CaseLifecycle.APPROVED: (
+            "passed",
+            "The campus technology review for {product} has passed. The campus "
+            "team will follow up with any remaining onboarding steps. Reply to "
+            "this email if you have questions.",
+        ),
+        CaseLifecycle.DECLINED: (
+            "did not pass",
+            "The campus technology review for {product} did not pass. Reply to "
+            "this email or contact your campus reviewer for details about the "
+            "decision.",
+        ),
+        CaseLifecycle.CHANGES_REQUESTED: (
+            "needs changes",
+            "The campus technology review for {product} needs additional "
+            "information before it can be completed. Open your invitation link "
+            "to see the outstanding items, or reply to this email if you are "
+            "unsure what is being requested.",
+        ),
+    }
+
+    def _email_vendor_outcome(
+        self, case_id: str, lifecycle: CaseLifecycle, *, product_name: str
+    ) -> None:
+        """Email the invited vendor contact when a human decision is recorded.
+
+        The recipient is the contact whose invitation carries the submitted
+        evidence (the SUBMITTED invite); a newer invitation issued to a
+        different contact never diverts the outcome. Only when no submission
+        was finalized does the newest non-revoked invitation apply. Delivery is
+        recorded idempotently: the same outcome for a case (a re-recorded
+        decision or a retried invocation) never sends or persists a duplicate.
+        Best-effort: a case without a vendor invitation (no intake ran) sends
+        nothing, and a failed delivery never blocks the reviewer decision. The
+        truthful delivery mode is persisted on an integration event.
+        """
+        outcome = self._OUTCOME_EMAILS.get(lifecycle)
+        if outcome is None:
+            return
+        dedupe_key = f"{case_id}:{lifecycle.value}"
+        if self._vendor.notification_recorded(
+            event_type="email.notification", dedupe_key=dedupe_key
+        ):
+            return
+        invites = [
+            invite
+            for invite in self._vendor.list_invites(case_id)
+            if invite.status is not InviteStatus.REVOKED
+        ]
+        if not invites:
+            return
+        submitted = [
+            invite for invite in invites if invite.status is InviteStatus.SUBMITTED
+        ]
+        if submitted:
+            invite = max(
+                submitted,
+                key=lambda item: parse_utc_timestamp(item.submitted_at or item.issued_at),
+            )
+        else:
+            invite = max(invites, key=lambda item: parse_utc_timestamp(item.issued_at))
+        try:
+            contact = self._vendor.get_contact(invite.contact_id)
+        except VendorBackendError:
+            return
+        headline, body_template = outcome
+        subject = f"VETTED review outcome for {product_name}: {headline}"
+        body = body_template.format(product=product_name)
+        delivery = self._send_email(to=contact.email, subject=subject, body=body)
+        self._vendor.record_notification(
+            case_id=case_id,
+            summary=subject,
+            delivery=delivery,
+            event_type="email.notification",
+            dedupe_key=dedupe_key,
+        )
+
+    def _send_email(self, *, to: str, subject: str, body: str) -> dict[str, Any]:
+        """Call the sender without trusting its result shape or success label.
+
+        The raw ``to`` value is intentionally ephemeral: downstream audit
+        projection hashes it and persists only ``recipient_sha256``.
+        """
+        try:
+            raw_delivery = self._email_sender.send(to=to, subject=subject, body=body)
+        except Exception:  # noqa: BLE001 - delivery failures are recorded data
+            raw_delivery = None
+        mode = raw_delivery.get("delivery") if isinstance(raw_delivery, dict) else None
+        if mode not in {"live", "simulated"}:
+            mode = "failed"
+        return {
+            "delivery": mode,
+            "simulated": mode == "simulated",
+            "channel": "email",
+            "to": to,
+        }
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
         """Send/record a truthful notification (live Slack only when configured)."""

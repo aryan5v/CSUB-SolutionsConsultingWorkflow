@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import datetime
 import hashlib
 import io
 import json
+import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import _bootstrap  # noqa: F401
 
+from review_agent.adapters.email import SimulatedEmailSender
 from review_agent.api import LocalReviewApi
 from review_agent.config import AppConfig
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
+    FileWorkspaceStore,
     InMemoryWorkspaceStore,
+    SnapshotConflictError,
     create_handler,
     restore_api,
     seed_workspace,
@@ -22,10 +29,32 @@ from review_agent.lambda_api import (
 from review_agent.research import build_research_provider
 
 
+class ConditionalCheckFailed(Exception):
+    def __init__(self) -> None:
+        super().__init__("conditional check failed")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class FakeAwsError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code, "Message": "synthetic failure"}}
+
+
+class FakeTableMeta:
+    def __init__(self, client: FakeTransactionClient) -> None:
+        self.client = client
+
+
 class FakeTable:
-    def __init__(self, *key_fields: str) -> None:
+    def __init__(self, name: str, *key_fields: str) -> None:
+        self.name = name
         self.key_fields = key_fields
         self.items: dict[tuple[object, ...], dict] = {}
+        self.update_calls: list[dict] = []
+        self.put_calls: list[dict] = []
+        self.next_put_error_code: str | None = None
+        self.meta: FakeTableMeta
 
     def _key(self, value: dict) -> tuple[object, ...]:
         return tuple(value[field] for field in self.key_fields)
@@ -34,7 +63,52 @@ class FakeTable:
         item = self.items.get(self._key(Key))
         return {"Item": json.loads(json.dumps(item))} if item is not None else {}
 
-    def put_item(self, *, Item: dict) -> None:
+    def update_item(self, **kwargs) -> dict:
+        self.update_calls.append(json.loads(json.dumps(kwargs)))
+        key = kwargs["Key"]
+        item_key = self._key(key)
+        current = self.items.get(item_key)
+        values = kwargs["ExpressionAttributeValues"]
+        if ":max_attempts" in values:
+            if current is not None and not (
+                current.get("status") == values[":failed"]
+                and int(current.get("attempts", 0)) < values[":max_attempts"]
+            ):
+                raise ConditionalCheckFailed()
+            updated = dict(current or key)
+            updated.update(
+                {
+                    "workspace_id": values[":workspace"],
+                    "record_type": values[":record_type"],
+                    "dedupe_key": values[":dedupe_key"],
+                    "case_id": values[":case_id"],
+                    "invite_id": values[":invite_id"],
+                    "status": values[":pending"],
+                    "attempts": int((current or {}).get("attempts", values[":zero"]))
+                    + values[":one"],
+                    "claimed_at": values[":claimed_at"],
+                    "ttl": values[":ttl"],
+                }
+            )
+        else:
+            if not (
+                current is not None
+                and current.get("workspace_id") == values[":workspace"]
+                and current.get("record_type") == values[":record_type"]
+                and current.get("status") == values[":pending"]
+                and int(current.get("attempts", 0)) == values[":attempts"]
+            ):
+                raise ConditionalCheckFailed()
+            updated = {**current, "status": values[":status"]}
+        self.items[item_key] = json.loads(json.dumps(updated))
+        return {"Attributes": json.loads(json.dumps(updated))}
+
+    def put_item(self, *, Item: dict, **kwargs) -> None:
+        self.put_calls.append({"Item": json.loads(json.dumps(Item)), **kwargs})
+        if self.next_put_error_code is not None:
+            code = self.next_put_error_code
+            self.next_put_error_code = None
+            raise FakeAwsError(code)
         self.items[self._key(Item)] = json.loads(json.dumps(Item))
 
     def delete_item(self, *, Key: dict) -> None:
@@ -53,20 +127,133 @@ class FakeTable:
         return None
 
 
+class BlockingEmailSender:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.sent: list[str] = []
+
+    def send(self, *, to: str, subject: str, body: str) -> dict:
+        del subject, body
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test did not release sender")
+        self.sent.append(to)
+        return {
+            "delivery": "simulated",
+            "simulated": True,
+            "channel": "email",
+            "to": to,
+        }
+
+
+class FakeTransactionClient:
+    def __init__(self, tables: dict[str, FakeTable]) -> None:
+        self.tables = {table.name: table for table in tables.values()}
+        self.next_error_code: str | None = None
+        self.calls: list[list[dict]] = []
+
+    @staticmethod
+    def _value(value: dict) -> object:
+        if "S" in value:
+            return value["S"]
+        if "N" in value:
+            return int(value["N"])
+        if "BOOL" in value:
+            return value["BOOL"]
+        raise AssertionError(f"unsupported synthetic DynamoDB value: {value}")
+
+    @classmethod
+    def _item(cls, item: dict) -> dict:
+        return {key: cls._value(value) for key, value in item.items()}
+
+    def transact_write_items(self, *, TransactItems: list[dict]) -> None:
+        self.calls.append(json.loads(json.dumps(TransactItems)))
+        if self.next_error_code is not None:
+            code = self.next_error_code
+            self.next_error_code = None
+            raise FakeAwsError(code)
+
+        check = TransactItems[0]["ConditionCheck"]
+        check_table = self.tables[check["TableName"]]
+        check_key = self._item(check["Key"])
+        expected_revision = self._value(check["ExpressionAttributeValues"][":revision"])
+        snapshot = check_table.items.get(check_table._key(check_key))
+        if snapshot is None or snapshot.get("revision") != expected_revision:
+            raise FakeAwsError("TransactionCanceledException")
+
+        mutations: list[tuple[str, FakeTable, dict]] = []
+        for entry in TransactItems[1:]:
+            action = "Put" if "Put" in entry else "Delete"
+            mutation = entry[action]
+            table = self.tables[mutation["TableName"]]
+            value = self._item(mutation["Item"] if action == "Put" else mutation["Key"])
+            existing = table.items.get(table._key(value))
+            incoming_revision = self._value(
+                mutation["ExpressionAttributeValues"][":projection_revision"]
+            )
+            if (
+                existing is not None
+                and "projection_revision" in existing
+                and existing["projection_revision"] > incoming_revision
+            ):
+                raise FakeAwsError("TransactionCanceledException")
+            mutations.append((action, table, value))
+
+        for action, table, value in mutations:
+            if action == "Put":
+                table.items[table._key(value)] = json.loads(json.dumps(value))
+            else:
+                table.items.pop(table._key(value), None)
+
+
 def fake_dynamo_tables() -> dict[str, FakeTable]:
-    return {
-        "cases": FakeTable("case_id"),
-        "vendor": FakeTable("vendor_id"),
-        "product": FakeTable("product_id", "version"),
-        "contact": FakeTable("contact_id"),
-        "invite": FakeTable("token_hash"),
-        "submission": FakeTable("submission_id", "case_id"),
-        "review": FakeTable("case_id", "decision_version"),
-        "profile": FakeTable("user_id", "version"),
-        "integration": FakeTable("event_id", "occurred_at"),
-        "audit": FakeTable("case_id", "sequence"),
-        "idempotency": FakeTable("idempotency_key"),
+    keys = {
+        "cases": ("case_id",),
+        "vendor": ("vendor_id",),
+        "product": ("product_id", "version"),
+        "contact": ("contact_id",),
+        "invite": ("token_hash",),
+        "submission": ("submission_id", "case_id"),
+        "review": ("case_id", "decision_version"),
+        "profile": ("user_id", "version"),
+        "integration": ("event_id", "occurred_at"),
+        "audit": ("case_id", "sequence"),
+        "idempotency": ("idempotency_key",),
     }
+    tables = {name: FakeTable(name, *key_fields) for name, key_fields in keys.items()}
+    client = FakeTransactionClient(tables)
+    for table in tables.values():
+        table.meta = FakeTableMeta(client)
+    return tables
+
+
+class FakeEvidenceUploads:
+    def __init__(self) -> None:
+        self.records: dict[tuple[str, str, str], dict] = {}
+
+    def issue(self, **kwargs) -> dict:
+        value = {
+            **kwargs,
+            "processing_state": "queued",
+            "warnings": [],
+            "model_use_allowed": False,
+            "claim_token": "internal-claim-must-not-leak",
+            "upload": {
+                "url": "https://uploads.example/quarantine",
+                "method": "POST",
+                "fields": {"key": f"quarantine/{kwargs['workspace_id']}/{kwargs['case_id']}/{kwargs['artifact_id']}"},
+            },
+        }
+        self.records[(kwargs["workspace_id"], kwargs["case_id"], kwargs["artifact_id"])] = value
+        return value
+
+    def statuses(self, *, workspace_id: str, case_id: str, artifact_ids: list[str]) -> list[dict]:
+        return [
+            self.records[(workspace_id, case_id, artifact_id)]
+            for artifact_id in artifact_ids
+            if (workspace_id, case_id, artifact_id) in self.records
+        ]
 
 
 class LambdaApiTests(unittest.TestCase):
@@ -74,7 +261,12 @@ class LambdaApiTests(unittest.TestCase):
         self.store = InMemoryWorkspaceStore()
         seed_workspace(self.store)
         self.origin = "https://demo.example"
-        self.handler = create_handler(self.store, allowed_origins=[self.origin])
+        self.evidence_uploads = FakeEvidenceUploads()
+        self.handler = create_handler(
+            self.store,
+            allowed_origins=[self.origin],
+            evidence_uploads=self.evidence_uploads,
+        )
 
     def event(
         self,
@@ -147,6 +339,12 @@ class LambdaApiTests(unittest.TestCase):
     def test_reviewer_routes_require_cognito_claims_and_isolate_workspace(self) -> None:
         unauthenticated, payload = self.call(
             "GET", "/review-queue", authenticated=False
+        )
+        self.assertEqual(unauthenticated["statusCode"], 401)
+        self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
+
+        unauthenticated, payload = self.call(
+            "POST", "/reminders/run", authenticated=False, body={}
         )
         self.assertEqual(unauthenticated["statusCode"], 401)
         self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
@@ -250,6 +448,90 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(state["case_id"], case_id)
         self.assertEqual(state["case_input"]["product_name"], "Synthetic Calendar")
 
+    def test_fresh_authenticated_records_issue_open_and_revoke_across_cold_start(self) -> None:
+        _, vendor = self.call(
+            "POST",
+            "/vendors",
+            body={"name": "Disposable Canary Vendor", "official_domain": "canary.example"},
+        )
+        _, product = self.call(
+            "POST",
+            "/vendor-products",
+            body={"vendor_id": vendor["vendor_id"], "name": "Disposable Canary Product"},
+        )
+        _, contact = self.call(
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Sanitized Contact",
+                "email": "vendor@example.edu",
+            },
+        )
+        intake = {
+            "product_name": product["name"],
+            "vendor_name": vendor["name"],
+            "requester": {
+                "name": "Sanitized Requester",
+                "email": "requester@example.edu",
+                "department": "Library",
+            },
+            "use_case": "Disposable invitation reliability canary.",
+            "expected_users": 1,
+            "platform": ["web"],
+            "data_classification": "public",
+            "estimated_cost_usd": 0,
+            "integrations": [],
+            "uses_sso": False,
+            "uses_ai": False,
+            "classroom_or_public_use": False,
+        }
+        created_response, created = self.call("POST", "/cases", body=intake)
+        self.assertEqual(created_response["statusCode"], 201)
+        issue_response, issued = self.call(
+            "POST",
+            f"/cases/{created['case_id']}/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        self.assertEqual(issue_response["statusCode"], 201)
+        token = issued["token"]
+        self.assertNotIn(token, json.dumps(self.store.load_snapshot("csub-demo")))
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        opened = cold(
+            self.event(
+                "POST",
+                "/vendor/invites/current/open",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+                body={},
+            ),
+            None,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(json.loads(opened["body"])["invite"]["status"], "opened")
+
+        revoked_response, _ = self.call(
+            "POST", f"/invites/{issued['invite']['invite_id']}/revoke", body={}
+        )
+        self.assertEqual(revoked_response["statusCode"], 200)
+        terminal = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        terminal_payload = json.loads(terminal["body"])
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(terminal_payload["error"]["code"], "invite_revoked")
+        self.assertEqual(
+            terminal_payload["error"]["correlation_id"],
+            terminal["headers"]["X-Correlation-Id"],
+        )
+
     def _issue_invite(self):
         _, vendors = self.call("GET", "/vendors")
         vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
@@ -269,6 +551,22 @@ class LambdaApiTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 201)
         return issued
+
+    def _make_invite_due(
+        self, invite_id: str, now: datetime.datetime
+    ) -> None:
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        revision = int(snapshot.get("persistence_revision", 0))
+        invites = snapshot["repository"]["records"]["invite"]
+        invite = next(item for item in invites if item["invite_id"] == invite_id)
+        invite["issued_at"] = (now - datetime.timedelta(days=8)).isoformat()
+        invite["expires_at"] = (now + datetime.timedelta(days=30)).isoformat()
+        # Mirror the handler's optimistic-locking discipline: bump the snapshot
+        # revision and pass the expected prior revision so the guarded store
+        # accepts this test mutation instead of rejecting it as a conflict.
+        snapshot["persistence_revision"] = revision + 1
+        self.store.save_snapshot("csub-demo", snapshot, expected_revision=revision)
 
     def test_bearer_invite_is_hashed_at_rest_token_free_and_lifecycle_persists(self) -> None:
         issued = self._issue_invite()
@@ -312,6 +610,104 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 410)
         self.assertEqual(payload["error"]["code"], "invite_revoked")
 
+    def test_concurrent_rotation_persists_exactly_one_replacement(self) -> None:
+        class RacingStore(InMemoryWorkspaceStore):
+            barrier: threading.Barrier | None = None
+
+            def load_snapshot(self, workspace_id: str):
+                value = super().load_snapshot(workspace_id)
+                barrier = self.barrier
+                if barrier is not None:
+                    barrier.wait(timeout=5)
+                return value
+
+        store = RacingStore()
+        seed_workspace(store)
+        handler_one = create_handler(store, allowed_origins=[self.origin])
+        handler_two = create_handler(store, allowed_origins=[self.origin])
+
+        def call(handler, method: str, path: str, *, body=None, headers=None, authenticated=True):
+            response = handler(
+                self.event(
+                    method,
+                    path,
+                    body=body,
+                    headers=headers,
+                    authenticated=authenticated,
+                ),
+                None,
+            )
+            return response, json.loads(response["body"]) if response["body"] else None
+
+        _, vendors = call(handler_one, "GET", "/vendors")
+        vendor = next(item for item in vendors["items"] if item["name"] == "LabArchives, LLC")
+        _, contact = call(
+            handler_one,
+            "POST",
+            "/vendor-contacts",
+            body={
+                "vendor_id": vendor["vendor_id"],
+                "name": "Concurrent Contact",
+                "email": "concurrent@example.edu",
+            },
+        )
+        _, issued = call(
+            handler_one,
+            "POST",
+            "/cases/TR-260714-014/invites",
+            body={"contact_id": contact["contact_id"]},
+        )
+        source_token = issued["token"]
+        invite_id = issued["invite"]["invite_id"]
+        store.barrier = threading.Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    call,
+                    handler,
+                    "POST",
+                    f"/invites/{invite_id}/resend",
+                    body={},
+                )
+                for handler in (handler_one, handler_two)
+            ]
+            results = [future.result() for future in futures]
+        store.barrier = None
+
+        self.assertEqual(sorted(response[0]["statusCode"] for response in results), [200, 409])
+        conflict = next(payload for response, payload in results if response["statusCode"] == 409)
+        self.assertEqual(conflict["error"]["code"], "concurrent_update")
+        winner = next(payload for response, payload in results if response["statusCode"] == 200)
+        replacement_token = winner["token"]
+
+        terminal, payload = call(
+            handler_one,
+            "GET",
+            "/vendor/invites/current",
+            headers={"authorization": f"Bearer {source_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(terminal["statusCode"], 410)
+        self.assertEqual(payload["error"]["code"], "invite_revoked")
+        opened, payload = call(
+            handler_two,
+            "POST",
+            "/vendor/invites/current/open",
+            body={},
+            headers={"authorization": f"Bearer {replacement_token}"},
+            authenticated=False,
+        )
+        self.assertEqual(opened["statusCode"], 200)
+        self.assertEqual(payload["invite"]["status"], "opened")
+        snapshot = store.load_snapshot("csub-demo")
+        replacements = [
+            invite
+            for invite in snapshot["repository"]["records"]["invite"]
+            if invite.get("replaced_invite_id") == invite_id
+        ]
+        self.assertEqual(len(replacements), 1)
+
     def test_vendor_submission_and_review_runs_are_immutable_across_cold_starts(self) -> None:
         issued = self._issue_invite()
         headers = {"authorization": f"Bearer {issued['token']}"}
@@ -343,6 +739,33 @@ class LambdaApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(evidence_response["statusCode"], 200)
+        self.assertEqual(artifact["processing_state"], "queued")
+        self.assertNotIn("claim_token", artifact)
+        self.assertEqual(artifact["upload"]["method"], "POST")
+        self.assertNotIn("authorization", artifact["upload"]["fields"])
+        status_response, statuses = self.call(
+            "GET",
+            "/vendor/invites/current/evidence",
+            headers=headers,
+            authenticated=False,
+        )
+        self.assertEqual(status_response["statusCode"], 200)
+        self.assertEqual([item["artifact_id"] for item in statuses["items"]], [artifact["artifact_id"]])
+        self.assertNotIn("claim_token", json.dumps(statuses))
+        reviewer_response, reviewer_statuses = self.call(
+            "GET", "/cases/TR-260714-014/documents"
+        )
+        self.assertEqual(reviewer_response["statusCode"], 200)
+        self.assertIn(artifact["artifact_id"], [item["artifact_id"] for item in reviewer_statuses["items"]])
+        other_invite = self._issue_invite()
+        other_response, other_statuses = self.call(
+            "GET",
+            "/vendor/invites/current/evidence",
+            headers={"authorization": f"Bearer {other_invite['token']}"},
+            authenticated=False,
+        )
+        self.assertEqual(other_response["statusCode"], 200)
+        self.assertEqual(other_statuses["items"], [])
         trust_response, _ = self.call(
             "POST",
             "/vendor/invites/current/trust-center",
@@ -547,6 +970,74 @@ class LambdaApiTests(unittest.TestCase):
         }
         self.assertIn("A11Y.VPAT.001", question_ids)
 
+    def test_vendor_public_status_survives_lambda_cold_start(self) -> None:
+        issued = self._issue_invite()
+        token = issued["token"]
+        _, queue = self.call("GET", "/review-queue")
+        case = next(
+            item for item in queue["items"] if item["case_id"] == "TR-260714-014"
+        )
+        candidate = case["state"]["software_candidates"][0]
+        analyzed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/analyze",
+            body={"confirmed_match_id": candidate["record_id"]},
+        )
+        self.assertEqual(analyzed["statusCode"], 202)
+        reviewed, _ = self.call(
+            "POST",
+            "/cases/TR-260714-014/review",
+            body={
+                "case_id": "TR-260714-014",
+                "decision_version": 1,
+                "action": "request_info",
+                "decided_at": "2026-07-15T08:00:00+00:00",
+                "comments": "Internal finding that must stay private.",
+                "vendor_visible_comment": "Please provide the requested updates.",
+                "vendor_next_actions": ["Upload the current product-specific ACR."],
+            },
+        )
+        self.assertEqual(reviewed["statusCode"], 200)
+
+        snapshot = self.store.load_snapshot("csub-demo")
+        vendor_case = next(
+            item
+            for item in snapshot["repository"]["records"]["case"]
+            if item["case_id"] == "TR-260714-014"
+        )
+        self.assertEqual(
+            vendor_case["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            vendor_case["vendor_next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+
+        cold = create_handler(self.store, allowed_origins=[self.origin])
+        response = cold(
+            self.event(
+                "GET",
+                "/vendor/invites/current/status",
+                headers={"authorization": f"Bearer {token}"},
+                authenticated=False,
+            ),
+            None,
+        )
+        status = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(status["review_stage"], "changes_requested")
+        self.assertEqual(
+            status["vendor_visible_comment"],
+            "Please provide the requested updates.",
+        )
+        self.assertEqual(
+            status["next_actions"],
+            ["Upload the current product-specific ACR."],
+        )
+        self.assertNotIn("comments", status)
+        self.assertNotIn("Internal finding", json.dumps(status))
+
     def test_review_fuzzy_confirmation_and_two_step_idempotent_writeback_survive_cold_start(self) -> None:
         _, queue = self.call("GET", "/review-queue")
         case = next(item for item in queue["items"] if item["case_id"] == "TR-260714-014")
@@ -639,6 +1130,179 @@ class LambdaApiTests(unittest.TestCase):
         record = json.loads(logged.strip())
         self.assertEqual(set(record), {"correlation_id", "event_type", "status"})
 
+    def test_invite_listing_projects_expiry_without_bumping_revision(self) -> None:
+        issued = self._issue_invite()
+        snapshot = self.store.load_snapshot("csub-demo")
+        revision = snapshot["persistence_revision"]
+        invite = next(
+            item
+            for item in snapshot["repository"]["records"]["invite"]
+            if item["invite_id"] == issued["invite"]["invite_id"]
+        )
+        invite["status"] = "issued"
+        invite["expires_at"] = "2000-01-01T00:00:00+00:00"
+        snapshot["persistence_revision"] = revision + 1
+        self.store.save_snapshot(
+            "csub-demo",
+            snapshot,
+            expected_revision=revision,
+        )
+        expected_revision = revision + 1
+
+        first, payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(first["statusCode"], 200)
+        projected = next(
+            item for item in payload["items"] if item["invite_id"] == invite["invite_id"]
+        )
+        self.assertEqual(projected["status"], "expired")
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+        second, second_payload = self.call("GET", "/cases/TR-260714-014/invites")
+        self.assertEqual(second["statusCode"], 200)
+        self.assertEqual(second_payload, payload)
+        self.assertEqual(
+            self.store.load_snapshot("csub-demo")["persistence_revision"],
+            expected_revision,
+        )
+
+    def test_dynamo_snapshot_write_always_sends_condition_and_maps_conflict(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        cases = tables["cases"]
+        snapshot = {
+            "persistence_revision": 1,
+            "repository": {"records": {}},
+            "cases": {},
+            "connector": {},
+        }
+
+        def options(call: dict) -> dict:
+            return {key: value for key, value in call.items() if key != "Item"}
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=None)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "attribute_not_exists(#case_id)",
+                "ExpressionAttributeNames": {"#case_id": "case_id"},
+            },
+        )
+
+        store.save_snapshot("csub-demo", snapshot, expected_revision=0)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": (
+                    "attribute_exists(#case_id) AND "
+                    "(attribute_not_exists(#revision) OR #revision = :expected_revision)"
+                ),
+                "ExpressionAttributeNames": {
+                    "#case_id": "case_id",
+                    "#revision": "revision",
+                },
+                "ExpressionAttributeValues": {":expected_revision": 0},
+            },
+        )
+
+        snapshot["persistence_revision"] = 8
+        store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+        self.assertEqual(
+            options(cases.put_calls[-1]),
+            {
+                "ConditionExpression": "#revision = :expected_revision",
+                "ExpressionAttributeNames": {"#revision": "revision"},
+                "ExpressionAttributeValues": {":expected_revision": 7},
+            },
+        )
+
+        cases.next_put_error_code = "ConditionalCheckFailedException"
+        with self.assertRaises(SnapshotConflictError):
+            store.save_snapshot("csub-demo", snapshot, expected_revision=7)
+
+    def test_dynamo_projection_transactions_reject_stale_order_and_are_idempotent(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        older = {
+            "persistence_revision": 1,
+            "repository": {
+                "records": {
+                    "vendor": [
+                        {"vendor_id": "vendor-kept", "name": "Old name"},
+                        {"vendor_id": "vendor-removed", "name": "Removed later"},
+                    ]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+        newer = {
+            "persistence_revision": 2,
+            "repository": {
+                "records": {
+                    "vendor": [{"vendor_id": "vendor-kept", "name": "New name"}]
+                }
+            },
+            "cases": {},
+            "connector": {},
+        }
+
+        store.save_snapshot("csub-demo", older, expected_revision=None)
+        store.save_snapshot("csub-demo", newer, expected_revision=1)
+        projected = {
+            key: json.loads(json.dumps(value)) for key, value in tables["vendor"].items.items()
+        }
+
+        with self.assertRaises(FakeAwsError):
+            store._write_projections("csub-demo", older)
+        self.assertEqual(tables["vendor"].items, projected)
+        self.assertNotIn(("csub-demo#vendor#vendor-removed",), tables["vendor"].items)
+        kept = tables["vendor"].items[("csub-demo#vendor#vendor-kept",)]
+        self.assertEqual(json.loads(kept["payload"])["name"], "New name")
+        self.assertEqual(kept["projection_revision"], 2)
+
+        store._write_projections("csub-demo", newer)
+        self.assertEqual(tables["vendor"].items, projected)
+
+    def test_dynamo_projection_failure_does_not_fail_committed_http_mutation(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        seed_workspace(store)
+        handler = create_handler(store, allowed_origins=[self.origin])
+        tables["cases"].meta.client.next_error_code = "InternalServerError"
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            response = handler(
+                self.event(
+                    "POST",
+                    "/vendors",
+                    body={"name": "Committed Vendor", "official_domain": "vendor.example"},
+                ),
+                None,
+            )
+
+        payload = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 201)
+        snapshot = store.load_snapshot("csub-demo")
+        vendors = snapshot["repository"]["records"]["vendor"]
+        self.assertTrue(any(item["vendor_id"] == payload["vendor_id"] for item in vendors))
+        projected_ids = {
+            json.loads(item["payload"])["vendor_id"] for item in tables["vendor"].items.values()
+        }
+        self.assertNotIn(payload["vendor_id"], projected_ids)
+        logs = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn(
+            {
+                "event_type": "projection_write_failed",
+                "revision": snapshot["persistence_revision"],
+                "status": 202,
+            },
+            logs,
+        )
+
     def test_dynamo_store_projects_scoped_state_and_restores_with_a_fresh_instance(self) -> None:
         tables = fake_dynamo_tables()
         store = DynamoWorkspaceStore(tables)
@@ -663,6 +1327,216 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(json.loads(response["body"])["case_id"], "TR-260714-018")
 
+
+    def test_scheduled_reminder_runs_without_jwt_and_persists(self) -> None:
+        issued = self._issue_invite()
+        now = datetime.datetime(2026, 7, 23, 12, tzinfo=datetime.timezone.utc)
+        self._make_invite_due(issued["invite"]["invite_id"], now)
+        sender = SimulatedEmailSender()
+        scheduled = create_handler(self.store, email_sender=sender, clock=lambda: now)
+
+        result = scheduled({"scheduled_task": "reminders_run"}, None)
+
+        self.assertEqual(result["scheduled_task"], "reminders_run")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(sender.sent), 1)
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        reminders = [
+            event
+            for event in snapshot["repository"]["records"]["event"]
+            if event["event_type"] == "email.reminder"
+        ]
+        self.assertEqual(len(reminders), 1)
+        self.assertIn("recipient_sha256", reminders[0]["detail"])
+        self.assertNotIn(sender.sent[0]["to"], json.dumps(reminders))
+
+    def test_two_independent_restores_send_once_and_loser_does_not_save(self) -> None:
+        issued = self._issue_invite()
+        now = datetime.datetime(2026, 7, 23, 12, tzinfo=datetime.timezone.utc)
+        self._make_invite_due(issued["invite"]["invite_id"], now)
+        sender = BlockingEmailSender()
+        first = create_handler(self.store, email_sender=sender, clock=lambda: now)
+        second = create_handler(self.store, email_sender=sender, clock=lambda: now)
+        save_calls: list[dict] = []
+        original_save = self.store.save_snapshot
+
+        def tracked_save(workspace_id: str, snapshot: dict, **kwargs) -> None:
+            save_calls.append(json.loads(json.dumps(snapshot)))
+            original_save(workspace_id, snapshot, **kwargs)
+
+        self.store.save_snapshot = tracked_save  # type: ignore[method-assign]
+        winner_responses: list[dict] = []
+        thread = threading.Thread(
+            target=lambda: winner_responses.append(
+                first(self.event("POST", "/reminders/run", body={}), None)
+            )
+        )
+        thread.start()
+        self.assertTrue(sender.entered.wait(timeout=5))
+        try:
+            losing = second(self.event("POST", "/reminders/run", body={}), None)
+            losing_payload = json.loads(losing["body"])
+            self.assertEqual(losing_payload["count"], 0)
+            self.assertEqual(save_calls, [])
+        finally:
+            sender.release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(winner_responses), 1)
+        self.assertEqual(json.loads(winner_responses[0]["body"])["count"], 1)
+        self.assertEqual(sender.sent, ["contact@example.edu"])
+        self.assertEqual(len(save_calls), 1)
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        reminders = [
+            event
+            for event in snapshot["repository"]["records"]["event"]
+            if event["event_type"] == "email.reminder"
+        ]
+        self.assertEqual(len(reminders), 1)
+
+    def test_file_delivery_claims_persist_across_store_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/workspace.json"
+            first = FileWorkspaceStore(path)
+            claim = first.claim(
+                workspace_id="csub-demo",
+                dedupe_key="reminder:CASE-1:1",
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-21T12:00:00+00:00",
+                max_attempts=3,
+            )
+            assert claim is not None
+            second = FileWorkspaceStore(path)
+            self.assertIsNone(
+                second.claim(
+                    workspace_id="csub-demo",
+                    dedupe_key="reminder:CASE-1:1",
+                    case_id="CASE-1",
+                    invite_id="invite-1",
+                    claimed_at="2026-07-21T12:01:00+00:00",
+                    max_attempts=3,
+                )
+            )
+            self.assertTrue(
+                second.settle(
+                    workspace_id="csub-demo",
+                    dedupe_key="reminder:CASE-1:1",
+                    attempts=1,
+                    status="failed",
+                )
+            )
+            retry = first.claim(
+                workspace_id="csub-demo",
+                dedupe_key="reminder:CASE-1:1",
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-21T12:02:00+00:00",
+                max_attempts=3,
+            )
+            assert retry is not None
+            self.assertEqual(retry.attempts, 2)
+
+    def test_dynamo_delivery_claims_use_conditional_atomic_updates(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        dedupe_key = "reminder:CASE-1:1"
+        for attempt in range(1, 4):
+            claim = store.claim(
+                workspace_id="csub-demo",
+                dedupe_key=dedupe_key,
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at=f"2026-07-2{attempt}T12:00:00",
+                max_attempts=3,
+            )
+            assert claim is not None
+            self.assertEqual(claim.attempts, attempt)
+            self.assertTrue(
+                store.settle(
+                    workspace_id="csub-demo",
+                    dedupe_key=dedupe_key,
+                    attempts=attempt,
+                    status="failed",
+                )
+            )
+        self.assertIsNone(
+            store.claim(
+                workspace_id="csub-demo",
+                dedupe_key=dedupe_key,
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-24T12:00:00+00:00",
+                max_attempts=3,
+            )
+        )
+        calls = tables["idempotency"].update_calls
+        claim_calls = [call for call in calls if ":max_attempts" in call["ExpressionAttributeValues"]]
+        settle_calls = [call for call in calls if ":status" in call["ExpressionAttributeValues"]]
+        self.assertEqual(
+            claim_calls[0]["Key"]["idempotency_key"],
+            "csub-demo#delivery#reminder:CASE-1:1",
+        )
+        self.assertIn("attribute_not_exists(idempotency_key)", claim_calls[0]["ConditionExpression"])
+        self.assertIn("attempts < :max_attempts", claim_calls[0]["ConditionExpression"])
+        self.assertEqual(claim_calls[0]["ReturnValues"], "ALL_NEW")
+        self.assertIn("#status = :pending", settle_calls[0]["ConditionExpression"])
+        self.assertIn("attempts = :attempts", settle_calls[0]["ConditionExpression"])
+        self.assertEqual(settle_calls[0]["ReturnValues"], "ALL_NEW")
+
+    def test_naive_invite_and_event_timestamps_restore_and_project_as_utc(self) -> None:
+        issued = self._issue_invite()
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        invite = next(
+            item
+            for item in snapshot["repository"]["records"]["invite"]
+            if item["invite_id"] == issued["invite"]["invite_id"]
+        )
+        invite["issued_at"] = "2026-07-01T12:00:00"
+        invite["expires_at"] = "2026-07-31T12:00:00"
+        event = snapshot["repository"]["records"]["event"][0]
+        event["occurred_at"] = "2026-07-02T12:00:00"
+        restored = restore_api(
+            snapshot,
+            self.store.load_catalog("csub-demo"),
+            workspace_id="csub-demo",
+        )
+        restored_invite = next(
+            item
+            for item in restored._vendor.list_invites()
+            if item.invite_id == invite["invite_id"]
+        )
+        restored_event = restored._vendor_repository.get(
+            "event", event["event_id"], workspace_id="csub-demo"
+        )
+        self.assertEqual(restored_invite.issued_at, "2026-07-01T12:00:00+00:00")
+        self.assertEqual(restored_invite.expires_at, "2026-07-31T12:00:00+00:00")
+        self.assertEqual(restored_event.occurred_at, "2026-07-02T12:00:00+00:00")
+
+        tables = fake_dynamo_tables()
+        DynamoWorkspaceStore(tables).save_snapshot("csub-demo", snapshot)
+        projected_invite = next(iter(tables["invite"].items.values()))
+        self.assertEqual(
+            projected_invite["expires_at"],
+            int(
+                datetime.datetime(
+                    2026, 7, 31, 12, tzinfo=datetime.timezone.utc
+                ).timestamp()
+            ),
+        )
+        projected_event = next(iter(tables["integration"].items.values()))
+        self.assertEqual(
+            projected_event["occurred_at"],
+            int(
+                datetime.datetime(
+                    2026, 7, 2, 12, tzinfo=datetime.timezone.utc
+                ).timestamp()
+                * 1_000_000
+            ),
+        )
 
     def test_invalid_json_and_oversized_metadata_are_rejected(self) -> None:
         invalid, payload = self.call("POST", "/cases", body="{not-json")

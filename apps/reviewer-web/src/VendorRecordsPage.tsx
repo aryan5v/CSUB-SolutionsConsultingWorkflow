@@ -1,24 +1,32 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Check, Copy, FileCheck2, Link2, Plus, RefreshCw, Send, ShieldCheck, UserCheck } from "lucide-react";
+import { Check, Copy, FileCheck2, Link2, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, ShieldX, TicketCheck, UserCheck } from "lucide-react";
 import { DitherButton } from "@/components/dither-kit/button";
 import {
   ReviewApiError,
   requiresReviewerConfirmation,
   reviewApi,
+  vendorInviteUrl,
   type CatalogCandidate,
   type InviteProjection,
   type ReviewProfileVersion,
   type ReviewRun,
+  type ServiceNowImportCreateResponse,
+  type ServiceNowImportPreview,
   type VendorContact,
   type VendorProduct,
   type VendorRecord,
 } from "./api";
+import { applyRotatedInvite } from "./inviteState";
+import { useReviewerSession } from "./AuthGate";
 import "./workspace.css";
 
 type Notify = (message: string) => void;
 
 function errorMessage(error: unknown): string {
-  return error instanceof ReviewApiError || error instanceof Error ? error.message : "The vendor API request failed.";
+  if (error instanceof ReviewApiError) {
+    return `${error.message}${error.correlationId ? ` Reference: ${error.correlationId}.` : ""}`;
+  }
+  return error instanceof Error ? error.message : "The vendor API request failed.";
 }
 
 function statusLabel(status: InviteProjection["status"]): string {
@@ -30,6 +38,7 @@ function FieldButton({ children, onClick, disabled = false }: { children: React.
 }
 
 export function VendorRecordsPage({ notify }: { notify: Notify }) {
+  const reviewerSession = useReviewerSession();
   const [vendors, setVendors] = useState<VendorRecord[]>([]);
   const [products, setProducts] = useState<VendorProduct[]>([]);
   const [contacts, setContacts] = useState<VendorContact[]>([]);
@@ -46,6 +55,9 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [ticketNumber, setTicketNumber] = useState("RITM0098200");
+  const [ticketPreview, setTicketPreview] = useState<ServiceNowImportPreview | null>(null);
+  const [ticketResult, setTicketResult] = useState<ServiceNowImportCreateResponse | null>(null);
 
   const selectedVendor = vendors.find((item) => item.vendor_id === selectedVendorId);
   const selectedProduct = products.find((item) => item.product_id === selectedProductId);
@@ -157,7 +169,7 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
       const catalog = await reviewApi.searchCatalog(selectedProduct.name, selectedVendor.name);
       setCandidates(catalog.matches);
       setInvites([]); setRuns([]); setInviteUrl("");
-      notify(`${created.case_id} created. Catalog candidates are matches, not blanket approval.`);
+      notify(`${created.case_id} created.`);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
@@ -167,9 +179,29 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
     try {
       const issued = await reviewApi.issueInvite(caseId, selectedContactId);
       setInvites((current) => [issued.invite, ...current]);
-      const url = `${window.location.origin}/intake#token=${encodeURIComponent(issued.token)}`;
+      const url = vendorInviteUrl(window.location.origin, issued.token);
       setInviteUrl(url);
-      notify("Tracked invitation issued. Its opaque token is shown once in the URL fragment.");
+      notify("Tracked invitation issued.");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  };
+
+  const rotateInvite = async (inviteId: string) => {
+    setBusy(true); setError("");
+    try {
+      const rotated = await reviewApi.rotateInvite(inviteId);
+      setInvites((current) => applyRotatedInvite(current, inviteId, rotated.invite));
+      setInviteUrl(vendorInviteUrl(window.location.origin, rotated.token));
+      notify("Invitation rotated. The old link is now inactive.");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  };
+
+  const revokeInvite = async (inviteId: string) => {
+    setBusy(true); setError("");
+    try {
+      const revoked = await reviewApi.revokeInvite(inviteId);
+      setInvites((current) => current.map((invite) => invite.invite_id === inviteId ? revoked : invite));
+      setInviteUrl("");
+      notify("Invitation revoked.");
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
@@ -179,42 +211,70 @@ export function VendorRecordsPage({ notify }: { notify: Notify }) {
     try {
       const [nextInvites, nextRuns] = await Promise.all([reviewApi.listInvites(caseId), reviewApi.listReviewRuns(caseId)]);
       setInvites([...nextInvites].reverse()); setRuns(nextRuns);
-      notify("Case tracking refreshed from the API.");
+      notify("Case tracking refreshed.");
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
   const confirmCandidate = async (candidate: CatalogCandidate) => {
     setBusy(true); setError("");
     try {
-      await reviewApi.confirmCatalogMatch(candidate.record_id, candidate.match_method, "alex.reviewer@example.edu");
+      await reviewApi.confirmCatalogMatch(candidate.record_id, candidate.match_method, reviewerSession.email);
       setConfirmedCandidates((current) => new Set(current).add(candidate.record_id));
-      notify("Candidate match confirmed by Alex Reviewer. No approval was granted.");
+      notify(`Candidate match confirmed by ${reviewerSession.name}.`);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
   const copyInvite = async () => {
     await navigator.clipboard.writeText(inviteUrl);
-    notify("Invitation link copied. Share it only with the selected vendor contact.");
+    notify("Invitation link copied.");
+  };
+
+  const previewTicket = async () => {
+    if (!ticketNumber.trim()) return;
+    setBusy(true); setError(""); setTicketResult(null);
+    try {
+      const preview = await reviewApi.previewServiceNowImport(ticketNumber.trim());
+      setTicketPreview(preview);
+      notify(`${preview.record_id} mapped.`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  };
+
+  const createFromTicket = async () => {
+    if (!ticketPreview) return;
+    setBusy(true); setError("");
+    try {
+      const result = await reviewApi.createFromServiceNowImport(ticketPreview.record_id);
+      setTicketResult(result);
+      setCaseId(result.case.case_id);
+      if (result.intake_url) setInviteUrl(new URL(result.intake_url, window.location.origin).toString());
+      notify(result.intake_url ? `${result.case.case_id} created with a tracked vendor invitation.` : `${result.case.case_id} created; vendor invitation is pending contact details.`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
   const activeProfiles = useMemo(() => profiles.filter((item) => item.status === "activated"), [profiles]);
 
   return <>
-    <header className="workspace-intro"><div><p className="workspace-eyebrow">Companies / API records</p><h1>Vendor intake records</h1><p>Create or select the vendor, product, contact, case, and tracked invitation. Catalog membership remains a lookup result, never blanket approval.</p></div><div className={`record-mode record-mode-${reviewApi.mode}`}><i />{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : "Live API mode"}</div></header>
-    {error && <div className="record-api-error" role="alert"><strong>API request failed.</strong><span>{error}</span><small>{reviewApi.mode === "live" ? "Live failures are not replaced with fixture data." : "This failure occurred in the explicit fixture adapter."}</small></div>}
-    {loading ? <section className="workspace-panel record-loading">Loading vendor records…</section> : <div className="vendor-record-layout">
+    <header className="workspace-intro"><div><p className="workspace-eyebrow">Companies / API records</p><h1>Vendor intake records</h1><p>Build a vendor record and issue an intake link.</p></div><div className={`record-mode record-mode-${reviewApi.mode}`}><i />{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : "Live API mode"}</div></header>
+    <section className="workspace-panel ticket-kickoff" aria-labelledby="ticket-kickoff-title">
+      <div className="ticket-kickoff-copy"><span><TicketCheck size={17} /></span><div><p className="workspace-eyebrow">Simulated ServiceNow</p><h2 id="ticket-kickoff-title">Start from a request ticket</h2><p>Preview the mapping, then create the review.</p></div></div>
+      <div className="ticket-kickoff-actions"><label><span>Ticket number</span><input value={ticketNumber} onChange={(event) => { setTicketNumber(event.target.value); setTicketPreview(null); setTicketResult(null); }} /></label><button className="workspace-button" onClick={previewTicket} disabled={busy || !ticketNumber.trim()}>Preview</button><FieldButton onClick={createFromTicket} disabled={busy || !ticketPreview}>Create review</FieldButton></div>
+      {ticketPreview && <div className="ticket-preview"><div><small>Product</small><strong>{ticketPreview.mapped_values.product_name}</strong></div><div><small>Vendor</small><strong>{ticketPreview.mapped_values.vendor_name}</strong></div><div><small>Requester</small><strong>{ticketPreview.mapped_values.requester.department ?? ticketPreview.mapped_values.requester.name}</strong></div><div><small>Data</small><strong>{ticketPreview.mapped_values.data_classification}</strong></div><span>Mapping {ticketPreview.mapping_version} · version {ticketPreview.record_version}</span></div>}
+      {ticketResult && <div className="ticket-created" role="status"><Check size={16} /><span><strong>{ticketResult.case.case_id} created</strong><small>{ticketResult.intake_url ? "Invitation ready to share." : "Waiting for vendor contact details."}</small>{ticketResult.intake_url && <code>{new URL(ticketResult.intake_url, window.location.origin).toString()}</code>}</span>{ticketResult.intake_url && <button onClick={async () => { await navigator.clipboard.writeText(new URL(ticketResult.intake_url!, window.location.origin).toString()); notify("Invitation link copied."); }} aria-label="Copy ticket-generated invitation URL"><Copy size={14} /></button>}</div>}
+    </section>
+    {error && <div className="record-api-error" role="alert"><strong>API request failed.</strong><span>{error}</span></div>}
+    {loading ? <section className="workspace-panel record-loading" role="status">Loading vendor records…</section> : <div className="vendor-record-layout">
       <section className="workspace-panel vendor-record-builder" aria-label="Vendor intake golden path">
-        <div className="record-step"><span>01</span><div><h2>Vendor</h2><label>Select vendor<select value={selectedVendorId} onChange={(event) => chooseVendor(event.target.value)}><option value="">Select a vendor</option>{vendors.map((vendor) => <option key={vendor.vendor_id} value={vendor.vendor_id}>{vendor.name}</option>)}</select></label><form className="record-inline-form" onSubmit={createVendor}><input name="name" required placeholder="New vendor name" aria-label="New vendor name" /><input name="domain" placeholder="official.example" aria-label="Official domain" /><button disabled={busy}><Plus size={13} />Create</button></form></div></div>
-        <div className="record-step"><span>02</span><div><h2>Product</h2><label>Select product<select value={selectedProductId} onChange={(event) => setSelectedProductId(event.target.value)} disabled={!selectedVendorId}><option value="">Select a product</option>{products.map((product) => <option key={product.product_id} value={product.product_id}>{product.name}</option>)}</select></label><form className="record-inline-form" onSubmit={createProduct}><input name="name" required placeholder="New product name" aria-label="New product name" disabled={!selectedVendorId} /><button disabled={busy || !selectedVendorId}><Plus size={13} />Create</button></form></div></div>
-        <div className="record-step"><span>03</span><div><h2>Vendor contact</h2><label>Select contact<select value={selectedContactId} onChange={(event) => setSelectedContactId(event.target.value)} disabled={!selectedVendorId}><option value="">Select a contact</option>{contacts.map((contact) => <option key={contact.contact_id} value={contact.contact_id}>{contact.name} · {contact.email}</option>)}</select></label><form className="record-inline-form record-contact-form" onSubmit={createContact}><input name="name" required placeholder="Contact name" aria-label="Contact name" disabled={!selectedVendorId} /><input name="email" type="email" required placeholder="contact@vendor.example" aria-label="Contact email" disabled={!selectedVendorId} /><button disabled={busy || !selectedVendorId}><Plus size={13} />Create</button></form></div></div>
+        <div className="record-step"><span aria-hidden="true">01</span><div><h2>Vendor</h2><label>Select vendor<select value={selectedVendorId} onChange={(event) => chooseVendor(event.target.value)} aria-label="Select vendor"><option value="">Select a vendor</option>{vendors.map((vendor) => <option key={vendor.vendor_id} value={vendor.vendor_id}>{vendor.name}</option>)}</select></label><form className="record-inline-form" onSubmit={createVendor}><input name="name" required placeholder="New vendor name" aria-label="New vendor name" /><input name="domain" placeholder="official.example" aria-label="Official domain" /><button type="submit" disabled={busy}><Plus size={13} aria-hidden="true" />Create</button></form></div></div>
+        <div className="record-step"><span aria-hidden="true">02</span><div><h2>Product</h2><label>Select product<select value={selectedProductId} onChange={(event) => setSelectedProductId(event.target.value)} disabled={!selectedVendorId} aria-label="Select product"><option value="">Select a product</option>{products.map((product) => <option key={product.product_id} value={product.product_id}>{product.name}</option>)}</select></label><form className="record-inline-form" onSubmit={createProduct}><input name="name" required placeholder="New product name" aria-label="New product name" disabled={!selectedVendorId} /><button type="submit" disabled={busy || !selectedVendorId}><Plus size={13} aria-hidden="true" />Create</button></form></div></div>
+        <div className="record-step"><span aria-hidden="true">03</span><div><h2>Vendor contact</h2><label>Select contact<select value={selectedContactId} onChange={(event) => setSelectedContactId(event.target.value)} disabled={!selectedVendorId} aria-label="Select contact"><option value="">Select a contact</option>{contacts.map((contact) => <option key={contact.contact_id} value={contact.contact_id}>{contact.name} · {contact.email}</option>)}</select></label><form className="record-inline-form record-contact-form" onSubmit={createContact}><input name="name" required placeholder="Contact name" aria-label="Contact name" disabled={!selectedVendorId} /><input name="email" type="email" required placeholder="contact@vendor.example" aria-label="Contact email" disabled={!selectedVendorId} /><button type="submit" disabled={busy || !selectedVendorId}><Plus size={13} aria-hidden="true" />Create</button></form></div></div>
         <div className="record-step"><span>04</span><div><h2>Product-scoped case</h2><form className="record-case-form" onSubmit={createCase}><label>Requester name<input name="requester_name" required placeholder="Sample Requester" /></label><label>Requester email<input name="requester_email" type="email" required placeholder="requester@example.edu" /></label><label>Department<input name="department" placeholder="Department" /></label><label>Expected users<input name="expected_users" type="number" min="0" defaultValue="1" required /></label><label>Platform<select name="platform" defaultValue="web"><option value="web">Web</option><option value="windows">Windows</option><option value="macos">macOS</option><option value="mobile">Mobile</option></select></label><label>Data classification<select name="data_classification" defaultValue="unknown"><option value="unknown">Unknown · escalate</option><option value="public">Public</option><option value="internal">Internal</option><option value="confidential">Confidential</option><option value="level1">Level 1</option><option value="level2">Level 2</option></select></label><label>Estimated cost<input name="cost" type="number" min="0" step="0.01" defaultValue="0" /></label><label>Integrations<input name="integrations" placeholder="Canvas, Microsoft 365" /></label><label className="record-wide">Intended use<textarea name="use_case" required placeholder="Describe the product-scoped use case." /></label><label className="record-wide">Accessibility context<textarea name="accessibility_context" placeholder="Classroom, public, assistive technology, or VPAT context" /></label><div className="record-checks"><label><input name="uses_sso" type="checkbox" />Uses SSO</label><label><input name="uses_ai" type="checkbox" />Uses AI</label><label><input name="public_use" type="checkbox" />Classroom or public use</label></div><button className="workspace-dither-button" type="submit" disabled={busy || !selectedVendor || !selectedProduct}><FileCheck2 size={14} />Create case</button></form></div></div>
         <div className="record-step"><span>05</span><div><h2>Tracked invitation</h2><p>{caseId ? `${caseId} is linked to ${selectedProduct?.name}.` : "Create a case before issuing an invitation."}</p><div className="record-action-row"><FieldButton onClick={issueInvite} disabled={busy || !caseId || !selectedContactId}><Send size={14} />Issue invitation</FieldButton><button className="workspace-button" onClick={refreshCase} disabled={busy || !caseId}><RefreshCw size={14} />Refresh tracking</button></div>{inviteUrl && <div className="invite-once"><Link2 size={15} /><span><strong>One-time invitation URL</strong><code>{inviteUrl}</code></span><button onClick={copyInvite} aria-label="Copy invitation URL"><Copy size={14} /></button></div>}</div></div>
       </section>
 
       <aside className="vendor-record-sidebar">
-        <section className="workspace-panel record-summary"><p className="workspace-eyebrow">Current record</p><h2>{selectedProduct?.name ?? "Select a product"}</h2><p>{selectedVendor?.name ?? "No vendor selected"}</p><dl><div><dt>Contact</dt><dd>{selectedContact?.name ?? "Not selected"}</dd></div><div><dt>Internal owner</dt><dd>Alex Reviewer</dd></div><div><dt>Case</dt><dd>{caseId || "Not created"}</dd></div><div><dt>Next step</dt><dd>{nextStep}</dd></div><div><dt>Evidence coverage</dt><dd>{evidenceCoverage}</dd></div><div><dt>Profile versions</dt><dd>{activeProfiles.length ? activeProfiles.map((item) => `${item.profile_key} v${item.version}`).join(", ") : "No active profile returned"}</dd></div><div><dt>Review runs</dt><dd>{runs.length ? runs.map((item) => `v${item.run_version}`).join(", ") : "No run yet"}</dd></div></dl></section>
-        <section className="workspace-panel record-tracking"><div className="record-panel-heading"><div><p className="workspace-eyebrow">Invitation tracking</p><h2>Created → opened → submitted</h2></div><ShieldCheck size={17} /></div>{invites.length ? <ol>{invites.map((invite) => <li key={invite.invite_id}><span className={`invite-state invite-state-${invite.status}`}><i /></span><div><strong>{statusLabel(invite.status)}</strong><small>Issued {new Date(invite.issued_at).toLocaleString()}</small>{invite.opened_at && <small>Opened {new Date(invite.opened_at).toLocaleString()}</small>}{invite.submitted_at && <small>Submitted {new Date(invite.submitted_at).toLocaleString()}</small>}</div></li>)}</ol> : <p>No invitation has been issued for this case.</p>}</section>
-        <section className="workspace-panel record-candidates"><p className="workspace-eyebrow">Catalog candidates</p><h2>Match, then verify</h2><p className="catalog-boundary">A catalog row may support review. It is not blanket approval for this product, use case, or evidence version.</p>{candidates.length ? candidates.map((candidate) => { const needsConfirmation = requiresReviewerConfirmation(candidate); const confirmed = confirmedCandidates.has(candidate.record_id); return <article key={candidate.record_id}><div><strong>{candidate.canonical_name}</strong><small>{candidate.match_method.replace("_", " + ")} · Row {candidate.source_row} · {Math.round(candidate.score * 100)}%</small></div>{needsConfirmation ? <button onClick={() => confirmCandidate(candidate)} disabled={busy || confirmed}>{confirmed ? <Check size={13} /> : <UserCheck size={13} />}{confirmed ? "Confirmed" : "Confirm match"}</button> : <span>Structured match</span>}</article>; }) : <p>Create a case to search the catalog.</p>}</section>
+        <section className="workspace-panel record-summary"><p className="workspace-eyebrow">Current record</p><h2>{selectedProduct?.name ?? "Select a product"}</h2><p>{selectedVendor?.name ?? "No vendor selected"}</p><dl><div><dt>Contact</dt><dd>{selectedContact?.name ?? "Not selected"}</dd></div><div><dt>Internal owner</dt><dd>{reviewerSession.name}</dd></div><div><dt>Case</dt><dd>{caseId || "Not created"}</dd></div><div><dt>Next step</dt><dd>{nextStep}</dd></div><div><dt>Evidence coverage</dt><dd>{evidenceCoverage}</dd></div><div><dt>Profile versions</dt><dd>{activeProfiles.length ? activeProfiles.map((item) => `${item.profile_key} v${item.version}`).join(", ") : "No active profile returned"}</dd></div><div><dt>Review runs</dt><dd>{runs.length ? runs.map((item) => `v${item.run_version}`).join(", ") : "No run yet"}</dd></div></dl></section>
+        <section className="workspace-panel record-tracking"><div className="record-panel-heading"><div><p className="workspace-eyebrow">Invitation tracking</p><h2>Created → opened → submitted</h2></div><ShieldCheck size={17} /></div>{invites.length ? <ol>{invites.map((invite) => { const hasReplacement = invites.some((candidate) => candidate.replaced_invite_id === invite.invite_id); const canRevoke = ["issued", "opened", "in_progress"].includes(invite.status); return <li key={invite.invite_id}><span className={`invite-state invite-state-${invite.status}`}><i /></span><div><strong>{statusLabel(invite.status)}</strong><small>Issued {new Date(invite.issued_at).toLocaleString()}</small>{invite.opened_at && <small>Opened {new Date(invite.opened_at).toLocaleString()}</small>}{invite.submitted_at && <small>Submitted {new Date(invite.submitted_at).toLocaleString()}</small>}<div className="record-action-row">{!hasReplacement && <button className="workspace-button" onClick={() => rotateInvite(invite.invite_id)} disabled={busy}><RotateCcw size={12} />Rotate link</button>}{canRevoke && <button className="workspace-button" onClick={() => revokeInvite(invite.invite_id)} disabled={busy}><ShieldX size={12} />Revoke</button>}</div></div></li>; })}</ol> : <p>No invitation has been issued for this case.</p>}</section>
+        <section className="workspace-panel record-candidates"><p className="workspace-eyebrow">Catalog candidates</p><h2>Match, then verify</h2>{candidates.length ? candidates.map((candidate) => { const needsConfirmation = requiresReviewerConfirmation(candidate); const confirmed = confirmedCandidates.has(candidate.record_id); return <article key={candidate.record_id}><div><strong>{candidate.canonical_name}</strong><small>{candidate.match_method.replace("_", " + ")} · Row {candidate.source_row} · {Math.round(candidate.score * 100)}%</small></div>{needsConfirmation ? <button onClick={() => confirmCandidate(candidate)} disabled={busy || confirmed}>{confirmed ? <Check size={13} /> : <UserCheck size={13} />}{confirmed ? "Confirmed" : "Confirm match"}</button> : <span>Structured match</span>}</article>; }) : <p>Create a case to search the catalog.</p>}</section>
       </aside>
     </div>}
   </>;

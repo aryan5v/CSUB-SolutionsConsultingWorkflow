@@ -49,7 +49,7 @@ class VendorBackendTests(unittest.TestCase):
         profile = self.profiles.create_draft("combined", CRITERIA)
         self.profiles.fixture_test(profile.profile_version_id)
         self.profile = self.profiles.activate(profile.profile_version_id)
-        tokens = iter(["A" * 43, "B" * 43, "C" * 43, "D" * 43])
+        tokens = iter([character * 43 for character in "ABCDEFGH"])
         self.backend = VendorBackend(
             self.repository,
             self.profiles,
@@ -147,24 +147,48 @@ class VendorBackendTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(VendorBackendError):
                 self.backend.set_trust_center_url(token, url)
 
-    def test_expiry_revocation_resend_and_submit_once(self) -> None:
+    def test_expired_revoked_and_submitted_invites_rotate_with_stable_terminal_errors(self) -> None:
         issued = self.issue()
         self.clock.value += datetime.timedelta(days=7)
         with self.assertRaises(VendorBackendError) as expired:
             self.backend.resolve_invite(issued["token"])
         self.assertEqual(expired.exception.code, "invite_expired")
 
-        replacement_source = self.issue()
-        resent = self.backend.resend_invite(replacement_source["invite"]["invite_id"])
+        after_expiry = self.backend.resend_invite(issued["invite"]["invite_id"])
+        with self.assertRaises(VendorBackendError) as still_expired:
+            self.backend.resolve_invite(issued["token"])
+        self.assertEqual(still_expired.exception.code, "invite_expired")
+        self.assertEqual(
+            self.backend.resolve_invite(after_expiry["token"], mark_open=True)["invite"]["status"],
+            "opened",
+        )
+
+        self.backend.revoke_invite(after_expiry["invite"]["invite_id"])
         with self.assertRaises(VendorBackendError) as revoked:
-            self.backend.resolve_invite(replacement_source["token"])
+            self.backend.resolve_invite(after_expiry["token"])
         self.assertEqual(revoked.exception.code, "invite_revoked")
-        self.assertNotEqual(resent["token"], replacement_source["token"])
-        finalized = self.backend.finalize_submission(resent["token"])
+        after_revocation = self.backend.resend_invite(after_expiry["invite"]["invite_id"])
+        self.assertEqual(self.backend.resolve_invite(after_revocation["token"])["invite"]["status"], "issued")
+
+        finalized = self.backend.finalize_submission(after_revocation["token"])
         self.assertEqual(finalized.status.value, "finalized")
         with self.assertRaises(VendorBackendError) as submitted:
-            self.backend.finalize_submission(resent["token"])
+            self.backend.resolve_invite(after_revocation["token"])
         self.assertEqual(submitted.exception.code, "invite_submitted")
+        after_submission = self.backend.resend_invite(after_revocation["invite"]["invite_id"])
+        self.assertEqual(self.backend.resolve_invite(after_submission["token"])["invite"]["status"], "issued")
+        with self.assertRaises(VendorBackendError) as duplicate_rotation:
+            self.backend.resend_invite(after_revocation["invite"]["invite_id"])
+        self.assertEqual(duplicate_rotation.exception.code, "invite_already_rotated")
+
+    def test_duplicate_issue_is_rejected_and_revocation_is_idempotent(self) -> None:
+        issued = self.issue()
+        with self.assertRaises(VendorBackendError) as duplicate:
+            self.issue()
+        self.assertEqual(duplicate.exception.code, "active_invite_exists")
+        first = self.backend.revoke_invite(issued["invite"]["invite_id"])
+        second = self.backend.revoke_invite(issued["invite"]["invite_id"])
+        self.assertEqual(second, first)
 
     def test_cross_case_and_cross_workspace_isolation(self) -> None:
         self.backend.register_case(

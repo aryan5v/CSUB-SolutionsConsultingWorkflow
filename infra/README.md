@@ -56,6 +56,40 @@ aws bedrock list-foundation-models --region "$AWS_REGION"
 - Require a deterministic approved human decision before connector write permissions are used.
 - Keep the ServiceNow mock enabled by default; a future live/Serac connector requires a separate reviewed configuration and role.
 
+## Slack notifications
+
+Reviewer notifications are delivered to Slack **only** when a webhook credential
+is resolvable; otherwise the system records a clearly labeled *simulated* event
+and never claims a real delivery (`review_agent.adapters.notifications`). The
+notifier resolves a webhook in this order: an explicit argument, the
+`SLACK_WEBHOOK_URL` environment variable, then a Secrets Manager secret named by
+`SLACK_SECRET_ARN`. Any failure to resolve the secret degrades to the simulated
+fallback and never crashes the request path.
+
+**Deployed (Secrets Manager):** create a Slack app with an *Incoming Webhook* in
+a demo workspace, then store the webhook in Secrets Manager. The secret value may
+be the raw webhook URL or a JSON envelope `{"webhook_url": "https://hooks.slack.com/..."}`.
+Pass the secret ARN at synth time; the Lambda is granted `secretsmanager:GetSecretValue`
+and the ARN is injected as `SLACK_SECRET_ARN` (no infra change required):
+
+```bash
+aws secretsmanager create-secret \
+  --name csub/slack-webhook \
+  --secret-string 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+
+cdk deploy -c slackSecretArn=arn:aws:secretsmanager:us-west-2:<account>:secret:csub/slack-webhook-XXXXXX
+```
+
+Resolved webhooks are cached per ARN for the life of a warm Lambda container.
+
+**Local live-ping demo:** export the webhook directly so the local server posts a
+real Slack message during the demo moment; omit it to stay fully simulated:
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ \
+  PYTHONPATH=services/review-agent/src python3 -m review_agent.server --port 8787
+```
+
 ## Teardown
 
 The deployment implementation must provide a repeatable destroy path and document any retained buckets or tables. Before teardown, export only approved audit results, empty retained prototype data as authorized, remove secrets, verify stacks are deleted, and confirm that budget alarms and temporary identities no longer remain.
@@ -69,12 +103,7 @@ customer-managed KMS key and `cases` table are passed by object reference
 
 ### What it creates
 
-- **Storage:** KMS-encrypted, versioned evidence and generated-packet buckets
-  (case-scoped presigned uploads/downloads), an SSE-S3 private frontend bucket
-  served only through CloudFront **Origin Access Control (OAC, never OAI)**, and
-  a versioned SSE-S3 CloudTrail audit bucket. The audit bucket alone uses
-  S3-managed encryption so CloudTrail can validate/write without access to the
-  cross-stack KMS key; data/evidence stores remain KMS encrypted. All buckets
+- **Storage and evidence ingestion:** KMS-encrypted, versioned evidence and generated-packet buckets. Evidence registration returns a five-minute, checksum-bound presigned POST for an immutable `quarantine/<workspace>/<case>/<artifact>/<sha256>/...` identity with a 5 MB content-length ceiling. S3 object creation enters an SSE-SQS queue and DLQ with partial-batch Lambda processing. The queues intentionally use SQS-managed server-side encryption because S3 publishes notifications directly; messages contain only scoped S3 object event pointers, never evidence bytes. Evidence objects, state, and extraction output remain customer-KMS encrypted. The processor validates object metadata, content signatures, size, checksum, archives, executables, OLE containers, and polyglots before using synchronous Textract for bounded single-page PDF/PNG/JPEG or standard-library DOCX/XLSX/CSV/TXT parsers. Multi-page PDFs and structurally valid Outlook `.msg` files are retained as `manual_review`; malformed OLE files fail. A case-partitioned, customer-KMS DynamoDB table exposes `queued`, `processing`, `ready`, `failed`, and `manual_review` states. Sanitized extraction JSON retains source hash/version and page/sheet/cell/region coordinates under `case-evidence/`; originals stay in quarantine and are never logged. RTF and generic binary uploads are retained for manual review only; archives, executables, MIME mismatches, malformed files, and polyglots fail. Extracted content remains untrusted and `model_use_allowed=false` until CSUB approves a data classification. The frontend bucket remains SSE-S3 and private behind CloudFront **Origin Access Control (OAC, never OAI)**; the versioned CloudTrail audit bucket also uses SSE-S3 for sandbox compatibility. Evidence, generated packets, state, and extraction output remain customer-KMS encrypted. All buckets
   block public access and enforce TLS.
 - **DynamoDB (PITR on all):** vendor, product (catalog), contact, invite
   (keyed by `token_hash`, never plaintext), submission, review, profile
@@ -116,9 +145,7 @@ customer-managed KMS key and `cases` table are passed by object reference
   Bases additionally require `embeddingModelArn`; synth never ingests data.
   With the master gate false, no `AWS::S3Vectors::*`, Knowledge Base, KB IAM, or
   KB ingestion alarm is synthesized.
-- **Observability:** KMS-encrypted log groups (finite retention), core CloudWatch
-  alarms (API 5xx, proxy errors, DLQ depth), a conditional KB ingestion alarm,
-  dashboard, and CloudTrail management auditing.
+- **Observability:** KMS-encrypted `/vetted/<environment>/...` log groups with finite retention, core CloudWatch alarms (API 5xx, proxy errors, analysis/evidence DLQ depth, evidence queue age, and evidence Lambda errors/throttles/near-timeout duration), a conditional KB ingestion alarm, dashboard, and CloudTrail management auditing.
 - **Cost:** a parameterized monthly AWS Budget (optional email subscriber).
 
 ### Configuration (context `-c key=value` or environment variable)
@@ -240,6 +267,17 @@ destroy`. Buckets (`autoDeleteObjects`) and the ECR repo (`emptyOnDelete`) empty
 themselves; DynamoDB tables and the guardrail/version are deleted. For a
 retention posture, set `destroyOnRemoval=false` and document which stateful
 resources are intentionally retained before teardown.
+
+## Issue #49 AWS smoke status (2026-07-15)
+
+The required sanitized deployed-upload smoke could not start because the configured AWS CLI credentials failed the non-mutating identity prerequisite:
+
+```text
+$ aws sts get-caller-identity --region us-west-2
+InvalidClientTokenId: The security token included in the request is invalid.
+```
+
+No deployment or AWS mutation was attempted. Re-authenticate the approved sandbox profile, rerun `aws sts get-caller-identity`, then follow the synth/diff/deploy gate before uploading only a sanitized fixture. This credential blocker does not replace the local parser, authorization, partial-batch, CDK synthesis, or contract checks.
 
 ## Guarded continuous delivery
 

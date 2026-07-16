@@ -3,6 +3,7 @@ import { reviewerAuthenticationRequired } from "./AuthGate";
 import {
   consumeOAuthResponse,
   createCognitoAuthProvider,
+  localReviewerAuthBypassEnabled,
   type CognitoAuthConfig,
   type ReviewerAuthProvider,
 } from "./auth";
@@ -81,7 +82,7 @@ describe("Cognito reviewer OAuth PKCE", () => {
     const replaceState = vi.fn();
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       access_token: jwt(now / 1000 + 3600),
-      id_token: jwt(now / 1000 + 3600, { email: "synthetic-reviewer@example.invalid", nonce }),
+      id_token: jwt(now / 1000 + 3600, { name: "Synthetic Reviewer", email: "synthetic-reviewer@example.invalid", nonce }),
       expires_in: 3600,
       refresh_token: "ignored-refresh-token",
       token_type: "Bearer",
@@ -94,7 +95,7 @@ describe("Cognito reviewer OAuth PKCE", () => {
       history: { replaceState }, storage, fetchImpl, cryptoImpl: crypto, navigate: vi.fn(), now: () => now,
     });
 
-    await expect(provider.initialize()).resolves.toMatchObject({ status: "authenticated", email: "synthetic-reviewer@example.invalid" });
+    await expect(provider.initialize()).resolves.toMatchObject({ status: "authenticated", name: "Synthetic Reviewer", email: "synthetic-reviewer@example.invalid" });
     expect(replaceState).toHaveBeenCalledWith(null, "", "/app?view=queue");
     const tokenRequest = fetchImpl.mock.calls[0][1];
     expect(String(tokenRequest.body)).toContain("code_verifier=");
@@ -169,6 +170,12 @@ describe("OAuth URL cleanup and fixture separation", () => {
   it("requires authentication only in live mode", () => {
     expect(reviewerAuthenticationRequired("live")).toBe(true);
     expect(reviewerAuthenticationRequired("fixture")).toBe(false);
+  });
+
+  it("allows the explicit auth bypass only for a local development build", () => {
+    expect(localReviewerAuthBypassEnabled({ DEV: true, VITE_LOCAL_AUTH_BYPASS: "true" }, "127.0.0.1")).toBe(true);
+    expect(localReviewerAuthBypassEnabled({ DEV: false, VITE_LOCAL_AUTH_BYPASS: "true" }, "127.0.0.1")).toBe(false);
+    expect(localReviewerAuthBypassEnabled({ DEV: true, VITE_LOCAL_AUTH_BYPASS: "true" }, "review.example.edu")).toBe(false);
   });
 
   it("lets an explicit fixture bypass avoid every auth-provider operation", () => {

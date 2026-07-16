@@ -55,10 +55,10 @@ describe('PlatformStack — offline synthesis and core surface', () => {
     platform.resourceCountIs('AWS::Cognito::UserPool', 1);
     platform.resourceCountIs('AWS::CloudFront::Distribution', 1);
     platform.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
-    platform.resourceCountIs('AWS::Lambda::Function', 3);
-    platform.resourceCountIs('AWS::DynamoDB::Table', 10);
+    platform.resourceCountIs('AWS::Lambda::Function', 5);
+    platform.resourceCountIs('AWS::DynamoDB::Table', 11);
     platform.resourceCountIs('AWS::S3::Bucket', 4);
-    platform.resourceCountIs('AWS::SQS::Queue', 2);
+    platform.resourceCountIs('AWS::SQS::Queue', 4);
     platform.resourceCountIs('AWS::ECR::Repository', 1);
     platform.resourceCountIs('AWS::Budgets::Budget', 1);
     platform.resourceCountIs('AWS::CloudTrail::Trail', 1);
@@ -191,7 +191,7 @@ describe('VETTED Better Auth same-origin session layer', () => {
     platform.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs22.x',
       Architectures: ['arm64'],
-      Handler: 'dist/index.handler',
+      Handler: 'index.handler',
       Environment: {
         Variables: Match.objectLike({
           NODE_ENV: 'production',
@@ -396,12 +396,96 @@ describe('Data model security invariants', () => {
   test('all platform tables enable point-in-time recovery', () => {
     const { platform } = build(baseConfig);
     const tables = platform.findResources('AWS::DynamoDB::Table');
-    expect(Object.keys(tables).length).toBe(10);
+    expect(Object.keys(tables).length).toBe(11);
     for (const t of Object.values(tables)) {
       expect(t.Properties.PointInTimeRecoverySpecification).toEqual({
         PointInTimeRecoveryEnabled: true,
       });
     }
+  });
+});
+
+describe('Evidence quarantine and extraction pipeline', () => {
+  test('routes quarantine objects through encrypted SQS with partial-batch processing', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('Custom::S3BucketNotifications', {
+      NotificationConfiguration: {
+        QueueConfigurations: Match.arrayWith([
+          Match.objectLike({
+            Events: ['s3:ObjectCreated:*'],
+            Filter: Match.objectLike({
+              Key: Match.objectLike({
+                FilterRules: Match.arrayWith([{ Name: 'prefix', Value: 'quarantine/' }]),
+              }),
+            }),
+          }),
+        ]),
+      },
+    });
+    platform.hasResourceProperties('AWS::SQS::Queue', {
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: 360,
+      RedrivePolicy: Match.objectLike({ maxReceiveCount: 5 }),
+    });
+    platform.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'review_agent.evidence.lambda_processor.handler',
+      Runtime: 'python3.13',
+      Architectures: ['arm64'],
+      Timeout: 60,
+      Environment: {
+        Variables: Match.objectLike({
+          EVIDENCE_BUCKET: Match.anyValue(),
+          EVIDENCE_STATE_TABLE: Match.anyValue(),
+          EVIDENCE_KMS_KEY_ID: Match.anyValue(),
+        }),
+      },
+    });
+    platform.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      BatchSize: 5,
+      FunctionResponseTypes: ['ReportBatchItemFailures'],
+      ScalingConfig: { MaximumConcurrency: 5 },
+    });
+  });
+
+  test('partitions evidence state by workspace/case and separates API/processor S3 grants', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::DynamoDB::Table', {
+      KeySchema: [
+        { AttributeName: 'scope_id', KeyType: 'HASH' },
+        { AttributeName: 'artifact_id', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+    });
+    const policies = JSON.stringify(platform.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('quarantine/*');
+    expect(policies).toContain('case-evidence/*');
+    expect(policies).toContain('textract:DetectDocumentText');
+    const routes = Object.values(platform.findResources('AWS::ApiGatewayV2::Route')).map(
+      (route: any) => route.Properties.RouteKey,
+    );
+    expect(routes).toContain('GET /cases/{id}/documents');
+    expect(routes).toContain('GET /vendor/invites/current/evidence');
+  });
+
+  test('uses SQS-managed encryption and monitors queue age plus Lambda health', () => {
+    const { platform } = build(baseConfig);
+    const evidenceQueues = Object.values(platform.findResources('AWS::SQS::Queue')).filter(
+      (queue: any) => String(queue.Properties.QueueName).includes('evidence-processing'),
+    );
+    expect(evidenceQueues).toHaveLength(2);
+    for (const queue of evidenceQueues as any[]) {
+      expect(queue.Properties.SqsManagedSseEnabled).toBe(true);
+      expect(queue.Properties.KmsMasterKeyId).toBeUndefined();
+    }
+    const alarms = JSON.stringify(platform.findResources('AWS::CloudWatch::Alarm'));
+    expect(alarms).toContain('ApproximateAgeOfOldestMessage');
+    expect(alarms).toContain('Errors');
+    expect(alarms).toContain('Throttles');
+    expect(alarms).toContain('Duration');
+    expect(alarms).toContain('55000');
+    const dashboards = JSON.stringify(platform.findResources('AWS::CloudWatch::Dashboard'));
+    expect(dashboards).toContain('Evidence queue depth and age');
+    expect(dashboards).toContain('Evidence Lambda errors, throttles, and duration');
   });
 });
 
@@ -421,7 +505,17 @@ describe('API authorization boundaries', () => {
     const byKey = new Map<string, any>(routes.map((r) => [r.RouteKey, r]));
 
     // Reviewer/admin routes are JWT-authorized.
-    for (const key of ['POST /cases', 'GET /review-queue', 'POST /cases/{id}/review', 'GET /cases/{id}/packet/pdf']) {
+    for (const key of [
+      'POST /cases',
+      'GET /review-queue',
+      'POST /cases/{id}/review',
+      'GET /cases/{id}/research',
+      'GET /cases/{id}/packet/pdf',
+      'POST /reminders/run',
+      'GET /cases/{id}/reminders',
+      'POST /cases/{id}/reminders/pause',
+      'POST /cases/{id}/reminders/resume',
+    ]) {
       expect(byKey.get(key).AuthorizationType).toBe('JWT');
       expect(byKey.get(key).AuthorizerId).toBeDefined();
     }
@@ -435,9 +529,13 @@ describe('API authorization boundaries', () => {
       'POST /vendor/invites/current/trust-center',
       'POST /vendor/invites/current/answers',
       'POST /vendor/invites/current/coverage',
+      'POST /vendor/invites/current/analyze',
       'POST /vendor/invites/current/finalize',
+      'GET /vendor/invites/current/status',
       'GET /intake',
       'POST /intake',
+      'POST /intake/analyze',
+      'GET /intake/status',
       'POST /slack/events',
     ]) {
       expect(byKey.get(key).AuthorizationType ?? 'NONE').toBe('NONE');
@@ -483,6 +581,78 @@ describe('API authorization boundaries', () => {
     });
     const api = Object.values(platform.findResources('AWS::ApiGatewayV2::Api'))[0] as any;
     expect(api.Properties.CorsConfiguration.AllowOrigins).not.toContain('*');
+  });
+});
+
+describe('Weekly vendor reminder scheduling', () => {
+  test('invokes the case Lambda weekly in Pacific time with a fixed task and bounded retries', () => {
+    const { platform } = build(baseConfig);
+    platform.resourceCountIs('AWS::Scheduler::Schedule', 1);
+    platform.hasResourceProperties('AWS::Scheduler::Schedule', {
+      Name: 'csub-vendor-reminders-test',
+      ScheduleExpression: 'cron(0 9 ? * MON *)',
+      ScheduleExpressionTimezone: 'America/Los_Angeles',
+      FlexibleTimeWindow: { Mode: 'OFF' },
+      State: 'ENABLED',
+      Target: Match.objectLike({
+        Arn: Match.anyValue(),
+        RoleArn: Match.anyValue(),
+        Input: '{"scheduled_task":"reminders_run"}',
+        RetryPolicy: {
+          MaximumEventAgeInSeconds: 3600,
+          MaximumRetryAttempts: 2,
+        },
+      }),
+    });
+  });
+
+  test('uses a SourceAccount-guarded role that can invoke only the case Lambda', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'sts:AssumeRole',
+            Principal: { Service: 'scheduler.amazonaws.com' },
+            Condition: Match.objectLike({
+              StringEquals: { 'aws:SourceAccount': '111111111111' },
+            }),
+          }),
+        ]),
+      },
+      Policies: Match.arrayWith([
+        Match.objectLike({
+          PolicyDocument: {
+            Statement: [
+              Match.objectLike({
+                Action: 'lambda:InvokeFunction',
+                Effect: 'Allow',
+                Resource: Match.anyValue(),
+              }),
+            ],
+          },
+        }),
+      ]),
+    });
+    const template = platform.toJSON();
+    const assumesService = (resource: any, service: string): boolean => {
+      if (resource.Type !== 'AWS::IAM::Role') return false;
+      const statements = resource.Properties.AssumeRolePolicyDocument?.Statement ?? [];
+      return statements.some((statement: any) => {
+        const principal = statement.Principal?.Service;
+        const services = Array.isArray(principal) ? principal : [principal];
+        // Exact service-principal match, not a substring of a stringified doc,
+        // so an attacker-controlled host cannot embed the expected principal.
+        return services.includes(service);
+      });
+    };
+    const schedulerRole = Object.values(template.Resources).find((resource: any) =>
+      assumesService(resource, 'scheduler.amazonaws.com'),
+    ) as any;
+    const invokeStatement = schedulerRole.Properties.Policies[0].PolicyDocument.Statement[0];
+    expect(invokeStatement.Action).toBe('lambda:InvokeFunction');
+    expect(JSON.stringify(invokeStatement.Resource)).toContain('CaseProxyFunction');
+    expect(JSON.stringify(schedulerRole.Properties.Policies)).not.toContain('*');
   });
 });
 
@@ -642,6 +812,7 @@ describe('Retention, budget, and encryption', () => {
     expect(Object.keys(groups).length).toBeGreaterThanOrEqual(2);
     for (const g of Object.values(groups)) {
       expect((g as any).Properties.RetentionInDays).toBe(90);
+      expect((g as any).Properties.LogGroupName).toMatch(/^\/vetted\/test\//);
     }
   });
 

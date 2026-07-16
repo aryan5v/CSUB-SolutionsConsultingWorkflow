@@ -1,4 +1,4 @@
-import { reviewerAuth, type ReviewerAuthProvider } from "./auth";
+import { localReviewerAuthBypassEnabled, reviewerAuth, type ReviewerAuthProvider } from "./auth";
 
 export type QueueStatus = "Ready for review" | "Analyzing" | "Needs evidence" | "Completed";
 export type RiskRoute = "Low risk" | "Medium risk" | "Safe escalation" | "Pending route";
@@ -184,6 +184,8 @@ export type ReviewDecisionInput = {
   action: "approve" | "reject" | "request_info";
   decided_at: string;
   comments?: string;
+  vendor_visible_comment?: string;
+  vendor_next_actions?: string[];
   edits?: Array<{ section_key: string; body: string }>;
 };
 
@@ -232,6 +234,13 @@ export type VendorSubmission = {
   finalized_at: string | null;
 };
 export type VendorQuestion = { requirement_id: string; question: string; expected_evidence: string[] };
+export type VendorInviteReviewStatus = {
+  review_stage: string;
+  reviewer_comment: string | null;
+  next_actions: string[];
+  required_evidence: string[];
+  adapted_to_intake: boolean;
+};
 export type VendorInviteView = {
   invite: Pick<InviteProjection, "invite_id" | "case_id" | "expires_at" | "status">;
   vendor: Pick<VendorRecord, "vendor_id" | "name">;
@@ -239,17 +248,83 @@ export type VendorInviteView = {
   contact: Pick<VendorContact, "contact_id" | "name" | "email">;
   submission: VendorSubmission;
   questions: VendorQuestion[];
+  review_status?: VendorInviteReviewStatus | null;
+};
+// received: evidence artifact linked to the requirement; processing: unvalidated
+// free-text answer only; accepted/invalid/stale: set by evidence validation
+// (issue #36); outstanding: nothing provided.
+export type VendorChecklistStatus = "received" | "processing" | "accepted" | "invalid" | "stale" | "outstanding";
+export type VendorChecklistItem = {
+  requirement_id: string;
+  question: string;
+  expected_evidence: string[];
+  status: VendorChecklistStatus;
+};
+export type VendorReviewStage = "collecting_evidence" | "under_review" | "changes_requested" | "decided";
+export type VendorReviewStatus = {
+  invite: Pick<InviteProjection, "invite_id" | "case_id" | "expires_at" | "status">;
+  vendor: Pick<VendorRecord, "vendor_id" | "name">;
+  product: Pick<VendorProduct, "product_id" | "name">;
+  submission_status: "draft" | "finalized";
+  intake_analysis_complete: boolean;
+  review_stage: VendorReviewStage;
+  outcome: "approved" | "declined" | null;
+  vendor_visible_comment: string | null;
+  next_actions: string[];
+  checklist: VendorChecklistItem[];
+  required_evidence?: string[];
+  adapted_to_intake?: boolean;
+};
+export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
+// Reviewer-editable evidence-validation thresholds (issue #52). A null threshold
+// means "no confirmed rule" and defers to manual review rather than an invented
+// pass/fail; `provisional` marks values not yet confirmed by CSUB.
+export type PolicyCriteria = {
+  criteria_version_id: string;
+  version: number;
+  updated_at: string;
+  updated_by: string;
+  pentest_max_age_days: number | null;
+  pci_attestation_max_age_days: number | null;
+  coi_required_coverages: string[];
+  evidence_expiry_days: number | null;
+  provisional: boolean;
+};
+export type PolicyCriteriaInput = {
+  pentest_max_age_days: number | null;
+  pci_attestation_max_age_days: number | null;
+  coi_required_coverages: string[];
+  evidence_expiry_days: number | null;
+  provisional: boolean;
+};
+const FIXTURE_POLICY_CRITERIA: PolicyCriteria = {
+  criteria_version_id: "policy-criteria-csub-demo-000",
+  version: 0,
+  updated_at: "",
+  updated_by: "system:default",
+  pentest_max_age_days: 365,
+  pci_attestation_max_age_days: null,
+  coi_required_coverages: ["cyber"],
+  evidence_expiry_days: 365,
+  provisional: true,
 };
 export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string; content_base64?: string };
 export type EvidenceArtifact = Omit<EvidenceMetadata, "content_base64"> & {
-  workspace_id: string;
+  workspace_id?: string;
   artifact_id: string;
-  submission_id: string;
+  submission_id?: string;
   untrusted: true;
+  processing_state?: EvidenceProcessingState;
+  source_version_id?: string | null;
+  detected_content_type?: string | null;
+  source_location?: string | null;
+  warnings?: string[];
+  failure_code?: string | null;
+  model_use_allowed?: false;
 };
 export type PresignedUpload = { url: string; method?: "PUT" | "POST"; headers?: Record<string, string>; fields?: Record<string, string> };
 export type EvidenceRegistration = EvidenceArtifact & { upload?: PresignedUpload | null };
-export type EvidenceUploadResult = EvidenceArtifact & { transfer: "uploaded" | "simulated"; notice?: string };
+export type EvidenceUploadResult = EvidenceRegistration & { transfer: "uploaded" | "simulated"; notice?: string };
 export type ResearchProvenance = {
   provenance_id: string;
   final_url: string;
@@ -330,6 +405,22 @@ export type PacketPdfResponse = {
   pdf_sha256?: string | null;
   simulated?: boolean;
 };
+export type ServiceNowImportPreview = {
+  simulated: true;
+  mapping_version: string;
+  record_id: string;
+  record_version: number;
+  source: Record<string, unknown>;
+  field_mapping: Record<string, string>;
+  mapped_values: CaseIntakeInput;
+};
+export type ServiceNowImportCreateResponse = {
+  preview: ServiceNowImportPreview;
+  case: { case_id: string; state: ReviewState };
+  invite?: InviteProjection | null;
+  intake_url?: string | null;
+  invite_pending?: boolean;
+};
 export type ReviewerRecordContext = {
   invites: InviteProjection[];
   contacts: VendorContact[];
@@ -341,17 +432,19 @@ export type ReviewerRecordContext = {
 export class ReviewApiError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly correlationId: string | null;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, correlationId: string | null = null) {
     super(message);
     this.name = "ReviewApiError";
     this.status = status;
     this.code = code;
+    this.correlationId = correlationId;
   }
 }
 
 type FetchLike = typeof fetch;
-type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike; authProvider?: ReviewerAuthProvider };
+type ClientOptions = { baseUrl?: string; mode?: ApiMode; fetchImpl?: FetchLike; authProvider?: ReviewerAuthProvider; authBypass?: boolean };
 
 function configuredMode(): ApiMode {
   return import.meta.env.VITE_REVIEW_DATA_MODE === "fixture" ? "fixture" : "live";
@@ -359,6 +452,11 @@ function configuredMode(): ApiMode {
 
 function authorization(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}` };
+}
+
+export function vendorInviteUrl(origin: string, token: string): string {
+  const base = origin.replace(/\/$/, "");
+  return `${base}/intake#token=${encodeURIComponent(token)}`;
 }
 
 async function sha256(file: File): Promise<string> {
@@ -381,8 +479,22 @@ async function base64Content(file: File): Promise<string> {
   return btoa(binary);
 }
 
+type SecureRandomSource = {
+  randomUUID?: () => string;
+  getRandomValues: (array: Uint8Array) => Uint8Array;
+};
+
+export function secureCorrelationId(source: SecureRandomSource = globalThis.crypto): string {
+  if (typeof source.randomUUID === "function") return source.randomUUID.call(source);
+  const bytes = source.getRandomValues.call(source, new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function fixtureId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${secureCorrelationId()}`;
 }
 
 function fixtureReviewState(input: CaseIntakeInput, caseId: string): ReviewState {
@@ -426,6 +538,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
   const mode = options.mode ?? configuredMode();
   const runFetch = (input: RequestInfo | URL, init?: RequestInit) => (options.fetchImpl ?? globalThis.fetch)(input, init);
   const authProvider = options.authProvider ?? reviewerAuth;
+  const authBypass = options.authBypass ?? localReviewerAuthBypassEnabled();
   const fixture = createFixtureAdapter();
 
   function fixtureInviteView(markOpen = false): VendorInviteView {
@@ -446,7 +559,20 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       contact: { contact_id: fixture.contacts[0].contact_id, name: fixture.contacts[0].name, email: fixture.contacts[0].email },
       submission: { ...fixture.submission, answers: { ...fixture.submission.answers }, evidence_artifact_ids: [...fixture.submission.evidence_artifact_ids], coverage_ids: [...fixture.submission.coverage_ids] },
       questions: suppressResolvedQuestions(fixture.questions, fixture.submission.answers, fixture.covered),
+      review_status: { review_stage: "vendor_intake", reviewer_comment: null, next_actions: [], required_evidence: ["security document", "vpat_acr"], adapted_to_intake: true },
     };
+  }
+
+  const inFlight = new Map<string, Promise<unknown>>();
+
+  function singleFlight<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const current = inFlight.get(key) as Promise<T> | undefined;
+    if (current) return current;
+    const started = operation().finally(() => {
+      if (inFlight.get(key) === started) inFlight.delete(key);
+    });
+    inFlight.set(key, started);
+    return started;
   }
 
   async function request<T>(path: string, init?: RequestInit, audience: "reviewer" | "vendor" = "reviewer"): Promise<T> {
@@ -458,10 +584,11 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     });
-    if (audience === "reviewer") {
+    if (!headers.has("X-Correlation-Id")) headers.set("X-Correlation-Id", secureCorrelationId());
+    if (audience === "reviewer" && !authBypass) {
       const accessToken = authProvider.getAccessToken();
       if (!accessToken) {
-        throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.");
+        throw new ReviewApiError(401, "reviewer_sign_in_required", "Your reviewer session is unavailable or expired. Sign in again.", headers.get("X-Correlation-Id"));
       }
       headers.set("Authorization", `Bearer ${accessToken}`);
     }
@@ -469,10 +596,11 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       ...init,
       headers,
     });
-    const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string } };
+    const payload = await response.json().catch(() => null) as null | { error?: { code?: string; message?: string; correlation_id?: string } };
     if (!response.ok) {
-      if (audience === "reviewer" && response.status === 401) authProvider.handleUnauthorized();
-      throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`);
+      if (audience === "reviewer" && !authBypass && response.status === 401) authProvider.handleUnauthorized();
+      const correlationId = payload?.error?.correlation_id || response.headers.get("X-Correlation-Id") || headers.get("X-Correlation-Id");
+      throw new ReviewApiError(response.status, payload?.error?.code || "request_failed", payload?.error?.message || `Request failed with status ${response.status}`, correlationId);
     }
     return payload as T;
   }
@@ -485,6 +613,14 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       if (mode === "fixture") return [];
       return (await request<{ items: QueueItem[] }>("/review-queue")).items;
     },
+    async getPolicyCriteria(): Promise<PolicyCriteria> {
+      if (mode === "fixture") return fixtureOnly(FIXTURE_POLICY_CRITERIA);
+      return request<PolicyCriteria>("/policy-criteria");
+    },
+    updatePolicyCriteria(input: PolicyCriteriaInput): Promise<PolicyCriteria> {
+      if (mode === "fixture") return fixtureOnly({ ...FIXTURE_POLICY_CRITERIA, ...input, version: 1 });
+      return request("/policy-criteria", { method: "PUT", body: JSON.stringify(input) });
+    },
     createCase(input: CaseIntakeInput): Promise<{ case_id: string; state: ReviewState }> {
       if (mode === "fixture") {
         const caseId = fixtureId("FIXTURE-CASE");
@@ -492,15 +628,21 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/cases", { method: "POST", body: JSON.stringify(input) });
     },
-    analyzeCase(caseId: string, confirmedMatchId?: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: "alex.reviewer@example.edu" } : {}) });
+    previewServiceNowImport(externalId: string): Promise<ServiceNowImportPreview> {
+      return request(`/servicenow/imports/${encodeURIComponent(externalId)}/preview`);
+    },
+    createFromServiceNowImport(externalId: string): Promise<ServiceNowImportCreateResponse> {
+      return request(`/servicenow/imports/${encodeURIComponent(externalId)}/create`, { method: "POST" });
+    },
+    analyzeCase(caseId: string, confirmedMatchId?: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: reviewerId } : {}) });
     },
     getCaseResearch(caseId: string): Promise<CaseResearchResponse> {
       if (mode === "fixture") return fixtureOnly({ case_id: caseId, research_performed: false, research: null });
       return request(`/cases/${encodeURIComponent(caseId)}/research`);
     },
-    rerunAnalysis(caseId: string, customInstruction: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: "alex.reviewer@example.edu", rerun: true, custom_instruction: customInstruction }) });
+    rerunAnalysis(caseId: string, customInstruction: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: reviewerId, rerun: true, custom_instruction: customInstruction }) });
     },
     recordDecision(caseId: string, decision: ReviewDecisionInput): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/review`, { method: "POST", body: JSON.stringify({ case_id: caseId, ...decision }) });
@@ -549,14 +691,45 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/vendor-contacts", { method: "POST", body: JSON.stringify(input) });
     },
-    async issueInvite(caseId: string, contactId: string): Promise<{ invite: InviteProjection; token: string }> {
+    issueInvite(caseId: string, contactId: string): Promise<{ invite: InviteProjection; token: string }> {
+      return singleFlight(`issue:${caseId}:${contactId}`, async () => {
+        if (mode === "fixture") {
+          const now = new Date();
+          const invite: InviteProjection = { workspace_id: fixture.workspace_id, invite_id: fixtureId("invite"), case_id: caseId, product_id: fixture.products[0]?.product_id ?? "product-fixture", contact_id: contactId, issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null };
+          fixture.invites.push(invite);
+          return { invite, token: fixtureId("opaque") };
+        }
+        return request(`/cases/${encodeURIComponent(caseId)}/invites`, { method: "POST", body: JSON.stringify({ contact_id: contactId }) });
+      });
+    },
+    rotateInvite(inviteId: string): Promise<{ invite: InviteProjection; token: string }> {
+      return singleFlight(`rotate:${inviteId}`, async () => {
+        if (mode === "fixture") {
+          const source = fixture.invites.find((item) => item.invite_id === inviteId);
+          if (!source) throw new ReviewApiError(404, "invite_not_found", "Invitation was not found.");
+          const now = new Date();
+          if (source.status !== "submitted" && source.status !== "expired") {
+            source.status = "revoked";
+            source.revoked_at = now.toISOString();
+          }
+          const invite: InviteProjection = { ...source, invite_id: fixtureId("invite"), issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: source.invite_id };
+          fixture.invites.push(invite);
+          return { invite, token: fixtureId("opaque") };
+        }
+        return request(`/invites/${encodeURIComponent(inviteId)}/resend`, { method: "POST", body: "{}" });
+      });
+    },
+    async revokeInvite(inviteId: string): Promise<InviteProjection> {
       if (mode === "fixture") {
-        const now = new Date();
-        const invite: InviteProjection = { workspace_id: fixture.workspace_id, invite_id: fixtureId("invite"), case_id: caseId, product_id: fixture.products[0]?.product_id ?? "product-fixture", contact_id: contactId, issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 7 * 86400000).toISOString(), status: "issued", opened_at: null, revoked_at: null, submitted_at: null, replaced_invite_id: null };
-        fixture.invites.push(invite);
-        return { invite, token: fixtureId("opaque") };
+        const invite = fixture.invites.find((item) => item.invite_id === inviteId);
+        if (!invite) throw new ReviewApiError(404, "invite_not_found", "Invitation was not found.");
+        if (invite.status !== "submitted" && invite.status !== "expired") {
+          invite.status = "revoked";
+          invite.revoked_at = new Date().toISOString();
+        }
+        return { ...invite };
       }
-      return request(`/cases/${encodeURIComponent(caseId)}/invites`, { method: "POST", body: JSON.stringify({ contact_id: contactId }) });
+      return request(`/invites/${encodeURIComponent(inviteId)}/revoke`, { method: "POST", body: "{}" });
     },
     async listInvites(caseId: string): Promise<InviteProjection[]> {
       if (mode === "fixture") return fixture.invites.filter((item) => item.case_id === caseId);
@@ -623,7 +796,7 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     registerEvidence(token: string, metadata: EvidenceMetadata): Promise<EvidenceRegistration> {
       if (mode === "fixture") {
         const { content_base64: _inlineBytesStayLocal, ...fields } = metadata;
-        const artifact: EvidenceArtifact = { ...fields, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true };
+        const artifact: EvidenceArtifact = { ...fields, workspace_id: fixture.workspace_id, artifact_id: fixtureId("evidence"), submission_id: fixture.submission.submission_id, untrusted: true, processing_state: "queued", warnings: [], model_use_allowed: false };
         fixture.artifacts.push(artifact);
         fixture.submission.evidence_artifact_ids.push(artifact.artifact_id);
         fixture.submission.updated_at = new Date().toISOString();
@@ -658,6 +831,14 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       if (!uploadResponse.ok) throw new ReviewApiError(uploadResponse.status, "upload_failed", "The presigned evidence upload failed.");
       return { ...registration, transfer: "uploaded" };
     },
+    async listEvidence(token: string): Promise<EvidenceArtifact[]> {
+      if (mode === "fixture") return fixture.artifacts.map((artifact) => ({ ...artifact }));
+      return (await request<{ items: EvidenceArtifact[] }>("/vendor/invites/current/evidence", { headers: authorization(token) }, "vendor")).items;
+    },
+    async listCaseEvidence(caseId: string): Promise<EvidenceArtifact[]> {
+      if (mode === "fixture") return fixture.artifacts.map((artifact) => ({ ...artifact }));
+      return (await request<{ items: EvidenceArtifact[] }>(`/cases/${encodeURIComponent(caseId)}/documents`)).items;
+    },
     saveTrustCenter(token: string, trustCenterUrl: string): Promise<VendorSubmission> {
       if (mode === "fixture") {
         fixture.submission.trust_center_url = trustCenterUrl;
@@ -683,6 +864,34 @@ export function createReviewApiClient(options: ClientOptions = {}) {
         return fixtureOnly({ coverage_id: coverageId });
       }
       return request("/vendor/invites/current/coverage", { method: "POST", headers: authorization(token), body: JSON.stringify({ requirement_id: requirementId, evidence_artifact_ids: evidenceArtifactIds }) }, "vendor");
+    },
+    getReviewStatus(token: string): Promise<VendorReviewStatus> {
+      if (mode === "fixture") {
+        const view = fixtureInviteView();
+        const checklist: VendorChecklistItem[] = fixture.questions.map((question) => ({
+          requirement_id: question.requirement_id,
+          question: question.question,
+          expected_evidence: [...question.expected_evidence],
+          status: fixture.covered.has(question.requirement_id)
+            ? "received"
+            : fixture.submission.answers[question.requirement_id]?.trim()
+              ? "processing"
+              : "outstanding",
+        }));
+        return fixtureOnly({
+          invite: view.invite,
+          vendor: view.vendor,
+          product: view.product,
+          submission_status: fixture.submission.status,
+          intake_analysis_complete: true,
+          review_stage: fixture.submission.status === "finalized" ? "under_review" as const : "collecting_evidence" as const,
+          outcome: null,
+          vendor_visible_comment: null,
+          next_actions: [],
+          checklist,
+        });
+      }
+      return request("/vendor/invites/current/status", { headers: authorization(token) }, "vendor");
     },
     finalizeVendorSubmission(token: string): Promise<VendorSubmission> {
       if (mode === "fixture") {
@@ -718,6 +927,31 @@ export function requiresReviewerConfirmation(candidate: Pick<SoftwareCandidate, 
 
 export function suppressResolvedQuestions(questions: VendorQuestion[], answers: Record<string, string>, coveredRequirementIds: ReadonlySet<string>): VendorQuestion[] {
   return questions.filter((question) => !answers[question.requirement_id]?.trim() && !coveredRequirementIds.has(question.requirement_id));
+}
+
+const CHECKLIST_STATUS_LABELS: Record<VendorChecklistStatus, string> = {
+  received: "Received",
+  processing: "Processing",
+  accepted: "Accepted",
+  invalid: "Needs attention",
+  stale: "Out of date",
+  outstanding: "Outstanding",
+};
+const SETTLED_CHECKLIST_STATUSES = new Set<VendorChecklistStatus>(["received", "accepted"]);
+
+export function checklistStatusLabel(status: VendorChecklistStatus): string {
+  return CHECKLIST_STATUS_LABELS[status] ?? "Outstanding";
+}
+
+export function checklistStatusSettled(status: VendorChecklistStatus): boolean {
+  return SETTLED_CHECKLIST_STATUSES.has(status);
+}
+
+export function reviewStageLabel(status: Pick<VendorReviewStatus, "review_stage" | "outcome">): string {
+  if (status.review_stage === "decided") return status.outcome === "approved" ? "Review passed" : "Review did not pass";
+  if (status.review_stage === "changes_requested") return "Changes requested";
+  if (status.review_stage === "under_review") return "Under campus review";
+  return "Collecting evidence";
 }
 
 export function queueItemToSummary(item: QueueItem): ReviewSummary {

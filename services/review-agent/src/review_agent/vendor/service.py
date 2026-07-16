@@ -6,13 +6,14 @@ import base64
 import binascii
 import datetime
 import hashlib
+import hmac
 import ipaddress
 import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from ..adapters.extraction import (
     EXTRACTION_COORDINATES_FIELD,
@@ -29,6 +30,8 @@ from ..contracts.vendor import (
     EvidenceValidationFinding,
     IntegrationEvent,
     InviteStatus,
+    PolicyCriteria,
+    ReminderClaim,
     ReviewProfileVersion,
     ReviewRun,
     SoftwareCatalogEntry,
@@ -40,6 +43,7 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from ..evidence.ingestion import ACCEPTED_CONTENT_TYPES, MAX_EVIDENCE_BYTES
 from ..evidence.validation import (
     RULE_SOURCE,
     classify_evidence_type,
@@ -47,6 +51,8 @@ from ..evidence.validation import (
     validate_identity,
 )
 from ..profiles.service import ProfileError, ReviewProfileService
+from ..timestamps import parse_utc_timestamp
+from .delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .repository import VendorRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -56,6 +62,7 @@ _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
 _NORMALIZE_TOKENS = re.compile(r"[^a-z0-9]+")
+_UNSET = object()
 
 
 class VendorBackendError(ValueError):
@@ -79,10 +86,16 @@ class VendorBackend:
         invite_ttl: datetime.timedelta = datetime.timedelta(days=7),
         evidence_storage: StorageClient | None = None,
         extractor: EvidenceExtractor | None = None,
+        reminder_interval: datetime.timedelta = datetime.timedelta(days=7),
+        intake_base_url: str = "https://vetted.invalid/intake",
+        link_secret: bytes | None = None,
         research_provider: VendorResearchProvider | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
+        if reminder_interval <= datetime.timedelta(0):
+            raise ValueError("reminder_interval must be positive")
         self.repository = repository
         self.profiles = profiles
         self.workspace_id = workspace_id
@@ -93,9 +106,17 @@ class VendorBackend:
         # when they are unavailable and excludes the artifact from auto-coverage.
         self._evidence_storage = evidence_storage
         self._extractor = extractor or DeterministicEvidenceExtractor()
-        # Guarded research annotates provenance/gaps only; it cannot establish
-        # coverage, policy, approval, or requirements.
+        self.reminder_interval = reminder_interval
+        self.intake_base_url = intake_base_url.rstrip("/#")
+        # Keyed secret seals invite tokens so reminders can repeat the scoped
+        # link without persisting plaintext. Production supplies a stable key.
+        self._link_secret = link_secret or secrets.token_bytes(32)
+        # Guarded official-domain research annotates provenance and gaps only.
         self._research = research_provider
+        # Delivery claims are deliberately separate from the restored domain
+        # snapshot. Production injects the DynamoDB-backed workspace store so
+        # independent cold starts contend on one atomic outbox record.
+        self._delivery_claims = delivery_claim_store or InMemoryDeliveryClaimStore()
 
     @property
     def research_provider(self) -> VendorResearchProvider | None:
@@ -234,6 +255,20 @@ class VendorBackend:
         self._put("case", case.case_id, case)
         return case
 
+    def _expire_invite_if_needed(self, invite: VendorInvite) -> VendorInvite:
+        if invite.status in {
+            InviteStatus.EXPIRED,
+            InviteStatus.REVOKED,
+            InviteStatus.SUBMITTED,
+        }:
+            return invite
+        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        if self._now_datetime() < expires:
+            return invite
+        expired = replace(invite, status=InviteStatus.EXPIRED)
+        self._put("invite", expired.invite_id, expired)
+        return expired
+
     def issue_invite(self, case_id: str, contact_id: str) -> dict[str, Any]:
         case = self._require("case", case_id, VendorCase)
         contact = self._require("contact", contact_id, VendorContact)
@@ -242,18 +277,31 @@ class VendorBackend:
             raise VendorBackendError(
                 "contact_product_mismatch", "contact and product must belong to the same vendor"
             )
+        for existing in self.list_invites(case_id):
+            if existing.contact_id == contact_id and existing.status in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                raise VendorBackendError(
+                    "active_invite_exists",
+                    "an active invitation already exists; rotate or revoke it before issuing another",
+                    status=409,
+                )
         token = self._token_factory()
         if not isinstance(token, str) or len(token) < 32:
             raise VendorBackendError("weak_token", "token factory must provide at least 32 characters")
         now = self._now_datetime()
+        invite_id = self._id("invite", "invite")
         invite = VendorInvite(
-            invite_id=self._id("invite", "invite"),
+            invite_id=invite_id,
             case_id=case_id,
             product_id=case.product_id,
             contact_id=contact_id,
             token_hash=self._hash_token(token),
             issued_at=now.isoformat(),
             expires_at=(now + self.invite_ttl).isoformat(),
+            token_seal=self._seal_token(invite_id, token),
             workspace_id=self.workspace_id,
         )
         self._put("invite", invite.invite_id, invite)
@@ -271,15 +319,30 @@ class VendorBackend:
         return {"invite": invite.to_reviewer_dict(), "token": token}
 
     def resend_invite(self, invite_id: str) -> dict[str, Any]:
-        old = self._require("invite", invite_id, VendorInvite)
-        if old.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be resent", status=409)
-        now = self._now()
-        self._put(
-            "invite",
-            old.invite_id,
-            replace(old, status=InviteStatus.REVOKED, revoked_at=now),
+        old = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
         )
+        replacement = next(
+            (
+                invite
+                for invite in self._list("invite", VendorInvite)
+                if invite.replaced_invite_id == old.invite_id
+            ),
+            None,
+        )
+        if replacement is not None:
+            raise VendorBackendError(
+                "invite_already_rotated",
+                "invitation was already rotated; use the latest invitation",
+                status=409,
+            )
+        if old.status in {
+            InviteStatus.ISSUED,
+            InviteStatus.OPENED,
+            InviteStatus.IN_PROGRESS,
+        }:
+            old = replace(old, status=InviteStatus.REVOKED, revoked_at=self._now())
+            self._put("invite", old.invite_id, old)
         issued = self.issue_invite(old.case_id, old.contact_id)
         replacement = self._require(
             "invite", issued["invite"]["invite_id"], VendorInvite
@@ -287,21 +350,38 @@ class VendorBackend:
         replacement = replace(replacement, replaced_invite_id=old.invite_id)
         self._put("invite", replacement.invite_id, replacement)
         issued["invite"] = replacement.to_reviewer_dict()
-        self._event("invite.resent", "invite", replacement.invite_id, case_id=old.case_id)
+        self._event("invite.rotated", "invite", replacement.invite_id, case_id=old.case_id)
         return issued
 
     def revoke_invite(self, invite_id: str) -> dict[str, Any]:
-        invite = self._require("invite", invite_id, VendorInvite)
+        invite = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
+        )
         if invite.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be revoked", status=409)
+            raise VendorBackendError(
+                "already_submitted", "submitted invitation cannot be revoked", status=409
+            )
+        if invite.status in {InviteStatus.REVOKED, InviteStatus.EXPIRED}:
+            return invite.to_reviewer_dict()
         revoked = replace(invite, status=InviteStatus.REVOKED, revoked_at=self._now())
         self._put("invite", invite_id, revoked)
         self._event("invite.revoked", "invite", invite_id, case_id=invite.case_id)
         return revoked.to_reviewer_dict()
 
     def list_invites(self, case_id: str | None = None) -> list[VendorInvite]:
-        invites = self._list("invite", VendorInvite)
-        return [invite for invite in invites if case_id is None or invite.case_id == case_id]
+        invites = []
+        for invite in self._list("invite", VendorInvite):
+            if case_id is not None and invite.case_id != case_id:
+                continue
+            expires = datetime.datetime.fromisoformat(invite.expires_at)
+            if invite.status not in {
+                InviteStatus.EXPIRED,
+                InviteStatus.REVOKED,
+                InviteStatus.SUBMITTED,
+            } and self._now_datetime() >= expires:
+                invite = replace(invite, status=InviteStatus.EXPIRED)
+            invites.append(invite)
+        return sorted(invites, key=lambda invite: (invite.issued_at, invite.invite_id))
 
     def resolve_invite(self, token: str, *, mark_open: bool = False) -> dict[str, Any]:
         invite = self._valid_invite(token)
@@ -348,12 +428,43 @@ class VendorBackend:
         if len(filename) > 255 or "/" in filename or "\\" in filename:
             raise VendorBackendError("invalid_filename", "filename must be a basename")
         content_type = self._text(payload.get("content_type"), "content_type")
+        if content_type not in ACCEPTED_CONTENT_TYPES:
+            raise VendorBackendError(
+                "unsupported_content_type",
+                "evidence type is unsupported and must be reviewed manually",
+                status=415,
+            )
         size = payload.get("size_bytes")
-        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 50_000_000:
-            raise VendorBackendError("invalid_size", "size_bytes must be between 0 and 50000000")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 1 <= size <= MAX_EVIDENCE_BYTES
+        ):
+            raise VendorBackendError(
+                "invalid_size",
+                f"size_bytes must be between 1 and {MAX_EVIDENCE_BYTES}",
+            )
         digest = self._text(payload.get("sha256"), "sha256").lower()
         if not _SHA256.fullmatch(digest):
             raise VendorBackendError("invalid_hash", "sha256 must be 64 hexadecimal characters")
+        existing = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id == submission.submission_id and item.sha256 == digest
+        ]
+        if existing:
+            artifact = existing[0]
+            if (
+                artifact.filename != filename
+                or artifact.content_type != content_type
+                or artifact.size_bytes != size
+            ):
+                raise VendorBackendError(
+                    "evidence_identity_conflict",
+                    "sha256 is already registered with different immutable metadata",
+                    status=409,
+                )
+            return artifact
         if "content_base64" in payload:
             # Small files travel inline (both runtimes cap JSON bodies at
             # ~1 MB) and land behind the storage seam so content validation
@@ -377,6 +488,51 @@ class VendorBackend:
         )
         self._save_progress(invite, updated)
         return artifact
+
+    def evidence_upload_context(
+        self, token: str, artifact_id: str
+    ) -> tuple[VendorInvite, Submission, VendorProduct, Vendor, EvidenceArtifact]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        if artifact_id not in submission.evidence_artifact_ids:
+            raise VendorBackendError(
+                "cross_case_evidence", "evidence does not belong to this submission", status=403
+            )
+        artifact = self._require("evidence", artifact_id, EvidenceArtifact)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return invite, submission, product, vendor, artifact
+
+    def submission_evidence(
+        self, token: str
+    ) -> tuple[VendorInvite, Submission, list[EvidenceArtifact]]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        allowed = set(submission.evidence_artifact_ids)
+        artifacts = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.artifact_id in allowed
+        ]
+        return invite, submission, artifacts
+
+    def case_evidence(self, case_id: str) -> list[EvidenceArtifact]:
+        submission_ids = {
+            item.submission_id
+            for item in self._list("submission", Submission)
+            if item.case_id == case_id
+        }
+        return [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id in submission_ids
+        ]
+
+    def case_upload_context(self, case_id: str) -> tuple[VendorCase, VendorProduct, Vendor]:
+        case = self._require("case", case_id, VendorCase)
+        product = self._require("product", case.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return case, product, vendor
 
     def set_trust_center_url(self, token: str, url: str) -> Submission:
         invite = self._valid_invite(token)
@@ -473,6 +629,124 @@ class VendorBackend:
                     }
                 )
         return sorted(questions, key=lambda item: item["requirement_id"])
+
+    # Vendor-safe review-stage projection (issue #38): internal lifecycle states
+    # collapse to the few stages a vendor may see; reviewer-only states never
+    # leak through the vendor endpoints.
+    _VENDOR_REVIEW_STAGES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.DRAFT: "collecting_evidence",
+        CaseLifecycle.INVITED: "collecting_evidence",
+        CaseLifecycle.OPENED: "collecting_evidence",
+        CaseLifecycle.IN_PROGRESS: "collecting_evidence",
+        CaseLifecycle.SUBMITTED: "under_review",
+        CaseLifecycle.ANALYZING: "under_review",
+        CaseLifecycle.NEEDS_REVIEW: "under_review",
+        CaseLifecycle.CHANGES_REQUESTED: "changes_requested",
+        CaseLifecycle.APPROVED: "decided",
+        CaseLifecycle.DECLINED: "decided",
+        CaseLifecycle.WRITEBACK_COMPLETE: "decided",
+    }
+    _VENDOR_OUTCOMES: dict[CaseLifecycle, str] = {
+        CaseLifecycle.APPROVED: "approved",
+        CaseLifecycle.WRITEBACK_COMPLETE: "approved",
+        CaseLifecycle.DECLINED: "declined",
+    }
+
+    def review_status(self, token: str) -> dict[str, Any]:
+        """Vendor-facing review status: received/outstanding checklist and stage.
+
+        Unlike the draft operations this stays readable after the submission is
+        finalized (the invite is SUBMITTED) so a vendor can track the review and
+        its outcome without contacting the campus team (issue #38). The
+        checklist is exposed only after intake analysis has run, consistent with
+        staged intake.
+        """
+        invite = self._status_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        case = self._require("case", invite.case_id, VendorCase)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return {
+            "invite": {
+                "invite_id": invite.invite_id,
+                "case_id": invite.case_id,
+                "status": invite.status.value,
+                "expires_at": invite.expires_at,
+            },
+            "vendor": {"vendor_id": vendor.vendor_id, "name": vendor.name},
+            "product": {"product_id": product.product_id, "name": product.name},
+            "submission_status": submission.status.value,
+            "intake_analysis_complete": submission.intake_analysis_complete,
+            "review_stage": self._VENDOR_REVIEW_STAGES[case.lifecycle],
+            "outcome": self._VENDOR_OUTCOMES.get(case.lifecycle),
+            "vendor_visible_comment": case.vendor_visible_comment,
+            "next_actions": (
+                list(case.vendor_next_actions)
+                if case.lifecycle is CaseLifecycle.CHANGES_REQUESTED
+                else []
+            ),
+            "checklist": self._checklist(submission),
+        }
+
+    def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
+        """Active-profile requirements with an honest per-requirement status.
+
+        ``received``: an evidence artifact is linked to the requirement through
+        a coverage item. ``processing``: only an unvalidated free-text answer
+        exists; it is never presented as received evidence. ``outstanding``:
+        nothing was provided. The contract additionally reserves ``accepted``,
+        ``invalid``, and ``stale`` for evidence validation (issue #36), which
+        this projection does not perform.
+        """
+        if not submission.intake_analysis_complete:
+            # Staged intake: requirement names are exposed only after the
+            # deterministic analysis step, matching unresolved_questions.
+            return []
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items: list[dict[str, Any]] = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in covered:
+                    status = "received"
+                elif criterion.requirement_id in answered:
+                    status = "processing"
+                else:
+                    status = "outstanding"
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "question": criterion.question,
+                        "expected_evidence": list(criterion.expected_evidence),
+                        "status": status,
+                    }
+                )
+        return sorted(items, key=lambda item: item["requirement_id"])
+
+    def _status_invite(self, token: str) -> VendorInvite:
+        """Token lookup for the read-only status view; permits submitted invites."""
+        if not isinstance(token, str) or not token:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self.repository.find_invite_by_token_hash(
+            self._hash_token(token), workspace_id=self.workspace_id
+        )
+        if invite is None:
+            raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        if invite.status is InviteStatus.REVOKED:
+            raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        # Expiry applies to submitted invitations too: the status view is
+        # readable after finalize, but only within the invitation's lifetime,
+        # matching the expiry semantics of every other token operation.
+        expires = parse_utc_timestamp(invite.expires_at)
+        if self._now_datetime() >= expires:
+            if invite.status is not InviteStatus.SUBMITTED:
+                self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
+        return invite
 
     def intake_stage(self, token: str) -> dict[str, Any]:
         """Return the current staged-intake position for the vendor UI."""
@@ -939,28 +1213,48 @@ class VendorBackend:
         ),
     }
 
-    def transition_case(self, case_id: str, target: CaseLifecycle) -> VendorCase:
+    def transition_case(
+        self,
+        case_id: str,
+        target: CaseLifecycle,
+        *,
+        vendor_visible_comment: str | None | object = _UNSET,
+        vendor_next_actions: tuple[str, ...] | object = _UNSET,
+    ) -> VendorCase:
         """Persist a reviewer/analysis lifecycle transition (issue #27).
 
-        Idempotent (target == current is a no-op) and validated against the
-        documented forward transition map. Emits an integration event so the
-        state change is auditable and observable in the demo.
+        Public messaging is stored on the vendor-case projection, separately
+        from internal reviewer comments. Analysis transitions omit these
+        arguments and preserve the last public message. Human outcomes pass
+        them explicitly, clearing stale actions on approve/decline. When a
+        changes-requested decision has no authored actions, stable outstanding
+        requirement IDs provide safe next steps without exposing findings,
+        policy, risk, or reviewer notes.
         """
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
         if not isinstance(case, VendorCase):
             # A case that was never registered as a vendor case has no lifecycle
             # to persist; callers treat this as a benign no-op.
             return None  # type: ignore[return-value]
-        if case.lifecycle is target:
+        if case.lifecycle is not target:
+            allowed = self._ALLOWED_TRANSITIONS.get(target)
+            if allowed is None or case.lifecycle not in allowed:
+                raise VendorBackendError(
+                    "invalid_transition",
+                    f"cannot move case from {case.lifecycle.value} to {target.value}",
+                    status=409,
+                )
+        updates: dict[str, Any] = {"lifecycle": target}
+        if vendor_visible_comment is not _UNSET:
+            updates["vendor_visible_comment"] = vendor_visible_comment
+        if vendor_next_actions is not _UNSET:
+            actions = tuple(vendor_next_actions)  # type: ignore[arg-type]
+            if target is CaseLifecycle.CHANGES_REQUESTED and not actions:
+                actions = self._derive_vendor_next_actions(case_id)
+            updates["vendor_next_actions"] = actions
+        updated = replace(case, **updates)
+        if updated == case:
             return case
-        allowed = self._ALLOWED_TRANSITIONS.get(target)
-        if allowed is None or case.lifecycle not in allowed:
-            raise VendorBackendError(
-                "invalid_transition",
-                f"cannot move case from {case.lifecycle.value} to {target.value}",
-                status=409,
-            )
-        updated = replace(case, lifecycle=target)
         self._put("case", case_id, updated)
         self._event(
             "case.transitioned",
@@ -971,26 +1265,390 @@ class VendorBackend:
         )
         return updated
 
+    def _derive_vendor_next_actions(self, case_id: str) -> tuple[str, ...]:
+        requirement_ids: tuple[str, ...] = ()
+        run_id = self.repository.get_current_run_id(case_id, workspace_id=self.workspace_id)
+        if run_id is not None:
+            run = self.repository.get("run", run_id, workspace_id=self.workspace_id)
+            if isinstance(run, ReviewRun):
+                requirement_ids = run.unresolved_requirement_ids
+        if not requirement_ids:
+            submissions = [
+                item
+                for item in self._list("submission", Submission)
+                if item.case_id == case_id and item.intake_analysis_complete
+            ]
+            if submissions:
+                submission = max(
+                    submissions,
+                    key=lambda item: item.finalized_at or item.updated_at or "",
+                )
+                requirement_ids = tuple(
+                    item["requirement_id"]
+                    for item in self._checklist(submission)
+                    if item["status"] == "outstanding"
+                )
+        unique_ids = tuple(dict.fromkeys(sorted(requirement_ids)))[:10]
+        if unique_ids:
+            return tuple(
+                f"Provide information or evidence for requirement {requirement_id}."
+                for requirement_id in unique_ids
+            )
+        return ("Contact your campus reviewer to confirm the requested updates.",)
+
     def get_case_lifecycle(self, case_id: str) -> str | None:
         case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
         return case.lifecycle.value if isinstance(case, VendorCase) else None
 
     def record_notification(
-        self, *, case_id: str | None, summary: str, delivery: dict[str, Any]
+        self,
+        *,
+        case_id: str | None,
+        summary: str,
+        delivery: dict[str, Any],
+        event_type: str = "slack.notification",
+        dedupe_key: str | None = None,
     ) -> IntegrationEvent:
-        """Persist an auditable notification event with its truthful delivery mode."""
+        """Persist an auditable notification event with its truthful delivery mode.
+
+        The raw recipient address is never persisted: the event carries a
+        SHA-256 digest instead, which stays auditable (a known address can be
+        verified against it) without storing personal data in the event log.
+        An optional ``dedupe_key`` is persisted so callers can record and check
+        delivery idempotently (issue #38).
+        """
+        detail = {
+            "summary": summary,
+            "delivery": delivery.get("delivery"),
+            "simulated": delivery.get("simulated", True),
+            "channel": delivery.get("channel"),
+        }
+        if delivery.get("to"):
+            detail["recipient_sha256"] = self._hash_recipient(str(delivery["to"]))
+        if dedupe_key is not None:
+            detail["dedupe_key"] = dedupe_key
         return self._event(
-            "slack.notification",
+            event_type,
             "notification",
             case_id or "workspace",
             case_id=case_id,
-            detail={
-                "summary": summary,
-                "delivery": delivery.get("delivery"),
-                "simulated": delivery.get("simulated", True),
-                "channel": delivery.get("channel"),
-            },
+            detail=detail,
         )
+
+    def notification_recorded(self, *, event_type: str, dedupe_key: str) -> bool:
+        """True when a notification with this dedupe key was already persisted."""
+        return any(
+            event.event_type == event_type and event.detail.get("dedupe_key") == dedupe_key
+            for event in self._list("event", IntegrationEvent)
+        )
+
+    @staticmethod
+    def _hash_recipient(recipient: str) -> str:
+        return hashlib.sha256(recipient.strip().lower().encode("utf-8")).hexdigest()
+
+    # Weekly vendor reminders (issue #37) -------------------------------------
+
+    _REMINDER_EVENT = "email.reminder"
+    # A failed delivery is retried on later sweeps within the same cadence
+    # period, but never unboundedly.
+    MAX_REMINDER_ATTEMPTS = 3
+    # Reminders run only while the vendor still owes evidence; once the case
+    # moves to reviewer-owned states the nagging stops.
+    _REMINDER_LIFECYCLES = frozenset(
+        {
+            CaseLifecycle.DRAFT,
+            CaseLifecycle.INVITED,
+            CaseLifecycle.OPENED,
+            CaseLifecycle.IN_PROGRESS,
+        }
+    )
+
+    def reminder_candidates(self) -> list[dict[str, Any]]:
+        """Cases with missing/incomplete evidence that are due a reminder.
+
+        At most one candidate per case: when several invitations are active the
+        most recently issued one is authoritative (consistent with the outcome
+        email's submitted-contact rule). A case qualifies when its invite is
+        still actionable (issued/opened/in progress and unexpired), its
+        lifecycle has not moved past the vendor's part, reminders are not
+        paused, its submission is an incomplete draft, and the current cadence
+        period — anchored at the invite's issuance, so a new invitation only
+        becomes due after one full ``reminder_interval`` — has not already been
+        satisfied. Each candidate names the specific missing items and carries
+        the deterministic ``dedupe_key`` the sweep must claim before sending.
+        """
+        now = self._now_datetime()
+        authoritative: dict[str, VendorInvite] = {}
+        for invite in self._list("invite", VendorInvite):
+            if invite.status not in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                continue
+            if now >= parse_utc_timestamp(invite.expires_at):
+                continue
+            current = authoritative.get(invite.case_id)
+            invite_order = (parse_utc_timestamp(invite.issued_at), invite.invite_id)
+            current_order = (
+                (parse_utc_timestamp(current.issued_at), current.invite_id)
+                if current is not None
+                else None
+            )
+            if current_order is None or invite_order > current_order:
+                authoritative[invite.case_id] = invite
+        candidates: list[dict[str, Any]] = []
+        for case_id, invite in sorted(authoritative.items()):
+            case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+            if not isinstance(case, VendorCase) or case.lifecycle not in self._REMINDER_LIFECYCLES:
+                continue
+            if case.reminders_paused:
+                continue
+            try:
+                submission = self._submission_for_invite(invite.invite_id)
+            except VendorBackendError:
+                continue
+            if submission.status is not SubmissionStatus.DRAFT:
+                continue
+            stage, missing = self._missing_items(submission)
+            if not missing:
+                continue
+            period = self._reminder_period(invite, now)
+            if period < 1:
+                # Not yet due: the first reminder comes one full interval
+                # after the invitation, never immediately.
+                continue
+            dedupe_key = self._reminder_dedupe_key(case_id, period)
+            claim = self._delivery_claims.get(
+                workspace_id=self.workspace_id, dedupe_key=dedupe_key
+            )
+            if claim is not None and (
+                claim.status != "failed" or claim.attempts >= self.MAX_REMINDER_ATTEMPTS
+            ):
+                continue
+            contact = self._require("contact", invite.contact_id, VendorContact)
+            product = self._require("product", invite.product_id, VendorProduct)
+            candidates.append(
+                {
+                    "invite_id": invite.invite_id,
+                    "case_id": case_id,
+                    "dedupe_key": dedupe_key,
+                    "contact_name": contact.name,
+                    "contact_email": contact.email,
+                    "product_name": product.name,
+                    "intake_url": self._intake_url(invite),
+                    "stage": stage,
+                    "missing": missing,
+                }
+            )
+        return candidates
+
+    def claim_reminder(
+        self, *, dedupe_key: str, case_id: str, invite_id: str
+    ) -> ReminderClaim | None:
+        """Atomically claim one cadence period before any email is sent.
+
+        ``None`` means another worker owns the pending/sent attempt or the
+        bounded failed-attempt budget is exhausted. The returned claim carries
+        the attempt number used for conditional settlement.
+        """
+        return self._delivery_claims.claim(
+            workspace_id=self.workspace_id,
+            dedupe_key=dedupe_key,
+            case_id=case_id,
+            invite_id=invite_id,
+            claimed_at=self._now(),
+            max_attempts=self.MAX_REMINDER_ATTEMPTS,
+        )
+
+    def record_reminder(
+        self,
+        *,
+        invite_id: str,
+        case_id: str,
+        dedupe_key: str,
+        summary: str,
+        delivery: dict[str, Any],
+        claim: ReminderClaim | None = None,
+    ) -> IntegrationEvent:
+        """Settle and audit one reminder attempt without retaining raw email.
+
+        Only explicit ``live`` and ``simulated`` modes satisfy cadence. Failed,
+        skipped, missing, and unknown modes settle as failed and remain
+        retryable until the atomic outbox reaches ``MAX_REMINDER_ATTEMPTS``.
+        """
+        current = claim or self._delivery_claims.get(
+            workspace_id=self.workspace_id, dedupe_key=dedupe_key
+        )
+        mode = delivery.get("delivery") if isinstance(delivery, dict) else None
+        successful = mode in {"live", "simulated"}
+        if current is not None:
+            self._delivery_claims.settle(
+                workspace_id=self.workspace_id,
+                dedupe_key=dedupe_key,
+                attempts=current.attempts,
+                status="sent" if successful else "failed",
+            )
+        detail = {
+            "summary": summary,
+            "delivery": mode if isinstance(mode, str) else "failed",
+            "simulated": mode == "simulated",
+            "channel": delivery.get("channel") if isinstance(delivery, dict) else "email",
+            "dedupe_key": dedupe_key,
+        }
+        recipient = delivery.get("to") if isinstance(delivery, dict) else None
+        if recipient:
+            detail["recipient_sha256"] = self._hash_recipient(str(recipient))
+        return self._event(
+            self._REMINDER_EVENT,
+            "invite",
+            invite_id,
+            case_id=case_id,
+            detail=detail,
+        )
+
+    def reminder_history(self, case_id: str) -> dict[str, Any]:
+        """Reviewer-facing reminder delivery history and pause state (issue #37)."""
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        attempts = [
+            {
+                "occurred_at": event.occurred_at,
+                "invite_id": event.resource_id,
+                "summary": event.detail.get("summary"),
+                "delivery": event.detail.get("delivery"),
+                "simulated": event.detail.get("simulated"),
+                "dedupe_key": event.detail.get("dedupe_key"),
+            }
+            for event in self._list("event", IntegrationEvent)
+            if event.event_type == self._REMINDER_EVENT and event.case_id == case_id
+        ]
+        attempts.sort(key=lambda item: item["occurred_at"] or "")
+        return {
+            "case_id": case_id,
+            "paused": case.reminders_paused if isinstance(case, VendorCase) else False,
+            "items": attempts,
+        }
+
+    def set_reminders_paused(self, case_id: str, paused: bool) -> dict[str, Any]:
+        """Reviewer control: pause or resume automated reminders for one case."""
+        case = self._require("case", case_id, VendorCase)
+        if case.reminders_paused != paused:
+            self._put("case", case_id, replace(case, reminders_paused=paused))
+            self._event(
+                "reminder.paused" if paused else "reminder.resumed",
+                "case",
+                case_id,
+                case_id=case_id,
+            )
+        return {"case_id": case_id, "paused": paused}
+
+    def _reminder_period(self, invite: VendorInvite, now: datetime.datetime) -> int:
+        issued = parse_utc_timestamp(invite.issued_at)
+        return int((now - issued) / self.reminder_interval)
+
+    @staticmethod
+    def _reminder_dedupe_key(case_id: str, period: int) -> str:
+        return f"reminder:{case_id}:{period}"
+
+    # Sealed invite links. The raw token is never persisted (only its SHA-256
+    # hash authenticates requests); the seal XORs the token with an HMAC-SHA256
+    # keystream keyed by the non-persisted link secret and the invite id, so
+    # only a backend holding the secret can reconstruct the vendor's link.
+    # Unsealing is verified against the stored token hash before use.
+
+    def _keystream(self, invite_id: str, length: int) -> bytes:
+        blocks = b""
+        counter = 0
+        while len(blocks) < length:
+            blocks += hmac.new(
+                self._link_secret, f"{invite_id}:{counter}".encode("utf-8"), hashlib.sha256
+            ).digest()
+            counter += 1
+        return blocks[:length]
+
+    def _seal_token(self, invite_id: str, token: str) -> str:
+        raw = token.encode("utf-8")
+        keystream = self._keystream(invite_id, len(raw))
+        return bytes(a ^ b for a, b in zip(raw, keystream)).hex()
+
+    def _unseal_token(self, invite: VendorInvite) -> str | None:
+        if not invite.token_seal:
+            return None
+        try:
+            sealed = bytes.fromhex(invite.token_seal)
+        except ValueError:
+            return None
+        keystream = self._keystream(invite.invite_id, len(sealed))
+        raw = bytes(a ^ b for a, b in zip(sealed, keystream))
+        try:
+            token = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if not hmac.compare_digest(self._hash_token(token), invite.token_hash):
+            # Sealed under a different link secret (for example after a
+            # restart without a configured secret); no link can be offered.
+            return None
+        return token
+
+    def _intake_url(self, invite: VendorInvite) -> str | None:
+        token = self._unseal_token(invite)
+        if token is None:
+            return None
+        return f"{self.intake_base_url}#token={quote(token, safe='')}"
+
+    def _missing_items(self, submission: Submission) -> tuple[str, list[dict[str, Any]]]:
+        """Name what is still owed: submission gaps first, then open requirements."""
+        if not submission.intake_analysis_complete:
+            items: list[dict[str, Any]] = []
+            if not submission.evidence_artifact_ids:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Evidence files",
+                        "detail": "No evidence documents have been received yet.",
+                    }
+                )
+            if submission.trust_center_url is None:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Trust-center URL",
+                        "detail": "A public HTTPS trust-center link has not been provided.",
+                    }
+                )
+            if not items:
+                items.append(
+                    {
+                        "requirement_id": None,
+                        "label": "Intake analysis",
+                        "detail": (
+                            "Evidence was received but intake analysis has not run, so "
+                            "remaining questions are not yet visible. Open your "
+                            "invitation link to continue."
+                        ),
+                    }
+                )
+            return "awaiting_submission", items
+        covered = {
+            item.requirement_id
+            for item in self._list("coverage", CoverageItem)
+            if item.submission_id == submission.submission_id
+        }
+        answered = {key for key, value in submission.answers.items() if value.strip()}
+        items = []
+        for profile in self.profiles.active_profiles():
+            for criterion in profile.criteria:
+                if criterion.requirement_id in covered or criterion.requirement_id in answered:
+                    continue
+                items.append(
+                    {
+                        "requirement_id": criterion.requirement_id,
+                        "label": ", ".join(criterion.expected_evidence) or criterion.requirement_id,
+                        "detail": criterion.remediation_guidance or criterion.question,
+                    }
+                )
+        items.sort(key=lambda item: item["requirement_id"] or "")
+        return "questions_open", items
 
     # Immutable run versions --------------------------------------------------
 
@@ -1169,6 +1827,81 @@ class VendorBackend:
             "approval_granted": False,
         }
 
+    # Evidence policy criteria (issue #52) ------------------------------------
+
+    def get_policy_criteria(self) -> PolicyCriteria:
+        """Active reviewer-editable evidence-validation criteria.
+
+        The highest persisted version is authoritative; before any edit the
+        provisional, non-authoritative default applies (issue #52 stays open
+        until CSUB confirms these values).
+        """
+        versions = self._list("policy_criteria", PolicyCriteria)
+        if not versions:
+            return PolicyCriteria.default(workspace_id=self.workspace_id)
+        return max(versions, key=lambda item: item.version)
+
+    def update_policy_criteria(
+        self,
+        *,
+        updated_by: str,
+        pentest_max_age_days: int | None,
+        pci_attestation_max_age_days: int | None,
+        coi_required_coverages: tuple[str, ...],
+        evidence_expiry_days: int | None,
+        provisional: bool = True,
+    ) -> PolicyCriteria:
+        """Record a new immutable criteria version with reviewer attribution.
+
+        Thresholds are validated positive-or-None (``None`` means "no confirmed
+        rule", which downstream validation treats as manual review rather than
+        an invented pass/fail). Every change is auditable.
+        """
+        current = self.get_policy_criteria()
+        version = current.version + 1
+        coverages = tuple(
+            dict.fromkeys(
+                self._text(item, "coi_required_coverages").lower()
+                for item in coi_required_coverages
+            )
+        )
+        criteria = PolicyCriteria(
+            criteria_version_id=f"policy-criteria-{self.workspace_id}-{version:03d}",
+            version=version,
+            updated_at=self._now(),
+            updated_by=self._text(updated_by, "updated_by"),
+            pentest_max_age_days=self._positive_or_none(pentest_max_age_days, "pentest_max_age_days"),
+            pci_attestation_max_age_days=self._positive_or_none(
+                pci_attestation_max_age_days, "pci_attestation_max_age_days"
+            ),
+            coi_required_coverages=coverages,
+            evidence_expiry_days=self._positive_or_none(evidence_expiry_days, "evidence_expiry_days"),
+            provisional=provisional,
+            workspace_id=self.workspace_id,
+        )
+        self._put("policy_criteria", criteria.criteria_version_id, criteria)
+        self._event(
+            "policy.criteria_updated",
+            "policy_criteria",
+            criteria.criteria_version_id,
+            detail={
+                "version": version,
+                "provisional": provisional,
+                "updated_by": criteria.updated_by,
+            },
+        )
+        return criteria
+
+    @staticmethod
+    def _positive_or_none(value: int | None, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise VendorBackendError(
+                "invalid_policy_criteria", f"{field_name} must be a positive integer or null"
+            )
+        return value
+
     # Internal helpers --------------------------------------------------------
 
     def _save_progress(self, invite: VendorInvite, submission: Submission) -> None:
@@ -1186,15 +1919,13 @@ class VendorBackend:
         )
         if invite is None:
             raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self._expire_invite_if_needed(invite)
         if invite.status is InviteStatus.REVOKED:
             raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        if invite.status is InviteStatus.EXPIRED:
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         if invite.status is InviteStatus.SUBMITTED:
             raise VendorBackendError("invite_submitted", "invitation was already submitted", status=409)
-        expires = datetime.datetime.fromisoformat(invite.expires_at)
-        if self._now_datetime() >= expires:
-            expired = replace(invite, status=InviteStatus.EXPIRED)
-            self._put("invite", invite.invite_id, expired)
-            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         return invite
 
     def _draft_submission(self, invite: VendorInvite) -> Submission:

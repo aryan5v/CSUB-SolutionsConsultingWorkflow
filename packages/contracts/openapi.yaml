@@ -37,12 +37,19 @@ paths:
   /cases/{id}/documents:
     post:
       tags: [cases]
-      summary: Register uploaded evidence metadata (content stored separately, untrusted).
+      summary: Register case-scoped evidence metadata and return a checksum-bound quarantine upload.
       operationId: addCaseDocument
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       responses:
-        "201": { description: Document metadata registered. }
+        "201": { description: Document registered with a short-lived upload. }
         "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [cases]
+      summary: List case-scoped evidence processing states and provenance.
+      operationId: listCaseDocuments
+      parameters: [ { $ref: "#/components/parameters/CaseId" } ]
+      responses:
+        "200": { description: Case evidence states; never includes evidence bytes. }
   /cases/{id}/analyze:
     post:
       tags: [cases]
@@ -91,7 +98,7 @@ paths:
   /cases/{id}/review:
     post:
       tags: [review]
-      summary: Record a reviewer decision (approve, reject, request_info) and edits.
+      summary: Record a reviewer decision and edits, with internal comments separated from explicitly vendor-visible messaging.
       operationId: reviewCase
       parameters: [ { $ref: "#/components/parameters/CaseId" } ]
       requestBody:
@@ -258,6 +265,19 @@ paths:
       summary: Revoke and replace an invitation with a new opaque token.
       parameters: [{name: invite_id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Replacement token returned once.}}
+  /vendor/invites/current/evidence:
+    parameters: []
+    get:
+      tags: [vendor-intake]
+      summary: List only the bearer invitation's current evidence processing states and provenance.
+      security: [{VendorInviteBearer: []}]
+      responses: {"200": {description: Scoped evidence states without document bytes, internal leases, or claim tokens.}}
+    post:
+      tags: [vendor-intake]
+      summary: Register bearer-scoped untrusted evidence and return a checksum-bound quarantine upload.
+      security: [{VendorInviteBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
+      responses: {"200": {description: Evidence metadata and short-lived upload registration.}}
   /vendor/invites/{token}:
     get:
       tags: [vendor-intake]
@@ -277,9 +297,14 @@ paths:
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Unresolved stable requirement questions.}}
   /vendor/invites/{token}/evidence:
+    get:
+      tags: [vendor-intake]
+      summary: List only this invitation's evidence processing states and provenance.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Scoped evidence states without document bytes.}}
     post:
       tags: [vendor-intake]
-      summary: Register untrusted evidence metadata, optionally with inline bytes for content validation (issue 36).
+      summary: Register untrusted evidence (optionally with inline bytes for content validation, issue 36) and return a checksum-bound quarantine upload.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
       responses: {"200": {description: Evidence metadata registered.}}
@@ -322,6 +347,50 @@ paths:
       summary: Reviewer view of content-validation findings across a case's submissions.
       parameters: [{$ref: "#/components/parameters/CaseId"}]
       responses: {"200": {description: Cited validation findings; failed documents are not counted as received.}}
+  /reminders/run:
+    post:
+      tags: [vendor-intake]
+      summary: Run the weekly reminder sweep for missing or incomplete vendor evidence.
+      description: At most one reminder per case per cadence period; a deterministic reminder:{case_id}:{period} claim is persisted before each send so concurrent or retried sweeps never duplicate one. Failed deliveries are retried (bounded) on later sweeps. Each attempt is recorded as an email.reminder integration event with its truthful delivery mode and a hashed recipient. Intended to be triggered weekly by a scheduler.
+      responses: {"200": {description: Reminders sent this sweep (empty when none are due).}}
+  /cases/{id}/reminders:
+    get:
+      tags: [vendor-intake]
+      summary: Reminder delivery history and pause state for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Recorded reminder attempts with delivery results, plus the paused flag.}}
+  /cases/{id}/reminders/pause:
+    post:
+      tags: [vendor-intake]
+      summary: Pause automated evidence reminders for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Reminders paused.}}
+  /cases/{id}/reminders/resume:
+    post:
+      tags: [vendor-intake]
+      summary: Resume automated evidence reminders for a case.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Reminders resumed.}}
+  /vendor/invites/{token}/status:
+    get:
+      tags: [vendor-intake]
+      summary: Vendor-safe review status; stays readable after the submission is finalized, until the invitation expires.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: Per-requirement evidence status, collapsed review stage, human outcome, explicit vendor-visible comment, and safe next actions., content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/ReviewStatus"}}}}
+        "410": {description: Expired or revoked.}
+  /policy-criteria:
+    get:
+      tags: [profiles]
+      summary: Read the active reviewer-editable evidence-validation criteria (issue #52).
+      description: Thresholds (pentest max age, PCI attestation currency, evidence expiry) and required COI coverages. Values are provisional until CSUB confirms them; a null threshold means no confirmed rule and forces manual review instead of an invented pass/fail.
+      responses: {"200": {description: Active policy criteria with version and provisional flag.}}
+    put:
+      tags: [profiles]
+      summary: Record a new immutable criteria version from a reviewer edit.
+      description: Reviewer-only. Each threshold accepts a positive integer or null (TBD). The reviewer identity is attributed and the change is audited; models cannot set policy.
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {pentest_max_age_days: {type: [integer, "null"], minimum: 1}, pci_attestation_max_age_days: {type: [integer, "null"], minimum: 1}, evidence_expiry_days: {type: [integer, "null"], minimum: 1}, coi_required_coverages: {type: array, items: {type: string}}, provisional: {type: boolean}}}}}}
+      responses: {"200": {description: New criteria version recorded.}}
   /review-profiles:
     get:
       tags: [profiles]
@@ -409,6 +478,12 @@ paths:
       parameters: [{name: external_id, in: path, required: true, schema: {type: string}}]
       responses: {"201": {description: Case created from simulated import.}}
 components:
+  securitySchemes:
+    VendorInviteBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-invitation-token
+      description: Case-scoped invitation token accepted only in the Authorization header.
   schemas:
     QueueItem: { $ref: "./schemas/review-queue-item.schema.json" }
     CaseActionEnvelope: { $ref: "./schemas/case-action-response.schema.json" }

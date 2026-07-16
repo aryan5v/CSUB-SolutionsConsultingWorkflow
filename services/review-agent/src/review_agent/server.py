@@ -16,7 +16,7 @@ _CASE_ROUTE = re.compile(r"^/cases/([^/]+)(?:/(.*))?$")
 _RESOURCE_ROUTE = re.compile(r"^/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?$")
 _INVITE_ROUTE = re.compile(r"^/invites/([^/]+)/(revoke|resend)$")
 _VENDOR_TOKEN_ROUTE = re.compile(
-    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|findings))?$"
+    r"^/vendor/invites/([^/]+)(?:/(open|evidence|trust-center|answers|coverage|analyze|questions|finalize|findings|status))?$"
 )
 _PROFILE_ROUTE = re.compile(r"^/review-profiles/([^/]+)(?:/(fixture-test|activate|rollback))?$")
 _CATALOG_CONFIRM_ROUTE = re.compile(r"^/catalog/matches/([^/]+)/confirm$")
@@ -69,6 +69,9 @@ def create_server(
                     return
                 if method == "GET" and path == "/integration-events":
                     self._json(HTTPStatus.OK, application.integration_events())
+                    return
+                if method == "POST" and path == "/reminders/run":
+                    self._json(HTTPStatus.OK, application.run_reminder_sweep())
                     return
                 if method == "GET" and path == "/catalog":
                     self._json(
@@ -250,6 +253,8 @@ def create_server(
                 result = application.resolve_vendor_invite(token, mark_open=True)
             elif method == "POST" and action == "evidence":
                 result = application.vendor_add_evidence(token, self._body())
+            elif method == "GET" and action == "evidence":
+                result = application.vendor_evidence_status(token)
             elif method == "POST" and action == "trust-center":
                 result = application.vendor_set_trust_center(token, self._body())
             elif method == "POST" and action == "answers":
@@ -262,6 +267,8 @@ def create_server(
                 result = application.vendor_questions(token)
             elif method == "GET" and action == "findings":
                 result = application.vendor_evidence_findings(token)
+            elif method == "GET" and action == "status":
+                result = application.vendor_review_status(token)
             elif method == "POST" and action == "finalize":
                 result = application.vendor_finalize(token)
             else:
@@ -276,6 +283,8 @@ def create_server(
                 self._json(HTTPStatus.OK, application.get_case_research(case_id))
             elif method == "POST" and suffix == "documents":
                 self._json(HTTPStatus.CREATED, application.add_document(case_id, self._body()))
+            elif method == "GET" and suffix == "documents":
+                self._json(HTTPStatus.OK, application.case_evidence_status(case_id))
             elif method == "POST" and suffix == "analyze":
                 body = self._body()
                 confirmed = body.get("confirmed_match_id")
@@ -310,6 +319,12 @@ def create_server(
                 self._json(HTTPStatus.CREATED, application.issue_vendor_invite(case_id, self._body()))
             elif method == "GET" and suffix == "invites":
                 self._json(HTTPStatus.OK, application.list_case_invites(case_id))
+            elif method == "GET" and suffix == "reminders":
+                self._json(HTTPStatus.OK, application.reminder_history(case_id))
+            elif method == "POST" and suffix == "reminders/pause":
+                self._json(HTTPStatus.OK, application.set_reminders_paused(case_id, True))
+            elif method == "POST" and suffix == "reminders/resume":
+                self._json(HTTPStatus.OK, application.set_reminders_paused(case_id, False))
             elif method == "POST" and suffix == "review-runs":
                 self._json(HTTPStatus.CREATED, application.create_review_run(case_id, self._body()))
             elif method == "GET" and suffix == "review-runs":

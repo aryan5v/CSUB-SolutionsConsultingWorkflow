@@ -45,11 +45,7 @@ jobs:
       BUDGET_LIMIT_USD: ${{ vars.BUDGET_LIMIT_USD }}
       SERVICE_NOW_TABLE_NAME: ${{ vars.SERVICE_NOW_TABLE_NAME }}
       DESTROY_ON_REMOVAL: ${{ vars.DESTROY_ON_REMOVAL }}
-      VITE_API_BASE_URL: ${{ vars.API_ENDPOINT }}
-      VITE_COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
-      VITE_COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
-      VITE_COGNITO_REDIRECT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
-      VITE_COGNITO_LOGOUT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
+      SLACK_SECRET_ARN: ${{ vars.SLACK_SECRET_ARN }}
 
     steps:
       - name: Check out complete history
@@ -97,6 +93,21 @@ jobs:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: git checkout --detach "$RELEASE_SHA"
 
+      - name: Assert hermetic verification environment
+        if: steps.release.outputs.operation != 'rollback'
+        run: |
+          leaked=""
+          for var in VITE_API_BASE_URL VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID \
+            VITE_COGNITO_REDIRECT_URI VITE_COGNITO_LOGOUT_URI; do
+            if [[ -n "${!var:-}" ]]; then
+              leaked="$leaked $var"
+            fi
+          done
+          if [[ -n "$leaked" ]]; then
+            echo "::error::Live deployment configuration leaked into hermetic verification:${leaked}" >&2
+            exit 1
+          fi
+
       - name: Verify repository without cloud credentials
         if: steps.release.outputs.operation != 'rollback'
         run: make verify
@@ -105,6 +116,11 @@ jobs:
         if: steps.release.outputs.operation != 'rollback'
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          VITE_API_BASE_URL: ${{ vars.API_ENDPOINT }}
+          VITE_COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
+          VITE_COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
+          VITE_COGNITO_REDIRECT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
+          VITE_COGNITO_LOGOUT_URI: https://${{ vars.CLOUDFRONT_DOMAIN }}/app
         run: scripts/deploy/build_frontend.sh "$RELEASE_SHA"
 
       - name: Synthesize cloud assembly without cloud credentials
@@ -117,6 +133,7 @@ jobs:
           npm --prefix infra run synth -- \
             --output "$RUNNER_TEMP/cdk.out" \
             -c "appEnv=$APP_ENV" \
+            -c "slackSecretArn=$SLACK_SECRET_ARN" \
             -c enableAgentCoreServices=false \
             -c enableVectorStores=false \
             -c enableGuardrail=false

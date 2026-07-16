@@ -4,7 +4,7 @@ import App from "./App";
 import AuthGate from "./AuthGate";
 import Landing from "./Landing";
 import PublicIntake from "./PublicIntake";
-import { LoginPage, SignupPage } from "./AuthPages";
+import { LoginPage } from "./AuthPages";
 import { consumeInviteTokenFromFragment, reviewApi } from "./api";
 
 /*
@@ -12,7 +12,7 @@ import { consumeInviteTokenFromFragment, reviewApi } from "./api";
  * selection is a small pathname switch so we avoid a router dependency:
  *   /          public VETTED landing
  *   /login     reviewer sign-in (Cognito authorization code + PKCE)
- *   /signup    reviewer account creation through the campus-hosted UI
+ *   /signup    redirects to the single campus sign-in surface
  *   /intake    public, file-first vendor intake
  *   /app/*     authenticated reviewer workspace
  *
@@ -24,7 +24,10 @@ function resolveRoute() {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path === "/app" || path.startsWith("/app/")) return <AuthGate mode={reviewApi.mode}><App /></AuthGate>;
   if (path === "/login") return <LoginPage />;
-  if (path === "/signup") return <SignupPage />;
+  if (path === "/signup") {
+    window.history.replaceState({}, "", "/login");
+    return <LoginPage />;
+  }
   if (path === "/intake") {
     const token = consumeInviteTokenFromFragment(window.location, window.history, window.sessionStorage);
     return <PublicIntake initialToken={token} />;
