@@ -134,6 +134,51 @@ describe("review API client", () => {
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer reviewer-jwt");
   });
 
+  it("reads evidence policy criteria for the reviewer", async () => {
+    const criteria = {
+      criteria_version_id: "policy-criteria-csub-demo-000",
+      version: 0,
+      updated_at: "",
+      updated_by: "system:default",
+      pentest_max_age_days: 365,
+      pci_attestation_max_age_days: null,
+      coi_required_coverages: ["cyber"],
+      evidence_expiry_days: 365,
+      provisional: true,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(criteria));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await expect(client.getPolicyCriteria()).resolves.toEqual(criteria);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/policy-criteria");
+    expect((init.method ?? "GET")).toBe("GET");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer reviewer-jwt");
+  });
+
+  it("saves edited policy criteria with a PUT and reviewer bearer", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ version: 1 }));
+    const client = createReviewApiClient({ mode: "live", fetchImpl: fetchMock, authProvider: authProvider() });
+
+    await client.updatePolicyCriteria({
+      pentest_max_age_days: 180,
+      pci_attestation_max_age_days: null,
+      coi_required_coverages: ["cyber", "privacy"],
+      evidence_expiry_days: 400,
+      provisional: false,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/policy-criteria");
+    expect(init.method).toBe("PUT");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer reviewer-jwt");
+    const body = JSON.parse(String(init.body));
+    expect(body.pentest_max_age_days).toBe(180);
+    expect(body.pci_attestation_max_age_days).toBeNull();
+    expect(body.provisional).toBe(false);
+  });
+
   it("sends human confirmation, decision, preview, and explicit commit requests", async () => {
     const response = {
       state: state(),

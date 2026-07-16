@@ -61,6 +61,7 @@ from .contracts.vendor import (
     EvidenceArtifact,
     IntegrationEvent,
     InviteStatus,
+    PolicyCriteria,
     ProfileStatus,
     ReminderClaim,
     ReviewCriterion,
@@ -963,6 +964,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
         }
     ),
     "reminder_claim": lambda value: ReminderClaim(**value),
+    "policy_criteria": lambda value: PolicyCriteria.from_dict(value),
 }
 
 
@@ -1346,6 +1348,11 @@ def _dispatch(
             return api.list_profiles(), 200, False
         if method == "POST":
             return api.create_profile_draft(body), 201, True
+    if path == "/policy-criteria":
+        if method == "GET":
+            return api.get_policy_criteria(), 200, False
+        if method == "PUT":
+            return api.update_policy_criteria(body, reviewer_id=reviewer_id), 200, True
     resource = re.fullmatch(r"/(vendors|vendor-products|vendor-contacts)(?:/([^/]+))?", path)
     if resource:
         return _dispatch_resource(api, method, resource.group(1), resource.group(2), body, event)
@@ -1999,6 +2006,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "run": "run_id",
         "event": "event_id",
         "reminder_claim": "dedupe_key",
+        "policy_criteria": "criteria_version_id",
     }
     key = keys.get(kind)
     if key is None:

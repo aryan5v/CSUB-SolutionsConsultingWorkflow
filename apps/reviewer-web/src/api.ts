@@ -265,6 +265,38 @@ export type VendorReviewStatus = {
   checklist: VendorChecklistItem[];
 };
 export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
+// Reviewer-editable evidence-validation thresholds (issue #52). A null threshold
+// means "no confirmed rule" and defers to manual review rather than an invented
+// pass/fail; `provisional` marks values not yet confirmed by CSUB.
+export type PolicyCriteria = {
+  criteria_version_id: string;
+  version: number;
+  updated_at: string;
+  updated_by: string;
+  pentest_max_age_days: number | null;
+  pci_attestation_max_age_days: number | null;
+  coi_required_coverages: string[];
+  evidence_expiry_days: number | null;
+  provisional: boolean;
+};
+export type PolicyCriteriaInput = {
+  pentest_max_age_days: number | null;
+  pci_attestation_max_age_days: number | null;
+  coi_required_coverages: string[];
+  evidence_expiry_days: number | null;
+  provisional: boolean;
+};
+const FIXTURE_POLICY_CRITERIA: PolicyCriteria = {
+  criteria_version_id: "policy-criteria-csub-demo-000",
+  version: 0,
+  updated_at: "",
+  updated_by: "system:default",
+  pentest_max_age_days: 365,
+  pci_attestation_max_age_days: null,
+  coi_required_coverages: ["cyber"],
+  evidence_expiry_days: 365,
+  provisional: true,
+};
 export type EvidenceMetadata = { filename: string; content_type: string; size_bytes: number; sha256: string };
 export type EvidenceArtifact = EvidenceMetadata & {
   workspace_id?: string;
@@ -536,6 +568,14 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     async listQueue(): Promise<QueueItem[]> {
       if (mode === "fixture") return [];
       return (await request<{ items: QueueItem[] }>("/review-queue")).items;
+    },
+    async getPolicyCriteria(): Promise<PolicyCriteria> {
+      if (mode === "fixture") return fixtureOnly(FIXTURE_POLICY_CRITERIA);
+      return request<PolicyCriteria>("/policy-criteria");
+    },
+    updatePolicyCriteria(input: PolicyCriteriaInput): Promise<PolicyCriteria> {
+      if (mode === "fixture") return fixtureOnly({ ...FIXTURE_POLICY_CRITERIA, ...input, version: 1 });
+      return request("/policy-criteria", { method: "PUT", body: JSON.stringify(input) });
     },
     createCase(input: CaseIntakeInput): Promise<{ case_id: string; state: ReviewState }> {
       if (mode === "fixture") {

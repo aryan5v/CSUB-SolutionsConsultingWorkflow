@@ -1022,6 +1022,55 @@ class LocalReviewApi:
             ).to_dict()
         )
 
+    def get_policy_criteria(self) -> dict[str, Any]:
+        """Active reviewer-editable evidence-validation criteria (issue #52)."""
+        return self._vendor.get_policy_criteria().to_dict()
+
+    def update_policy_criteria(
+        self, payload: dict[str, Any], *, reviewer_id: str | None
+    ) -> dict[str, Any]:
+        """Record a new criteria version from a reviewer edit.
+
+        Thresholds accept a positive integer or ``null`` (``null`` means "no
+        confirmed rule" and defers to manual review). Required-coverage entries
+        are a list of coverage keywords. The reviewer identity is attributed and
+        the change is audited.
+        """
+        if not isinstance(payload, dict):
+            raise LocalApiError(400, "validation_error", "policy criteria payload must be an object")
+        coverages_value = payload.get("coi_required_coverages", ["cyber"])
+        if not isinstance(coverages_value, list) or not all(
+            isinstance(item, str) for item in coverages_value
+        ):
+            raise LocalApiError(
+                400, "validation_error", "coi_required_coverages must be a list of strings"
+            )
+        provisional = payload.get("provisional", True)
+        if not isinstance(provisional, bool):
+            raise LocalApiError(400, "validation_error", "provisional must be a boolean")
+        return self._vendor_call(
+            lambda: self._vendor.update_policy_criteria(
+                updated_by=reviewer_id or "reviewer",
+                pentest_max_age_days=self._optional_threshold(payload, "pentest_max_age_days"),
+                pci_attestation_max_age_days=self._optional_threshold(
+                    payload, "pci_attestation_max_age_days"
+                ),
+                coi_required_coverages=tuple(coverages_value),
+                evidence_expiry_days=self._optional_threshold(payload, "evidence_expiry_days"),
+                provisional=provisional,
+            ).to_dict()
+        )
+
+    @staticmethod
+    def _optional_threshold(payload: dict[str, Any], key: str) -> int | None:
+        """A submitted threshold is a positive int or explicit null (TBD)."""
+        if key not in payload or payload[key] is None:
+            return None
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise LocalApiError(400, "validation_error", f"{key} must be a positive integer or null")
+        return value
+
     def update_profile_draft(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if set(payload) != {"criteria"} or not isinstance(payload["criteria"], list):
             raise LocalApiError(400, "validation_error", "profile update requires criteria")
