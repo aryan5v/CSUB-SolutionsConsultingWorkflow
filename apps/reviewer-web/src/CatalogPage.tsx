@@ -90,11 +90,11 @@ export function CatalogPage({ notify }: { notify: Notify }) {
 
       <div className="catalog-columns" aria-hidden="true"><span>Product</span><span>Vendor</span><span>Platform / audience</span><span>Support</span><span>License</span><span>Source</span></div>
 
-      <div className="catalog-list" role="list">
+      <div className="catalog-list" aria-label="Software catalog results">
         {loading && <div className="catalog-empty" role="status">Loading catalog records…</div>}
         {!loading && items.length === 0 && !error && <div className="catalog-empty"><Search size={18} /><strong>No catalog records match this search.</strong><span>Try a different product or vendor name.</span></div>}
         {!loading && items.map((item) => (
-          <article className="catalog-row" role="listitem" key={item.record_id}>
+          <article className="catalog-row" key={item.record_id}>
             <span className="catalog-product">
               <span className="catalog-glyph" aria-hidden="true"><Package size={15} /></span>
               <span><strong>{item.canonical_name}</strong>{item.product && item.product !== item.canonical_name ? <small>{item.product}</small> : null}</span>
