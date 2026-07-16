@@ -1170,22 +1170,21 @@ class VendorBackend:
     def _message_body(value: object) -> str:
         """Sanitize untrusted thread text: keep newlines, drop control chars, bound length."""
         if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or not value.strip():
             raise VendorBackendError("validation_error", "message body is required")
+        if len(value) > MAX_THREAD_BODY_CHARS:
+            raise VendorBackendError(
+                "message_too_long",
+                f"message body exceeds {MAX_THREAD_BODY_CHARS} characters",
+                status=413,
+            )
         if any(
             ord(char) < 32 and char not in "\t\n\r" or ord(char) == 127 for char in value
         ):
             raise VendorBackendError(
                 "validation_error", "message body contains control characters"
             )
-        cleaned = value.strip()
-        if len(cleaned) > MAX_THREAD_BODY_CHARS:
-            raise VendorBackendError(
-                "message_too_long",
-                f"message body exceeds {MAX_THREAD_BODY_CHARS} characters",
-                status=413,
-            )
-        return cleaned
-
+        return value.strip()
     def intake_stage(self, token: str) -> dict[str, Any]:
         """Return the current staged-intake position for the vendor UI."""
         invite = self._valid_invite(token)
