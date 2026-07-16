@@ -586,7 +586,7 @@ function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange, mode
         </div>
         <label className="search-control"><Search size={15} /><span className="sr-only">Search reviews</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search requests…" /></label>
       </div>
-      <div className="queue-columns" aria-hidden="true"><span>Request</span><span>Requester / owner</span><span>Status</span><span>Route / match</span><span>Updated</span></div>
+      <div className="queue-columns"><span>Request</span><span>Requester / owner</span><span>Status</span><span>Route / match</span><span>Updated</span></div>
       <div className="review-list review-list-full">
         {filteredCases.map((review) => <ReviewRow key={review.id} review={review} onOpen={onOpenCase} />)}
         {filteredCases.length === 0 && <div className="empty-state"><Search size={18} /><strong>No reviews match this filter.</strong><span>Try another status or search term.</span></div>}
@@ -698,7 +698,7 @@ function WritebackPreview({ decision, written, preview, onWrite }: { decision: D
   const after = preview?.after ?? { state: "Ready for committee", u_review_outcome: "Medium-risk packet drafted", work_notes: "Human-reviewed decision", attachment: "Pending confirmation" };
   const rows = (values: Record<string, unknown>, changed: boolean) => Object.entries(values).slice(0, 5).map(([field, value]) => <div key={field}><dt>{field.replace(/^u_/, "").replace(/_/g, " ")}</dt><dd>{changed ? <span className="diff-value">{String(value || "-")}</span> : String(value || "-")}</dd></div>);
   return <section className="writeback-layout">
-    <div className="simulation-banner"><CircleDashed size={18} /><span><strong>Simulated ServiceNow</strong>This preview never connects to a live campus system.</span></div>
+    <div className="simulation-banner" role="note"><CircleDashed size={18} aria-hidden="true" /><span><strong>Simulated ServiceNow</strong>This preview never connects to a live campus system.</span></div>
     <div className="before-after-grid">
       <article className="content-card"><p className="eyebrow">Before</p><h2>Mock request · {preview?.record_id ?? "Preview pending"}</h2><dl className="change-list">{rows(before, false)}</dl></article>
       <article className="content-card after-card"><p className="eyebrow">After</p><h2>Proposed configured changes</h2><dl className="change-list">{rows(after, true)}</dl></article>
@@ -781,11 +781,11 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
     </ol>
 
     <div className="review-tabs" role="tablist" aria-label="Review sections">
-      {(["overview", "packet", "writeback"] as const).map((item) => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} />}</button>)}
+      {(["overview", "packet", "writeback"] as const).map((item) => <button key={item} id={`review-tab-${item}`} type="button" role="tab" aria-selected={tab === item} aria-controls={`review-panel-${item}`} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "overview" ? "Review overview" : item === "packet" ? "Packet editor" : "Write-back preview"}{item === "packet" && <span>{state?.draft_packet ? `v${state.draft_packet.packet_version}` : "pending"}</span>}{item === "writeback" && decision !== "Approved" && <LockKeyhole size={13} aria-hidden="true" />}</button>)}
     </div>
 
     <div className="review-workspace">
-      <div className="review-main">
+      <div className="review-main" role="tabpanel" id={`review-panel-${tab}`} aria-labelledby={`review-tab-${tab}`}>
         {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={onOpenEvidence} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
         {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the fuzzy or semantic software candidate before deterministic policy, specialist analysis, and packet composition continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
@@ -824,16 +824,16 @@ function EvidencePage({ caseId }: { caseId: string }) {
   const filtered = evidenceItems.filter((item) => scope === "All sources" || item.scope === scope);
   return <>
     <PageIntro eyebrow="Grounded review material" title="Evidence" description="Inspect citations without mixing campus policy, case uploads, or official vendor material." />
-    <section className="scope-strip"><FolderLock size={17} /><div><strong>Three retrieval scopes, always separate.</strong><span>Sources can support a finding; they cannot override deterministic policy or a reviewer.</span></div></section>
+    <section className="scope-strip" aria-label="Evidence retrieval boundaries"><FolderLock size={17} aria-hidden="true" /><div><strong>Three retrieval scopes, always separate.</strong><span>Sources can support a finding; they cannot override deterministic policy or a reviewer.</span></div></section>
     <section className="panel evidence-list-panel" aria-labelledby="processing-state-heading">
-      <div className="preview-toolbar"><span><CircleDotDashed size={17} /><span><strong id="processing-state-heading">Current case processing</strong><small>Case {caseId} · refreshed while work is active</small></span></span></div>
+      <div className="preview-toolbar"><span><CircleDotDashed size={17} aria-hidden="true" /><span><strong id="processing-state-heading">Current case processing</strong><small>Case {caseId} · refreshed while work is active</small></span></span></div>
       {processingError && <p className="record-context-error" role="alert">{processingError}</p>}
       <EvidenceProcessingList items={processingItems} emptyMessage="No uploaded evidence is registered for this case." />
     </section>
     <div className="evidence-layout">
       <section className="panel evidence-list-panel">
-        <div className="scope-tabs" aria-label="Filter evidence by scope">{(["All sources", "Campus policy", "Case evidence", "Vendor evidence"] as const).map((item) => <button key={item} className={scope === item ? "active" : ""} onClick={() => setScope(item)}>{item}</button>)}</div>
-        <div className="document-list">{filtered.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)} className={selected.id === item.id ? "selected" : ""}><span className="document-icon"><FileText size={17} /></span><span><strong>{item.name}</strong><small>{item.type} · {item.vendor}</small><em>{item.location}</em></span><StatusBadge>{item.status}</StatusBadge></button>)}</div>
+        <div className="scope-tabs" aria-label="Filter evidence by scope">{(["All sources", "Campus policy", "Case evidence", "Vendor evidence"] as const).map((item) => <button key={item} type="button" className={scope === item ? "active" : ""} onClick={() => setScope(item)} aria-pressed={scope === item}>{item}</button>)}</div>
+        <div className="document-list" role="listbox" aria-label="Evidence documents">{filtered.map((item) => <button key={item.id} type="button" role="option" onClick={() => setSelectedId(item.id)} className={selected.id === item.id ? "selected" : ""} aria-selected={selected.id === item.id}><span className="document-icon" aria-hidden="true"><FileText size={17} /></span><span><strong>{item.name}</strong><small>{item.type} · {item.vendor}</small><em>{item.location}</em></span><StatusBadge>{item.status}</StatusBadge></button>)}</div>
       </section>
       <section className="panel evidence-preview">
         <div className="preview-toolbar"><span><FileText size={17} /><span><strong>{selected.name}</strong><small>{selected.id} · {selected.updated}</small></span></span><StatusBadge>{selected.scope}</StatusBadge></div>
@@ -1028,7 +1028,13 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => { if (nextQueueMode) setQueueMode(nextQueueMode); setPage(nextPage); setMobileNavOpen(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const navigate = (nextPage: Page, nextQueueMode?: QueueMode) => {
+    if (nextQueueMode) setQueueMode(nextQueueMode);
+    setPage(nextPage);
+    setMobileNavOpen(false);
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  };
   const apiErrorMessage = (error: unknown) => error instanceof ReviewApiError ? error.message : "The local backend request failed.";
   const openCase = (review: ReviewCase) => {
     setReviewComment("");
@@ -1208,7 +1214,7 @@ export default function App() {
   return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
-    <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
+    <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`} aria-label="Workspace navigation">
       <div className="brand">
         <img className="brand-logo" src="/vetted-logo.png" alt="" width={30} height={30} aria-hidden="true" />
         <span><strong>Vetted</strong><small>Reviewer workspace</small></span>
@@ -1217,11 +1223,11 @@ export default function App() {
       </div>
       <div className="workspace-chip"><span>CSUB</span><div><strong>CSUB workspace</strong><small>{reviewApi.mode === "fixture" ? "Fixture mode · simulated records" : backendConnected ? "Live API connected" : "Live API unavailable"}</small></div></div>
       <nav className="primary-nav" aria-label="Primary navigation">
-        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em>{badge}</em> : null; })()}</button>; })}</div>)}
+        {navGroups.map((group) => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => { const Icon = item.icon; const active = page === item.page && (item.page !== "queue" || !item.queueMode || queueMode === item.queueMode); return <button key={`${item.page}-${item.label}`} className={active ? "active" : ""} onClick={() => navigate(item.page, item.queueMode)} aria-current={active ? "page" : undefined}><Icon size={17} aria-hidden="true" /><span>{item.label}</span>{(() => { const badge = navCount(item); return badge ? <em aria-label={`${badge} items`}>{badge}</em> : null; })()}</button>; })}</div>)}
       </nav>
       <div className="sidebar-spacer" />
-      <div className="boundary-card"><ShieldCheck size={17} /><div><strong>Human-controlled</strong><span>AI can draft and compare. It cannot set policy, approve, or write externally.</span></div></div>
-      <div className="profile"><Avatar name="Alex Reviewer" small /><div><strong>Alex Reviewer</strong><span>Information Security</span></div><span className="presence-dot" aria-label="Online" /></div>
+      <div className="boundary-card"><ShieldCheck size={17} aria-hidden="true" /><div><strong>Human-controlled</strong><span>AI can draft security and accessibility findings. It cannot set policy, approve, or write externally.</span></div></div>
+      <div className="profile"><Avatar name="Alex Reviewer" small /><div><strong>Alex Reviewer</strong><span>Information Security</span></div><span className="presence-dot" role="img" aria-label="Online" /></div>
     </aside>
 
     <div className="app-main">
