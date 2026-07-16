@@ -94,7 +94,7 @@ class VendorBackendTests(unittest.TestCase):
         artifact = self.backend.add_evidence(
             token,
             {
-                "filename": "soc2-report.pdf",
+                "filename": "certificate-of-insurance.pdf",
                 "content_type": "application/pdf",
                 "size_bytes": 100,
                 "sha256": "a" * 64,
@@ -107,12 +107,28 @@ class VendorBackendTests(unittest.TestCase):
         self.assertEqual(pending.exception.code, "intake_analysis_pending")
         analyzed = self.backend.run_intake_analysis(token)
         self.assertTrue(analyzed.intake_analysis_complete)
-        # "SOC 2" expected evidence deterministically covers SEC.DATA.001 from the
-        # soc2 filename, leaving only the accessibility requirement open.
+        # Metadata-only COI evidence (a validated type) is retained but fails
+        # closed with a content_unavailable finding, so it cannot cover any
+        # requirement; both active requirements remain open for explicit answers.
         questions = self.backend.unresolved_questions(token)
-        self.assertEqual([item["requirement_id"] for item in questions], ["A11Y.VPAT.001"])
-        del artifact
-        self.backend.save_answers(token, {"A11Y.VPAT.001": "VPAT is attached on request."})
+        self.assertEqual(
+            [item["requirement_id"] for item in questions],
+            ["A11Y.VPAT.001", "SEC.DATA.001"],
+        )
+        findings = self.backend.submission_findings(token)
+        self.assertEqual(
+            [(item["check"], item["disposition"]) for item in findings],
+            [("evidence.content_unavailable", "manual_review")],
+        )
+        self.assertEqual(findings[0]["artifact_id"], artifact.artifact_id)
+        self.assertEqual(findings[0]["source_citation"]["line"], 1)
+        self.backend.save_answers(
+            token,
+            {
+                "A11Y.VPAT.001": "VPAT is attached on request.",
+                "SEC.DATA.001": "Security response requires reviewer confirmation.",
+            },
+        )
         recovered = self.backend.resolve_invite(token)
         self.assertEqual(
             recovered["submission"]["trust_center_url"], "https://trust.vendor.example/security"

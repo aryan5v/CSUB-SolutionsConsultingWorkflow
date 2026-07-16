@@ -17,6 +17,7 @@
     "row": { "type": ["integer", "null"] },
     "column": { "type": ["string", "null"] },
     "page": { "type": ["integer", "null"] },
+    "line": { "type": ["integer", "null"], "minimum": 1, "description": "One-based line in deterministically extracted text." },
     "node_id": { "type": ["string", "null"] },
     "version": { "type": "string" },
     "sha256": { "type": "string" }

@@ -215,6 +215,33 @@ class EvidenceArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceValidationFinding:
+    """One failed or manual-review check on a retained evidence artifact (issue #36).
+
+    Findings keep the affected requirement unresolved so the reminder flow and
+    vendor checklist do not treat a filename as evidence. ``manual_review``
+    includes unavailable bytes, unreadable or unknown documents, identity
+    mismatches, unreadable dates, and a TBD rule such as PCI currency. Every
+    source citation identifies the artifact bytes and a one-based line; line 1
+    is the deterministic document coordinate for document-level findings.
+    """
+
+    finding_id: str
+    submission_id: str
+    artifact_id: str
+    filename: str
+    evidence_type: str
+    check: str
+    reason: str
+    source_citation: dict[str, Any]
+    disposition: str = "failed"
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageItem:
     coverage_id: str
     submission_id: str

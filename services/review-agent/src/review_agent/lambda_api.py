@@ -30,7 +30,15 @@ from urllib.parse import parse_qs
 from .adapters.email import EmailSender
 from .adapters.model import DeterministicModelClient
 from .adapters.servicenow import MockServiceNowConnector, _Record
-from .api import LocalApiError, LocalReviewApi, _CaseRecord, vendor_link_settings
+from .adapters.storage import StorageClient
+from .api import (
+    LocalApiError,
+    LocalReviewApi,
+    _CaseRecord,
+    _default_evidence_storage,
+    vendor_link_settings,
+)
+from .config import AppConfig
 from .audit.log import AuditLog, InMemoryAuditSink
 from .contracts.audit import ActorType, AuditEvent
 from .contracts.case import CaseIntake, DataClassification, Requester
@@ -59,6 +67,7 @@ from .contracts.vendor import (
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceValidationFinding,
     IntegrationEvent,
     InviteStatus,
     PolicyCriteria,
@@ -109,6 +118,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/vendor/invites/current/coverage"),
     ("POST", "/vendor/invites/current/analyze"),
     ("POST", "/vendor/invites/current/finalize"),
+    ("GET", "/vendor/invites/current/findings"),
     ("GET", "/vendor/invites/current/status"),
     ("GET", "/intake"),
     ("POST", "/intake"),
@@ -120,6 +130,7 @@ _PUBLIC_ROUTES = {
     ("POST", "/intake/analyze"),
     ("GET", "/intake/questions"),
     ("POST", "/intake/finalize"),
+    ("GET", "/intake/findings"),
     ("GET", "/intake/status"),
 }
 
@@ -963,6 +974,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
             ),
         }
     ),
+    "finding": lambda value: EvidenceValidationFinding(**value),
     "reminder_claim": lambda value: ReminderClaim(**value),
     "policy_criteria": lambda value: PolicyCriteria.from_dict(value),
 }
@@ -1070,6 +1082,7 @@ def restore_api(
     catalog_values: list[dict[str, Any]],
     *,
     workspace_id: str,
+    evidence_storage: StorageClient | None = None,
     delivery_claim_store: DeliveryClaimStore | None = None,
     email_sender: EmailSender | None = None,
     clock: Callable[[], datetime.datetime] | None = None,
@@ -1081,6 +1094,7 @@ def restore_api(
         raise RuntimeError("workspace snapshot isolation check failed")
     api = LocalReviewApi(
         seed_demo=False,
+        evidence_storage=evidence_storage,
         delivery_claim_store=delivery_claim_store,
         email_sender=email_sender,
         clock=clock,
@@ -1113,10 +1127,14 @@ def restore_api(
     api._profiles = ReviewProfileService(
         repository, workspace_id=workspace_id, clock=api._clock
     )
+    # Preserve every trust-boundary adapter when rebuilding the backend after
+    # a cold start: evidence bytes/extraction and guarded official-domain research.
     api._vendor = VendorBackend(
         repository,
         api._profiles,
         workspace_id=workspace_id,
+        evidence_storage=api._evidence_storage,
+        extractor=api._evidence_extractor,
         clock=api._clock,
         research_provider=api.research_provider,
         delivery_claim_store=api._delivery_claim_store,
@@ -1164,12 +1182,16 @@ def create_handler(
     *,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     allowed_origins: Iterable[str] = (),
+    evidence_storage: StorageClient | None = None,
     delivery_claim_store: DeliveryClaimStore | None = None,
     email_sender: EmailSender | None = None,
     clock: Callable[[], datetime.datetime] | None = None,
     evidence_uploads: EvidenceUploadIssuer | None = None,
 ) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
     origins = frozenset(origin for origin in allowed_origins if origin)
+    # Built once per handler so evidence bytes survive across requests within
+    # a warm container; on AWS the S3-backed store is durable across restores.
+    evidence_store = evidence_storage or _default_evidence_storage(AppConfig.from_env())
     claims = delivery_claim_store or store
 
     def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -1237,6 +1259,7 @@ def create_handler(
                 snapshot,
                 store.load_catalog(workspace_id),
                 workspace_id=workspace_id,
+                evidence_storage=evidence_store,
                 delivery_claim_store=claims,
                 email_sender=email_sender,
                 clock=clock,
@@ -1464,6 +1487,8 @@ def _dispatch_case(
         return api.preview_servicenow(case_id), 200, True
     if method == "POST" and suffix == "servicenow/commit":
         return api.commit_servicenow(case_id, body), 200, True
+    if method == "GET" and suffix == "evidence-findings":
+        return api.case_evidence_findings(case_id), 200, False
     if method == "GET" and suffix == "packet":
         return api.get_packet(case_id), 200, False
     if method == "GET" and suffix == "packet/pdf":
@@ -1504,6 +1529,7 @@ def _dispatch_intake(
         "/vendor/invites/current/coverage": "/intake/coverage",
         "/vendor/invites/current/analyze": "/intake/analyze",
         "/vendor/invites/current/finalize": "/intake/finalize",
+        "/vendor/invites/current/findings": "/intake/findings",
         "/vendor/invites/current/status": "/intake/status",
     }
     path = aliases.get(path, path)
@@ -1520,6 +1546,7 @@ def _dispatch_intake(
         ("POST", "/intake/analyze"): lambda: api.vendor_run_intake_analysis(token),
         ("GET", "/intake/questions"): lambda: api.vendor_questions(token),
         ("POST", "/intake/finalize"): lambda: api.vendor_finalize(token),
+        ("GET", "/intake/findings"): lambda: api.vendor_evidence_findings(token),
         ("GET", "/intake/status"): lambda: api.vendor_review_status(token),
     }
     operation = operations.get((method, path))
@@ -2005,6 +2032,7 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "profile": "profile_version_id",
         "run": "run_id",
         "event": "event_id",
+        "finding": "finding_id",
         "reminder_claim": "dedupe_key",
         "policy_criteria": "criteria_version_id",
     }

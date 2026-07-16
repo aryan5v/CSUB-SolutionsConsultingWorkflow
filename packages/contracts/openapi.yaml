@@ -304,7 +304,7 @@ paths:
       responses: {"200": {description: Scoped evidence states without document bytes.}}
     post:
       tags: [vendor-intake]
-      summary: Register untrusted evidence and return a checksum-bound quarantine upload.
+      summary: Register untrusted evidence (optionally with inline bytes for content validation, issue 36) and return a checksum-bound quarantine upload.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: "./schemas/vendor-intake.schema.json#/$defs/EvidenceMetadata"}}}}
       responses: {"200": {description: Evidence metadata registered.}}
@@ -335,6 +335,18 @@ paths:
       summary: Finalize the vendor submission once.
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Immutable finalized submission.}}
+  /vendor/invites/{token}/findings:
+    get:
+      tags: [vendor-intake]
+      summary: Content-validation findings for this submission's evidence (issue 36).
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Failed or manual-review deterministic checks (expired COI, stale pen test, PCI currency TBD) with cited evidence coordinates.}}
+  /cases/{id}/evidence-findings:
+    get:
+      tags: [cases]
+      summary: Reviewer view of content-validation findings across a case's submissions.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Cited validation findings; failed documents are not counted as received.}}
   /reminders/run:
     post:
       tags: [vendor-intake]

@@ -31,6 +31,7 @@ class SourceCoordinates:
     row: int | None = None
     column: str | None = None
     page: int | None = None
+    line: int | None = None
     node_id: str | None = None
     version: str | None = None
     sha256: str | None = None

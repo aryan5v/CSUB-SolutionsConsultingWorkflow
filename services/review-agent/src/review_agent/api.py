@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .adapters.email import EmailSender, build_email_sender
+from .adapters.extraction import EvidenceExtractor, build_evidence_extractor
 from .adapters.model import DeterministicModelClient, ModelClient, build_model_client
 from .adapters.notifications import Notifier, build_notifier
 from .adapters.servicenow import (
@@ -84,6 +85,26 @@ def _default_packet_storage(config: AppConfig) -> StorageClient:
     return InMemoryStorage(
         cloudfront_base_url=os.environ.get("PACKET_CLOUDFRONT_BASE_URL") or None
     )
+
+
+def _default_evidence_storage(config: AppConfig) -> StorageClient:
+    """Vendor evidence byte store: S3 (raw originals bucket) on AWS, in-memory locally.
+
+    Evidence bytes live at ``evidence/{sha256}`` behind this seam so content
+    validation (issue #36) can parse them on any runtime. On AWS the raw
+    bucket is durable across Lambda invocations; locally an in-memory store
+    keeps the deterministic slice AWS-free.
+    """
+    bucket = config.aws.raw_bucket
+    if not config.use_local_fakes and bucket:
+        from .adapters.storage import S3Storage
+
+        return S3Storage(
+            bucket=bucket,
+            region=config.aws.region,
+            kms_key_id=os.environ.get("RAW_BUCKET_KMS_KEY_ID") or None,
+        )
+    return InMemoryStorage()
 
 
 def vendor_link_settings() -> dict[str, Any]:
@@ -178,6 +199,8 @@ class LocalReviewApi:
         model_client: ModelClient | None = None,
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
+        evidence_storage: StorageClient | None = None,
+        evidence_extractor: EvidenceExtractor | None = None,
         email_sender: EmailSender | None = None,
         delivery_claim_store: DeliveryClaimStore | None = None,
         evidence_uploads: EvidenceUploadIssuer | None = None,
@@ -230,10 +253,22 @@ class LocalReviewApi:
         self._delivery_claim_store = delivery_claim_store or InMemoryDeliveryClaimStore()
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
+        # Evidence bytes live behind the storage seam; locally an in-memory
+        # store lets deterministic tests exercise content validation. Both are
+        # kept on the instance so the Lambda restore path can rewire them into
+        # a restored VendorBackend.
+        self._evidence_storage: StorageClient = evidence_storage or _default_evidence_storage(
+            self._config
+        )
+        self._evidence_extractor: EvidenceExtractor = evidence_extractor or build_evidence_extractor(
+            self._config
+        )
         self._vendor = VendorBackend(
             self._vendor_repository,
             self._profiles,
             clock=local_clock,
+            evidence_storage=self._evidence_storage,
+            extractor=self._evidence_extractor,
             **vendor_link_settings(),
             research_provider=self._research_provider,
             delivery_claim_store=self._delivery_claim_store,
@@ -917,6 +952,17 @@ class LocalReviewApi:
     def vendor_finalize(self, token: str) -> dict[str, Any]:
         return self._vendor_call(
             lambda: self._vendor.finalize_submission(token).to_vendor_dict()
+        )
+
+    def vendor_evidence_findings(self, token: str) -> dict[str, Any]:
+        return self._vendor_call(
+            lambda: {"items": self._vendor.submission_findings(token)}
+        )
+
+    def case_evidence_findings(self, case_id: str) -> dict[str, Any]:
+        self._require_case(case_id)
+        return self._vendor_call(
+            lambda: {"items": self._vendor.case_evidence_findings(case_id)}
         )
 
     def vendor_review_status(self, token: str) -> dict[str, Any]:
