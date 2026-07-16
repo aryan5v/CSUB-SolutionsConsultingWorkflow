@@ -164,6 +164,9 @@ export type CaseActionResponse = {
 export type CaseIntakeInput = {
   product_name: string;
   vendor_name: string;
+  vendor_id?: string;
+  vendor_contact_name?: string;
+  vendor_contact_email?: string;
   requester: { name: string; email: string; department?: string };
   use_case: string;
   expected_users: number;
@@ -176,6 +179,27 @@ export type CaseIntakeInput = {
   accessibility_context?: string;
   official_domain?: string;
   classroom_or_public_use: boolean;
+};
+
+export type CreateCaseResponse = {
+  case_id: string;
+  state: ReviewState;
+  invite?: InviteProjection;
+  token?: string;
+  intake_url?: string;
+  invite_email_delivery?: "live" | "simulated" | "failed";
+  invite_pending?: string;
+  contact?: VendorContact;
+};
+
+export type VendorReviewStatusLabel = "no_cases" | "pending_review" | "accepted" | "declined";
+
+export type VendorReviewedProduct = {
+  product_id: string;
+  product_name: string;
+  review_status: VendorReviewStatusLabel;
+  case_id: string;
+  lifecycle: string;
 };
 
 export type ReviewDecisionInput = {
@@ -194,6 +218,8 @@ export type VendorRecord = {
   vendor_id: string;
   name: string;
   official_domain: string | null;
+  review_status?: VendorReviewStatusLabel;
+  reviewed_products?: VendorReviewedProduct[];
 };
 export type VendorProduct = { workspace_id: string; product_id: string; vendor_id: string; name: string };
 export type VendorContact = {
@@ -621,10 +647,10 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       if (mode === "fixture") return fixtureOnly({ ...FIXTURE_POLICY_CRITERIA, ...input, version: 1 });
       return request("/policy-criteria", { method: "PUT", body: JSON.stringify(input) });
     },
-    createCase(input: CaseIntakeInput): Promise<{ case_id: string; state: ReviewState }> {
+    createCase(input: CaseIntakeInput): Promise<CreateCaseResponse> {
       if (mode === "fixture") {
         const caseId = fixtureId("FIXTURE-CASE");
-        return fixtureOnly({ case_id: caseId, state: fixtureReviewState(input, caseId) });
+        return fixtureOnly({ case_id: caseId, state: fixtureReviewState(input, caseId), invite_pending: "fixture_mode" });
       }
       return request("/cases", { method: "POST", body: JSON.stringify(input) });
     },

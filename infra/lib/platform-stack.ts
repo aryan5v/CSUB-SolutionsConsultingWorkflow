@@ -919,6 +919,22 @@ export class PlatformStack extends cdk.Stack {
       'http://127.0.0.1:5173',
       'http://localhost:5173',
     ];
+
+    // Stable HMAC key for sealed vendor invite tokens. Only the ARN enters
+    // the Lambda environment; the value is read at cold start so invitation
+    // and reminder emails can repeat the same intake link across containers.
+    // Encrypted with the platform-local secrets key (not the foundation
+    // dataKey) so grantRead cannot create a cross-stack dependency cycle.
+    const vendorLinkSecret = new secretsmanager.Secret(this, 'VendorLinkSecret', {
+      secretName: `vetted/${appEnv}/vendor/link-secret`,
+      description: 'HMAC key sealing VETTED vendor intake invite tokens.',
+      encryptionKey: authSecretsKey,
+      generateSecretString: {
+        passwordLength: 64,
+        excludePunctuation: true,
+      },
+      removalPolicy,
+    });
     this.proxyFunction = new lambda.Function(this, 'CaseProxyFunction', {
       functionName: `csub-case-proxy-${appEnv}`,
       runtime: lambda.Runtime.PYTHON_3_13,
@@ -972,8 +988,33 @@ export class PlatformStack extends cdk.Stack {
             }
           : {}),
         ...(slackSecret ? { SLACK_SECRET_ARN: slackSecret.secretArn } : {}),
+        // Vendor intake links in email must use the public CloudFront origin,
+        // not the non-routable simulated default.
+        VENDOR_INTAKE_BASE_URL: `https://${this.distribution.distributionDomainName}/intake`,
+        VENDOR_LINK_SECRET_ARN: vendorLinkSecret.secretArn,
+        ...(config.vendorEmailSender
+          ? { VENDOR_EMAIL_SENDER: config.vendorEmailSender }
+          : {}),
       },
     });
+    vendorLinkSecret.grantRead(this.proxyFunction);
+
+    // Live vendor email is opt-in: without a configured verified SES sender
+    // the API keeps its simulated sender and no SES permission is granted.
+    if (config.vendorEmailSender) {
+      const senderDomain = config.vendorEmailSender.split('@')[1];
+      this.proxyFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ses:SendEmail'],
+          resources: [
+            `arn:${this.partition}:ses:${this.region}:${this.account}:identity/${config.vendorEmailSender}`,
+            ...(senderDomain
+              ? [`arn:${this.partition}:ses:${this.region}:${this.account}:identity/${senderDomain}`]
+              : []),
+          ],
+        }),
+      );
+    }
 
     // The deterministic API persists each domain projection to its existing
     // purpose-built table. AgentCore remains an independently gated future

@@ -534,6 +534,16 @@ dd { margin: 0; color: var(--text-secondary); font-size: 13px; font-weight: 620;
 .form-grid textarea { min-height: 90px; resize: vertical; }
 .form-grid input:focus, .form-grid textarea:focus, .form-grid select:focus { border-color: var(--focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus), transparent 84%); }
 .full-field { grid-column: 1 / -1; }
+.vendor-search-field { position: relative; }
+.vendor-search-results { position: absolute; z-index: 12; top: calc(100% + 4px); left: 0; right: 0; margin: 0; padding: 4px; list-style: none; max-height: 240px; overflow: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--card); box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24); }
+.vendor-search-results li { margin: 0; }
+.vendor-search-results button { display: flex; width: 100%; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; text-align: left; cursor: pointer; }
+.vendor-search-results button:hover, .vendor-search-results button:focus-visible { background: var(--surface-subtle); }
+.vendor-search-name { font-size: 14px; font-weight: 600; color: var(--foreground); }
+.vendor-search-meta { font-size: 12px; color: var(--text-muted); }
+.vendor-search-empty { padding: 8px 10px; font-size: 13px; color: var(--text-muted); }
+.vendor-search-selected { font-size: 12px; color: var(--text-muted); }
+.vendor-search-clear { padding: 0; border: 0; background: none; color: var(--focus); font-size: 12px; text-decoration: underline; cursor: pointer; }
 .form-notice { display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; padding: 11px; border-radius: 6px; background: var(--info-soft); color: var(--info); }
 .form-notice span { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }

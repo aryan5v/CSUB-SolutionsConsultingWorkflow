@@ -86,6 +86,14 @@ export interface PlatformConfig {
    */
   readonly reviewModelId: string;
 
+  // ---- Vendor email ----------------------------------------------------
+  /**
+   * Optional verified SES sender address for vendor invitation/outcome email.
+   * When unset the API keeps its simulated email sender (no default; the
+   * address must be a verified SES identity in the target account/region).
+   */
+  readonly vendorEmailSender?: string;
+
   // ---- Budget ----------------------------------------------------------
   /** Monthly AWS Budget limit in USD (parameterized cost guardrail). */
   readonly budgetLimitUsd: number;
@@ -189,6 +197,7 @@ export function resolvePlatformConfig(app: cdk.App): PlatformConfig {
       ctx(app, 'serviceNowTableName') ?? process.env.SERVICE_NOW_TABLE_NAME ?? 'sc_req_item',
     reviewModelId:
       ctx(app, 'reviewModelId') ?? process.env.REVIEW_MODEL_ID ?? 'us.anthropic.claude-sonnet-5',
+    vendorEmailSender: ctx(app, 'vendorEmailSender') ?? process.env.VENDOR_EMAIL_SENDER,
     budgetLimitUsd,
     budgetNotificationEmail:
       ctx(app, 'budgetNotificationEmail') ?? process.env.BUDGET_NOTIFICATION_EMAIL,
