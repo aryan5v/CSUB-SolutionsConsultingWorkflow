@@ -55,10 +55,15 @@ class ReviewGraphState:
     write_result: WriteResult | None = None
     idempotency_key: str | None = None
     repair_passes_used: int = 0
+    # Immutable identifier for this analysis run, set once by the workflow
+    # runner (issue #50) and carried through checkpoints/audit correlation so
+    # a restart resumes the same run rather than minting a new identity.
+    run_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
+            "run_id": self.run_id,
             "status": self.status.value,
             "workflow_version": self.workflow_version,
             "case_input": self.case_input.to_dict(),

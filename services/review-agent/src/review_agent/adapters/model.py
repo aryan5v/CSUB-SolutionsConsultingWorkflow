@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from ..observability.metrics import MetricsEmitter, NullMetricsEmitter
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import AppConfig
@@ -208,6 +215,101 @@ class ModelStructureError(RuntimeError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """Bounded retry/timeout policy for a single model call (issue #50).
+
+    Only *transient* failures (timeout, throttling) are retried here, up to
+    ``max_attempts`` with exponential backoff. Structural validation failures
+    (malformed JSON, missing fields) are a separate concern already handled by
+    the one-bounded-repair pass in :func:`invoke_structured` and do not consume
+    retry budget.
+    """
+
+    max_attempts: int = 3
+    base_delay_seconds: float = 0.5
+    timeout_seconds: float = 30.0
+
+
+DEFAULT_RETRY_POLICY = RetryPolicy()
+
+
+class ModelTimeoutError(RuntimeError):
+    """Raised when a model call exceeds its bounded timeout on every attempt."""
+
+
+class ModelTransientError(RuntimeError):
+    """Raised when a model call fails with a transient error on every attempt."""
+
+
+# Bedrock/botocore throttling and transient-server error codes. Duck-typed off
+# a ``ClientError``-shaped ``.response`` so this module stays free of a hard
+# botocore import (boto3 is only imported lazily inside BedrockModelClient).
+_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "TooManyRequestsException",
+        "ServiceUnavailable",
+        "ServiceUnavailableException",
+        "ModelTimeoutException",
+        "InternalServerException",
+    }
+)
+
+
+def _is_transient(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code")
+        if code in _TRANSIENT_ERROR_CODES:
+            return True
+    return False
+
+
+def _call_with_retry(
+    call: Callable[[], dict],
+    *,
+    policy: RetryPolicy,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[dict, int]:
+    """Run ``call`` with a bounded attempt count and a per-attempt timeout.
+
+    Retries only transient failures (timeout, throttling/5xx); any other
+    exception propagates immediately so the caller's structural-repair path
+    handles it instead. Returns ``(result, retry_count)``.
+
+    Each attempt runs in a throwaway single-worker executor so a hung call can
+    be bounded by ``timeout_seconds`` even though ``ModelClient.complete_json``
+    itself is synchronous. A timed-out call is not forcibly killed (Python
+    cannot interrupt a running thread); the executor is shut down without
+    waiting so the caller is not blocked on it.
+    """
+    last_error: BaseException
+    for attempt_index in range(policy.max_attempts):
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(call)
+            try:
+                result = future.result(timeout=policy.timeout_seconds)
+                return result, attempt_index
+            except FutureTimeoutError:
+                last_error = ModelTimeoutError(
+                    f"model call exceeded {policy.timeout_seconds}s timeout "
+                    f"(attempt {attempt_index + 1}/{policy.max_attempts})"
+                )
+            except BaseException as error:  # noqa: BLE001 - re-raise non-transient below
+                if not _is_transient(error):
+                    raise
+                last_error = ModelTransientError(f"{type(error).__name__}: {error}")
+        finally:
+            executor.shutdown(wait=False)
+        if attempt_index + 1 < policy.max_attempts:
+            sleep(policy.base_delay_seconds * (2**attempt_index))
+    raise last_error
+
+
 _REQUIRED_STRUCTURE = ("summary", "findings", "citations", "uncertainty")
 
 
@@ -247,29 +349,52 @@ def invoke_structured(
     prompt: str,
     context: dict,
     required_keys: tuple[str, ...] = _REQUIRED_STRUCTURE,
+    retry_policy: RetryPolicy | None = None,
+    metrics: MetricsEmitter | None = None,
+    metric_dimensions: Mapping[str, str] | None = None,
 ) -> dict:
     """Call the model, validate structure, and allow exactly one repair pass.
 
-    Behavior contract (issue #27):
+    Behavior contract (issue #27, extended by issue #50):
+    - Each call attempt is bounded by ``retry_policy`` (default
+      :data:`DEFAULT_RETRY_POLICY`): transient failures (timeout, throttling)
+      retry with backoff up to ``max_attempts`` before surfacing as a
+      structural problem; other exceptions are not retried.
     - Validate the reply against ``required_keys``; a well-formed structured
       output passes through unchanged.
-    - On the first structural failure, issue **one** repair attempt that restates
-      the schema violation. This is the single bounded repair pass.
+    - On the first structural failure, issue **one** repair attempt that
+      restates the schema violation. This is the single bounded repair pass
+      and is independent of the transient-retry budget above.
     - If the repair still fails, raise :class:`ModelStructureError` (explicit
       failure). A failed live call is never silently replaced by the fixture.
-    - The result carries ``_model`` metadata: the model label, whether it is a
-      labeled simulation, and how many repair passes ran.
+    - Emits ``model.invoke.{latency_ms,retry_count,repair_passes,failure}``
+      metrics (case/run identifiers as properties, not dimensions -- see
+      ``observability/metrics.py``) and the result carries ``_model``
+      metadata: model label, simulation flag, repair passes, and retry count.
     """
     simulated = is_simulated_client(model)
     label = model_label(model)
+    policy = retry_policy or DEFAULT_RETRY_POLICY
+    emitter = metrics or NullMetricsEmitter()
+    dimensions = {"model": label, "simulated": str(simulated).lower(), **(metric_dimensions or {})}
+    total_retries = 0
+    started = time.monotonic()
 
     def attempt(user_prompt: str) -> tuple[dict | None, list[str]]:
+        nonlocal total_retries
         try:
-            candidate = model.complete_json(system=system, prompt=user_prompt, context=context)
+            candidate, retries = _call_with_retry(
+                lambda: model.complete_json(system=system, prompt=user_prompt, context=context),
+                policy=policy,
+            )
+        except (ModelTimeoutError, ModelTransientError) as error:
+            total_retries += policy.max_attempts - 1
+            return None, [str(error)]
         except (ValueError, KeyError, TypeError) as error:
             # A live adapter raises when the reply is unparseable/non-JSON; treat
             # that as a structural failure eligible for one repair, not a crash.
             return None, [f"model call failed: {error}"]
+        total_retries += retries
         return candidate, _validate_structure(candidate, required_keys)
 
     result, problems = attempt(prompt)
@@ -283,15 +408,28 @@ def invoke_structured(
         )
         result, problems = attempt(repair_prompt)
         if problems or result is None:
+            emitter.emit(
+                "model.invoke.failure",
+                1,
+                unit="Count",
+                dimensions=dimensions,
+                properties={"repair_passes": repair_passes, "retry_count": total_retries},
+            )
             raise ModelStructureError(
                 f"{label} returned invalid structure after one repair pass: "
                 f"{'; '.join(problems)}"
             )
     assert result is not None  # narrowed: no problems implies a parsed dict
+    latency_ms = (time.monotonic() - started) * 1000
+    emitter.emit("model.invoke.latency_ms", latency_ms, unit="Milliseconds", dimensions=dimensions)
+    emitter.emit("model.invoke.retry_count", total_retries, unit="Count", dimensions=dimensions)
+    if repair_passes:
+        emitter.emit("model.invoke.repair_passes", repair_passes, unit="Count", dimensions=dimensions)
     enriched = dict(result)
     enriched["_model"] = {
         "model": label,
         "simulated": simulated,
         "repair_passes": repair_passes,
+        "retry_count": total_retries,
     }
     return enriched

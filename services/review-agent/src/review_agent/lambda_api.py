@@ -1729,6 +1729,7 @@ def _review_state(value: dict[str, Any]) -> ReviewGraphState:
         write_result=_write_result(result) if isinstance(result, dict) else None,
         idempotency_key=_optional_string(value.get("idempotency_key")),
         repair_passes_used=int(value.get("repair_passes_used", 0)),
+        run_id=_optional_string(value.get("run_id")),
     )
 
 
