@@ -79,6 +79,7 @@ export type ReviewState = {
   case_id: string;
   status: string;
   workflow_version: string;
+  run_id?: string | null;
   case_input: {
     product_name: string;
     vendor_name: string;
@@ -148,6 +149,7 @@ export type AuditEvent = {
   occurred_at: string;
   actor_type: "requester" | "reviewer" | "system" | "model";
   actor_id?: string;
+  correlation_id?: string;
   workflow_version?: string;
   policy_version?: string;
   decision_version?: number | null;

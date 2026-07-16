@@ -8,10 +8,13 @@ policy engine.
 
 from __future__ import annotations
 
-from ..adapters.model import ModelClient, invoke_structured, model_label
+from collections.abc import Mapping
+
+from ..adapters.model import ModelClient, RetryPolicy, invoke_structured, model_label
 from ..contracts.case import CaseIntake
 from ..contracts.common import Citation, CitationScope
 from ..contracts.policy import PolicyResult
+from ..observability.metrics import MetricsEmitter
 
 SPECIALIST_NAME = "security"
 SPECIALIST_VERSION = "security@1"
@@ -23,6 +26,9 @@ def run_security(
     model: ModelClient,
     *,
     profile_version_id: str | None = None,
+    retry_policy: RetryPolicy | None = None,
+    metrics: MetricsEmitter | None = None,
+    metric_dimensions: Mapping[str, str] | None = None,
 ) -> dict:
     raw = invoke_structured(
         model,
@@ -30,6 +36,9 @@ def run_security(
         "do not set risk tiers or required documents.",
         prompt=f"Summarize the security posture questions for {case.product_name}.",
         context={"task": "security_analysis", "product": case.product_name},
+        retry_policy=retry_policy,
+        metrics=metrics,
+        metric_dimensions=metric_dimensions,
     )
     # Ground the specialist output in the deterministic policy citations so every
     # claim traces to a source; the model's free text is advisory only.

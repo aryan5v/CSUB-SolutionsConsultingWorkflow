@@ -11,10 +11,12 @@ are all represented.
 from __future__ import annotations
 
 import datetime
+import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..adapters.model import ModelClient, ModelStructureError
+from ..adapters.model import ModelClient, ModelStructureError, RetryPolicy
 from ..adapters.servicenow import ServiceNowConnector
 from ..audit.log import AuditLog
 from ..contracts.audit import ActorType
@@ -22,6 +24,7 @@ from ..contracts.graph_state import ReviewGraphState, WorkflowStatus
 from ..contracts.policy import PolicyRuleSet
 from ..contracts.servicenow import HumanDecision, ReviewAction
 from ..lookup.approved_software import ApprovedSoftwareIndex
+from ..observability.metrics import MetricsEmitter, NullMetricsEmitter
 from ..packet.composer import compose_packet
 from ..policy.conflicts import ConflictRegistry
 from ..policy.engine import REQUIRED_INTAKE_FIELDS, build_inputs, evaluate
@@ -33,6 +36,10 @@ from .state import Checkpointer
 
 def _utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _new_run_id() -> str:
+    return uuid.uuid4().hex
 
 
 class ReviewWorkflow:
@@ -47,6 +54,9 @@ class ReviewWorkflow:
         checkpointer: Checkpointer | None = None,
         clock: Callable[[], str] = _utc_now,
         specialist_profiles: dict[str, str] | None = None,
+        metrics: MetricsEmitter | None = None,
+        retry_policy: RetryPolicy | None = None,
+        id_factory: Callable[[], str] = _new_run_id,
     ) -> None:
         self._model = model
         self._index = software_index
@@ -56,6 +66,9 @@ class ReviewWorkflow:
         self._checkpointer = checkpointer
         self._clock = clock
         self._specialist_profiles = dict(specialist_profiles or {})
+        self._metrics = metrics or NullMetricsEmitter()
+        self._retry_policy = retry_policy
+        self._id_factory = id_factory
         self._seq = 0
 
     def _checkpoint(self, state: ReviewGraphState) -> None:
@@ -63,9 +76,26 @@ class ReviewWorkflow:
         if self._checkpointer is not None:
             self._checkpointer.save(state.case_id, state.to_dict())
 
+    def _ensure_run_id(self, state: ReviewGraphState) -> None:
+        """Mint the run's immutable identifier once (issue #50).
+
+        A restart-resumed state already carries ``run_id`` from its checkpoint
+        (``lambda_api._review_state``), so this only assigns on a genuinely new
+        run and never overwrites one recovered from durable storage.
+        """
+        if state.run_id is None:
+            state.run_id = self._id_factory()
+
+    def _metric_dimensions(self, state: ReviewGraphState, step: str) -> dict[str, str]:
+        # Low-cardinality only: workflow_version/step. case_id/run_id go through
+        # audit correlation_id and metric *properties*, never CloudWatch
+        # dimensions (observability/metrics.py).
+        return {"step": step, "workflow_version": state.workflow_version}
+
     # -- nodes -----------------------------------------------------------------
 
     def validate_intake(self, state: ReviewGraphState) -> ReviewGraphState:
+        self._ensure_run_id(state)
         case = state.case_input
         missing = tuple(
             name
@@ -125,14 +155,21 @@ class ReviewWorkflow:
             "security": lambda: run_security(
                 case, policy, self._model,
                 profile_version_id=self._specialist_profiles.get("security"),
+                retry_policy=self._retry_policy,
+                metrics=self._metrics,
+                metric_dimensions=self._metric_dimensions(state, "security"),
             ),
             "accessibility": lambda: run_accessibility(
                 case, policy, self._model,
                 profile_version_id=self._specialist_profiles.get("accessibility"),
+                retry_policy=self._retry_policy,
+                metrics=self._metrics,
+                metric_dimensions=self._metric_dimensions(state, "accessibility"),
             ),
         }
         results: dict[str, dict] = {}
         errors: dict[str, str] = {}
+        started = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = {executor.submit(func): name for name, func in tasks.items()}
             for future in as_completed(futures):
@@ -143,7 +180,20 @@ class ReviewWorkflow:
                     # Explicit model failure: record a reviewable failed result
                     # rather than silently substituting a fixture.
                     errors[name] = str(error)
+        self._metrics.emit(
+            "specialists.latency_ms",
+            (time.monotonic() - started) * 1000,
+            unit="Milliseconds",
+            dimensions=self._metric_dimensions(state, "run_specialists"),
+        )
         if errors:
+            self._metrics.emit(
+                "specialists.failure",
+                len(errors),
+                unit="Count",
+                dimensions=self._metric_dimensions(state, "run_specialists"),
+                properties={"run_id": state.run_id, "case_id": state.case_id, "specialists": sorted(errors)},
+            )
             raise ModelStructureError(
                 "specialist model failure: "
                 + "; ".join(f"{name}: {message}" for name, message in sorted(errors.items()))
@@ -178,6 +228,13 @@ class ReviewWorkflow:
             self._emit(state, "citations.repaired", ActorType.SYSTEM, rejected=len(check.rejected))
         else:
             self._emit(state, "citations.checked", ActorType.SYSTEM, ok=check.ok)
+        self._metrics.emit(
+            "citations.rejected_count",
+            len(check.rejected),
+            unit="Count",
+            dimensions=self._metric_dimensions(state, "check_and_repair"),
+            properties={"run_id": state.run_id, "case_id": state.case_id, "ok": check.ok},
+        )
         return state
 
     def compose(self, state: ReviewGraphState) -> ReviewGraphState:
@@ -221,6 +278,7 @@ class ReviewWorkflow:
         reviewer_id: str | None = None,
     ) -> ReviewGraphState:
         """Reviewer confirms (or clears) a fuzzy/semantic match, then continue."""
+        self._ensure_run_id(state)
         state.confirmed_match_id = record_id
         state.status = WorkflowStatus.POLICY
         self._emit(
@@ -332,6 +390,12 @@ class ReviewWorkflow:
         decision_version: int | None = None,
         **detail: object,
     ) -> None:
+        # Mint here as well as in the entry nodes: write-back resumes a durable
+        # snapshot and can reach this without passing validate_intake or
+        # confirm_match, and legacy snapshots are allowed to carry run_id=None.
+        # Without this those audit events record correlation_id=None, which is
+        # exactly the run correlation issue #50 exists to provide.
+        self._ensure_run_id(state)
         self._seq += 1
         self._audit.record(
             event_id=f"{state.case_id}-{self._seq:03d}",
@@ -340,6 +404,7 @@ class ReviewWorkflow:
             occurred_at=self._clock(),
             actor_type=actor,
             actor_id=actor_id,
+            correlation_id=state.run_id,
             decision_version=decision_version,
             workflow_version=state.workflow_version,
             policy_version=state.policy_result.policy_version if state.policy_result else None,

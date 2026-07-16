@@ -64,6 +64,10 @@
     },
     "idempotency_key": { "type": ["string", "null"] },
     "workflow_version": { "type": "string" },
-    "repair_passes_used": { "type": "integer", "minimum": 0, "maximum": 1 }
+    "repair_passes_used": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "run_id": {
+      "type": ["string", "null"],
+      "description": "Immutable identifier for this analysis run (issue #50), set once by the workflow runner and carried through checkpoints and audit correlation_id."
+    }
   }
 }
