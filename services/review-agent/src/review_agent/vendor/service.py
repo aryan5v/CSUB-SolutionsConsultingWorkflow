@@ -34,6 +34,8 @@ from ..contracts.vendor import (
     VendorProduct,
 )
 from ..profiles.service import ProfileError, ReviewProfileService
+from ..timestamps import parse_utc_timestamp
+from .delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .repository import VendorRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -69,6 +71,7 @@ class VendorBackend:
         intake_base_url: str = "https://vetted.invalid/intake",
         link_secret: bytes | None = None,
         research_provider: VendorResearchProvider | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
     ) -> None:
         if invite_ttl <= datetime.timedelta(0):
             raise ValueError("invite_ttl must be positive")
@@ -87,6 +90,10 @@ class VendorBackend:
         self._link_secret = link_secret or secrets.token_bytes(32)
         # Guarded official-domain research annotates provenance and gaps only.
         self._research = research_provider
+        # Delivery claims are deliberately separate from the restored domain
+        # snapshot. Production injects the DynamoDB-backed workspace store so
+        # independent cold starts contend on one atomic outbox record.
+        self._delivery_claims = delivery_claim_store or InMemoryDeliveryClaimStore()
 
     @property
     def research_provider(self) -> VendorResearchProvider | None:
@@ -571,7 +578,7 @@ class VendorBackend:
         # Expiry applies to submitted invitations too: the status view is
         # readable after finalize, but only within the invitation's lifetime,
         # matching the expiry semantics of every other token operation.
-        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        expires = parse_utc_timestamp(invite.expires_at)
         if self._now_datetime() >= expires:
             if invite.status is not InviteStatus.SUBMITTED:
                 self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
@@ -1016,13 +1023,16 @@ class VendorBackend:
                 InviteStatus.IN_PROGRESS,
             }:
                 continue
-            if now >= datetime.datetime.fromisoformat(invite.expires_at):
+            if now >= parse_utc_timestamp(invite.expires_at):
                 continue
             current = authoritative.get(invite.case_id)
-            if current is None or (invite.issued_at, invite.invite_id) > (
-                current.issued_at,
-                current.invite_id,
-            ):
+            invite_order = (parse_utc_timestamp(invite.issued_at), invite.invite_id)
+            current_order = (
+                (parse_utc_timestamp(current.issued_at), current.invite_id)
+                if current is not None
+                else None
+            )
+            if current_order is None or invite_order > current_order:
                 authoritative[invite.case_id] = invite
         candidates: list[dict[str, Any]] = []
         for case_id, invite in sorted(authoritative.items()):
@@ -1046,10 +1056,10 @@ class VendorBackend:
                 # after the invitation, never immediately.
                 continue
             dedupe_key = self._reminder_dedupe_key(case_id, period)
-            claim = self.repository.get(
-                "reminder_claim", dedupe_key, workspace_id=self.workspace_id
+            claim = self._delivery_claims.get(
+                workspace_id=self.workspace_id, dedupe_key=dedupe_key
             )
-            if isinstance(claim, ReminderClaim) and (
+            if claim is not None and (
                 claim.status != "failed" or claim.attempts >= self.MAX_REMINDER_ATTEMPTS
             ):
                 continue
@@ -1070,34 +1080,23 @@ class VendorBackend:
             )
         return candidates
 
-    def claim_reminder(self, *, dedupe_key: str, case_id: str, invite_id: str) -> bool:
-        """Claim one cadence period for one case before any email is sent.
+    def claim_reminder(
+        self, *, dedupe_key: str, case_id: str, invite_id: str
+    ) -> ReminderClaim | None:
+        """Atomically claim one cadence period before any email is sent.
 
-        Returns False when the period is already claimed (pending or sent) or
-        its failed attempts are exhausted, so a concurrent or retried sweep
-        never duplicates a send. The claim is persisted as a whole record keyed
-        by the deterministic dedupe key; a DynamoDB adapter makes this write a
-        conditional put.
+        ``None`` means another worker owns the pending/sent attempt or the
+        bounded failed-attempt budget is exhausted. The returned claim carries
+        the attempt number used for conditional settlement.
         """
-        existing = self.repository.get(
-            "reminder_claim", dedupe_key, workspace_id=self.workspace_id
-        )
-        attempts = 0
-        if isinstance(existing, ReminderClaim):
-            if existing.status != "failed" or existing.attempts >= self.MAX_REMINDER_ATTEMPTS:
-                return False
-            attempts = existing.attempts
-        claim = ReminderClaim(
+        return self._delivery_claims.claim(
+            workspace_id=self.workspace_id,
             dedupe_key=dedupe_key,
             case_id=case_id,
             invite_id=invite_id,
-            status="pending",
-            attempts=attempts + 1,
             claimed_at=self._now(),
-            workspace_id=self.workspace_id,
+            max_attempts=self.MAX_REMINDER_ATTEMPTS,
         )
-        self._put("reminder_claim", dedupe_key, claim)
-        return True
 
     def record_reminder(
         self,
@@ -1107,31 +1106,36 @@ class VendorBackend:
         dedupe_key: str,
         summary: str,
         delivery: dict[str, Any],
+        claim: ReminderClaim | None = None,
     ) -> IntegrationEvent:
-        """Persist one reminder attempt with its truthful delivery result.
+        """Settle and audit one reminder attempt without retaining raw email.
 
-        A failed delivery marks the claim ``failed`` so the next sweep retries
-        (bounded by :attr:`MAX_REMINDER_ATTEMPTS`) instead of treating the
-        failure as cadence satisfaction; a delivered send marks it ``sent``,
-        suppressing further reminders for the period. Every attempt is recorded
-        as an auditable event; the recipient is stored as a SHA-256 digest,
-        never as a raw address.
+        Only explicit ``live`` and ``simulated`` modes satisfy cadence. Failed,
+        skipped, missing, and unknown modes settle as failed and remain
+        retryable until the atomic outbox reaches ``MAX_REMINDER_ATTEMPTS``.
         """
-        claim = self.repository.get(
-            "reminder_claim", dedupe_key, workspace_id=self.workspace_id
+        current = claim or self._delivery_claims.get(
+            workspace_id=self.workspace_id, dedupe_key=dedupe_key
         )
-        if isinstance(claim, ReminderClaim):
-            outcome = "failed" if delivery.get("delivery") == "failed" else "sent"
-            self._put("reminder_claim", dedupe_key, replace(claim, status=outcome))
+        mode = delivery.get("delivery") if isinstance(delivery, dict) else None
+        successful = mode in {"live", "simulated"}
+        if current is not None:
+            self._delivery_claims.settle(
+                workspace_id=self.workspace_id,
+                dedupe_key=dedupe_key,
+                attempts=current.attempts,
+                status="sent" if successful else "failed",
+            )
         detail = {
             "summary": summary,
-            "delivery": delivery.get("delivery"),
-            "simulated": delivery.get("simulated", True),
-            "channel": delivery.get("channel"),
+            "delivery": mode if isinstance(mode, str) else "failed",
+            "simulated": mode == "simulated",
+            "channel": delivery.get("channel") if isinstance(delivery, dict) else "email",
             "dedupe_key": dedupe_key,
         }
-        if delivery.get("to"):
-            detail["recipient_sha256"] = self._hash_recipient(str(delivery["to"]))
+        recipient = delivery.get("to") if isinstance(delivery, dict) else None
+        if recipient:
+            detail["recipient_sha256"] = self._hash_recipient(str(recipient))
         return self._event(
             self._REMINDER_EVENT,
             "invite",
@@ -1176,7 +1180,7 @@ class VendorBackend:
         return {"case_id": case_id, "paused": paused}
 
     def _reminder_period(self, invite: VendorInvite, now: datetime.datetime) -> int:
-        issued = datetime.datetime.fromisoformat(invite.issued_at)
+        issued = parse_utc_timestamp(invite.issued_at)
         return int((now - issued) / self.reminder_interval)
 
     @staticmethod
@@ -1481,7 +1485,7 @@ class VendorBackend:
             raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
         if invite.status is InviteStatus.SUBMITTED:
             raise VendorBackendError("invite_submitted", "invitation was already submitted", status=409)
-        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        expires = parse_utc_timestamp(invite.expires_at)
         if self._now_datetime() >= expires:
             expired = replace(invite, status=InviteStatus.EXPIRED)
             self._put("invite", invite.invite_id, expired)

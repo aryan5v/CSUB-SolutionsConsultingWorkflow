@@ -421,7 +421,17 @@ describe('API authorization boundaries', () => {
     const byKey = new Map<string, any>(routes.map((r) => [r.RouteKey, r]));
 
     // Reviewer/admin routes are JWT-authorized.
-    for (const key of ['POST /cases', 'GET /review-queue', 'POST /cases/{id}/review', 'GET /cases/{id}/packet/pdf']) {
+    for (const key of [
+      'POST /cases',
+      'GET /review-queue',
+      'POST /cases/{id}/review',
+      'GET /cases/{id}/research',
+      'GET /cases/{id}/packet/pdf',
+      'POST /reminders/run',
+      'GET /cases/{id}/reminders',
+      'POST /cases/{id}/reminders/pause',
+      'POST /cases/{id}/reminders/resume',
+    ]) {
       expect(byKey.get(key).AuthorizationType).toBe('JWT');
       expect(byKey.get(key).AuthorizerId).toBeDefined();
     }
@@ -435,9 +445,13 @@ describe('API authorization boundaries', () => {
       'POST /vendor/invites/current/trust-center',
       'POST /vendor/invites/current/answers',
       'POST /vendor/invites/current/coverage',
+      'POST /vendor/invites/current/analyze',
       'POST /vendor/invites/current/finalize',
+      'GET /vendor/invites/current/status',
       'GET /intake',
       'POST /intake',
+      'POST /intake/analyze',
+      'GET /intake/status',
       'POST /slack/events',
     ]) {
       expect(byKey.get(key).AuthorizationType ?? 'NONE').toBe('NONE');
@@ -483,6 +497,72 @@ describe('API authorization boundaries', () => {
     });
     const api = Object.values(platform.findResources('AWS::ApiGatewayV2::Api'))[0] as any;
     expect(api.Properties.CorsConfiguration.AllowOrigins).not.toContain('*');
+  });
+});
+
+describe('Weekly vendor reminder scheduling', () => {
+  test('invokes the case Lambda weekly in Pacific time with a fixed task and bounded retries', () => {
+    const { platform } = build(baseConfig);
+    platform.resourceCountIs('AWS::Scheduler::Schedule', 1);
+    platform.hasResourceProperties('AWS::Scheduler::Schedule', {
+      Name: 'csub-vendor-reminders-test',
+      ScheduleExpression: 'cron(0 9 ? * MON *)',
+      ScheduleExpressionTimezone: 'America/Los_Angeles',
+      FlexibleTimeWindow: { Mode: 'OFF' },
+      State: 'ENABLED',
+      Target: Match.objectLike({
+        Arn: Match.anyValue(),
+        RoleArn: Match.anyValue(),
+        Input: '{"scheduled_task":"reminders_run"}',
+        RetryPolicy: {
+          MaximumEventAgeInSeconds: 3600,
+          MaximumRetryAttempts: 2,
+        },
+      }),
+    });
+  });
+
+  test('uses a SourceAccount-guarded role that can invoke only the case Lambda', () => {
+    const { platform } = build(baseConfig);
+    platform.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'sts:AssumeRole',
+            Principal: { Service: 'scheduler.amazonaws.com' },
+            Condition: Match.objectLike({
+              StringEquals: { 'aws:SourceAccount': '111111111111' },
+              ArnEquals: Match.objectLike({ 'aws:SourceArn': Match.anyValue() }),
+            }),
+          }),
+        ]),
+      },
+      Policies: Match.arrayWith([
+        Match.objectLike({
+          PolicyDocument: {
+            Statement: [
+              Match.objectLike({
+                Action: 'lambda:InvokeFunction',
+                Effect: 'Allow',
+                Resource: Match.anyValue(),
+              }),
+            ],
+          },
+        }),
+      ]),
+    });
+    const template = platform.toJSON();
+    const schedulerRole = Object.values(template.Resources).find(
+      (resource: any) =>
+        resource.Type === 'AWS::IAM::Role' &&
+        JSON.stringify(resource.Properties.AssumeRolePolicyDocument).includes(
+          'scheduler.amazonaws.com',
+        ),
+    ) as any;
+    const invokeStatement = schedulerRole.Properties.Policies[0].PolicyDocument.Statement[0];
+    expect(invokeStatement.Action).toBe('lambda:InvokeFunction');
+    expect(JSON.stringify(invokeStatement.Resource)).toContain('CaseProxyFunction');
+    expect(JSON.stringify(schedulerRole.Properties.Policies)).not.toContain('*');
   });
 });
 

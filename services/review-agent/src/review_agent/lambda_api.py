@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs
 
+from .adapters.email import EmailSender
 from .adapters.model import DeterministicModelClient
 from .adapters.servicenow import MockServiceNowConnector, _Record
 from .api import LocalApiError, LocalReviewApi, _CaseRecord, vendor_link_settings
@@ -80,6 +81,11 @@ from .orchestration.state import InMemoryCheckpointer
 from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ReviewProfileService
+from .timestamps import normalize_utc_timestamp, parse_utc_timestamp
+from .vendor.delivery import (
+    DeliveryClaimStore,
+    InMemoryDeliveryClaimStore,
+)
 from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend
 
@@ -113,7 +119,7 @@ _PUBLIC_ROUTES = {
 }
 
 
-class WorkspaceStore(Protocol):
+class WorkspaceStore(DeliveryClaimStore, Protocol):
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None: ...
 
     def save_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None: ...
@@ -129,6 +135,7 @@ class InMemoryWorkspaceStore:
     def __init__(self) -> None:
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._catalogs: dict[str, list[dict[str, Any]]] = {}
+        self._delivery_claims = InMemoryDeliveryClaimStore()
 
     def load_snapshot(self, workspace_id: str) -> dict[str, Any] | None:
         value = self._snapshots.get(workspace_id)
@@ -142,6 +149,45 @@ class InMemoryWorkspaceStore:
 
     def replace_catalog(self, workspace_id: str, entries: list[dict[str, Any]]) -> None:
         self._catalogs[workspace_id] = _json_clone(entries)
+
+    def get(self, *, workspace_id: str, dedupe_key: str) -> ReminderClaim | None:
+        return self._delivery_claims.get(
+            workspace_id=workspace_id, dedupe_key=dedupe_key
+        )
+
+    def claim(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        case_id: str,
+        invite_id: str,
+        claimed_at: str,
+        max_attempts: int,
+    ) -> ReminderClaim | None:
+        return self._delivery_claims.claim(
+            workspace_id=workspace_id,
+            dedupe_key=dedupe_key,
+            case_id=case_id,
+            invite_id=invite_id,
+            claimed_at=claimed_at,
+            max_attempts=max_attempts,
+        )
+
+    def settle(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        attempts: int,
+        status: str,
+    ) -> bool:
+        return self._delivery_claims.settle(
+            workspace_id=workspace_id,
+            dedupe_key=dedupe_key,
+            attempts=attempts,
+            status=status,
+        )
 
 
 class FileWorkspaceStore:
@@ -159,12 +205,13 @@ class FileWorkspaceStore:
 
     def _read(self) -> dict[str, Any]:
         if not self._path.is_file():
-            return {"snapshots": {}, "catalogs": {}}
+            return {"snapshots": {}, "catalogs": {}, "delivery_claims": {}}
         data = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise RuntimeError("workspace file is malformed")
         data.setdefault("snapshots", {})
         data.setdefault("catalogs", {})
+        data.setdefault("delivery_claims", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -187,6 +234,74 @@ class FileWorkspaceStore:
         data = self._read()
         data["catalogs"][workspace_id] = _json_clone(entries)
         self._write(data)
+
+    def get(self, *, workspace_id: str, dedupe_key: str) -> ReminderClaim | None:
+        value = (
+            self._read()["delivery_claims"]
+            .get(workspace_id, {})
+            .get(dedupe_key)
+        )
+        return ReminderClaim(**value) if isinstance(value, dict) else None
+
+    def claim(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        case_id: str,
+        invite_id: str,
+        claimed_at: str,
+        max_attempts: int,
+    ) -> ReminderClaim | None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        data = self._read()
+        workspace_claims = data["delivery_claims"].setdefault(workspace_id, {})
+        value = workspace_claims.get(dedupe_key)
+        current = ReminderClaim(**value) if isinstance(value, dict) else None
+        if current is not None and (
+            current.status != "failed" or current.attempts >= max_attempts
+        ):
+            return None
+        claim = ReminderClaim(
+            dedupe_key=dedupe_key,
+            case_id=case_id,
+            invite_id=invite_id,
+            status="pending",
+            attempts=(current.attempts if current is not None else 0) + 1,
+            claimed_at=claimed_at,
+            workspace_id=workspace_id,
+        )
+        workspace_claims[dedupe_key] = claim.to_dict()
+        self._write(data)
+        return claim
+
+    def settle(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        attempts: int,
+        status: str,
+    ) -> bool:
+        if status not in {"sent", "failed"}:
+            raise ValueError("delivery claim status must be sent or failed")
+        data = self._read()
+        workspace_claims = data["delivery_claims"].setdefault(workspace_id, {})
+        value = workspace_claims.get(dedupe_key)
+        current = ReminderClaim(**value) if isinstance(value, dict) else None
+        if (
+            current is None
+            or current.status != "pending"
+            or current.attempts != attempts
+        ):
+            return False
+        workspace_claims[dedupe_key] = {
+            **current.to_dict(),
+            "status": status,
+        }
+        self._write(data)
+        return True
 
 
 class DynamoWorkspaceStore:
@@ -333,6 +448,120 @@ class DynamoWorkspaceStore:
                     }
                 )
 
+    @staticmethod
+    def _delivery_key(workspace_id: str, dedupe_key: str) -> str:
+        return _physical(workspace_id, f"delivery#{dedupe_key}")
+
+    @staticmethod
+    def _delivery_claim(item: object) -> ReminderClaim | None:
+        if not isinstance(item, dict) or item.get("record_type") != "delivery_claim":
+            return None
+        return ReminderClaim(
+            dedupe_key=_required_string(item, "dedupe_key"),
+            case_id=_required_string(item, "case_id"),
+            invite_id=_required_string(item, "invite_id"),
+            status=_required_string(item, "status"),
+            attempts=int(item["attempts"]),
+            claimed_at=normalize_utc_timestamp(_required_string(item, "claimed_at")),
+            workspace_id=_required_string(item, "workspace_id"),
+        )
+
+    def get(self, *, workspace_id: str, dedupe_key: str) -> ReminderClaim | None:
+        response = self._tables["idempotency"].get_item(
+            Key={"idempotency_key": self._delivery_key(workspace_id, dedupe_key)},
+            ConsistentRead=True,
+        )
+        claim = self._delivery_claim(response.get("Item"))
+        return claim if claim is not None and claim.workspace_id == workspace_id else None
+
+    def claim(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        case_id: str,
+        invite_id: str,
+        claimed_at: str,
+        max_attempts: int,
+    ) -> ReminderClaim | None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        claimed_at = normalize_utc_timestamp(claimed_at)
+        ttl = int(parse_utc_timestamp(claimed_at).timestamp()) + 7_776_000
+        try:
+            response = self._tables["idempotency"].update_item(
+                Key={"idempotency_key": self._delivery_key(workspace_id, dedupe_key)},
+                UpdateExpression=(
+                    "SET workspace_id = :workspace, record_type = :record_type, "
+                    "dedupe_key = :dedupe_key, case_id = :case_id, "
+                    "invite_id = :invite_id, #status = :pending, "
+                    "attempts = if_not_exists(attempts, :zero) + :one, "
+                    "claimed_at = :claimed_at, #ttl = :ttl"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(idempotency_key) OR "
+                    "(#status = :failed AND attempts < :max_attempts)"
+                ),
+                ExpressionAttributeNames={"#status": "status", "#ttl": "ttl"},
+                ExpressionAttributeValues={
+                    ":workspace": workspace_id,
+                    ":record_type": "delivery_claim",
+                    ":dedupe_key": dedupe_key,
+                    ":case_id": case_id,
+                    ":invite_id": invite_id,
+                    ":pending": "pending",
+                    ":failed": "failed",
+                    ":zero": 0,
+                    ":one": 1,
+                    ":max_attempts": max_attempts,
+                    ":claimed_at": claimed_at,
+                    ":ttl": ttl,
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except Exception as error:  # boto3 exception type is client-generated
+            if _is_conditional_check_failed(error):
+                return None
+            raise
+        claim = self._delivery_claim(response.get("Attributes"))
+        if claim is None:
+            raise RuntimeError("DynamoDB delivery claim returned malformed attributes")
+        return claim
+
+    def settle(
+        self,
+        *,
+        workspace_id: str,
+        dedupe_key: str,
+        attempts: int,
+        status: str,
+    ) -> bool:
+        if status not in {"sent", "failed"}:
+            raise ValueError("delivery claim status must be sent or failed")
+        try:
+            self._tables["idempotency"].update_item(
+                Key={"idempotency_key": self._delivery_key(workspace_id, dedupe_key)},
+                UpdateExpression="SET #status = :status",
+                ConditionExpression=(
+                    "workspace_id = :workspace AND record_type = :record_type AND "
+                    "#status = :pending AND attempts = :attempts"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":workspace": workspace_id,
+                    ":record_type": "delivery_claim",
+                    ":pending": "pending",
+                    ":status": status,
+                    ":attempts": attempts,
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except Exception as error:  # boto3 exception type is client-generated
+            if _is_conditional_check_failed(error):
+                return False
+            raise
+        return True
+
     def _write_projections(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
         repository = snapshot.get("repository", {})
         records = repository.get("records", {}) if isinstance(repository, dict) else {}
@@ -421,7 +650,7 @@ class DynamoWorkspaceStore:
         elif table_name == "invite":
             item["token_hash"] = _required_string(value, "token_hash")
             item["expires_at"] = int(
-                datetime.datetime.fromisoformat(_required_string(value, "expires_at")).timestamp()
+                parse_utc_timestamp(_required_string(value, "expires_at")).timestamp()
             )
         elif table_name == "submission":
             item["submission_id"] = _physical(workspace_id, f"{kind}#{record_id}")
@@ -482,6 +711,16 @@ class DynamoWorkspaceStore:
                 return items
 
 
+def _vendor_invite(value: dict[str, Any]) -> VendorInvite:
+    normalized = dict(value)
+    for field in ("issued_at", "expires_at", "opened_at", "revoked_at", "submitted_at"):
+        timestamp = normalized.get(field)
+        if timestamp is not None:
+            normalized[field] = normalize_utc_timestamp(_required_string(normalized, field))
+    normalized["status"] = InviteStatus(_required_string(normalized, "status"))
+    return VendorInvite(**normalized)
+
+
 _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "vendor": lambda value: Vendor(**value),
     "product": lambda value: VendorProduct(**value),
@@ -493,7 +732,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
             "vendor_next_actions": tuple(value.get("vendor_next_actions", [])),
         }
     ),
-    "invite": lambda value: VendorInvite(**{**value, "status": InviteStatus(value["status"])}),
+    "invite": _vendor_invite,
     "evidence": lambda value: EvidenceArtifact(**value),
     "coverage": lambda value: CoverageItem(
         **{**value, "evidence_artifact_ids": tuple(value["evidence_artifact_ids"])}
@@ -525,7 +764,14 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
             "unresolved_requirement_ids": tuple(value["unresolved_requirement_ids"]),
         }
     ),
-    "event": lambda value: IntegrationEvent(**value),
+    "event": lambda value: IntegrationEvent(
+        **{
+            **value,
+            "occurred_at": normalize_utc_timestamp(
+                _required_string(value, "occurred_at")
+            ),
+        }
+    ),
     "reminder_claim": lambda value: ReminderClaim(**value),
 }
 
@@ -619,13 +865,24 @@ def snapshot_api(api: LocalReviewApi, *, workspace_id: str) -> dict[str, Any]:
 
 
 def restore_api(
-    snapshot: dict[str, Any], catalog_values: list[dict[str, Any]], *, workspace_id: str
+    snapshot: dict[str, Any],
+    catalog_values: list[dict[str, Any]],
+    *,
+    workspace_id: str,
+    delivery_claim_store: DeliveryClaimStore | None = None,
+    email_sender: EmailSender | None = None,
+    clock: Callable[[], datetime.datetime] | None = None,
 ) -> LocalReviewApi:
     if snapshot.get("schema_version") != _SCHEMA_VERSION:
         raise RuntimeError("unsupported workspace snapshot version")
     if snapshot.get("workspace_id") != workspace_id:
         raise RuntimeError("workspace snapshot isolation check failed")
-    api = LocalReviewApi(seed_demo=False)
+    api = LocalReviewApi(
+        seed_demo=False,
+        delivery_claim_store=delivery_claim_store,
+        email_sender=email_sender,
+        clock=clock,
+    )
     repository = InMemoryVendorRepository()
     repository_data = snapshot.get("repository")
     if not isinstance(repository_data, dict):
@@ -650,12 +907,16 @@ def restore_api(
     for key, value in _string_map(repository_data.get("current_runs", {})).items():
         repository.set_current_run(key, value, workspace_id=workspace_id)
     api._vendor_repository = repository
-    api._profiles = ReviewProfileService(repository, workspace_id=workspace_id)
+    api._profiles = ReviewProfileService(
+        repository, workspace_id=workspace_id, clock=api._clock
+    )
     api._vendor = VendorBackend(
         repository,
         api._profiles,
         workspace_id=workspace_id,
+        clock=api._clock,
         research_provider=api.research_provider,
+        delivery_claim_store=api._delivery_claim_store,
         **vendor_link_settings(),
     )
     api._software_index = ApprovedSoftwareIndex([_approved_record(entry) for entry in catalog])
@@ -700,12 +961,42 @@ def create_handler(
     *,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     allowed_origins: Iterable[str] = (),
+    delivery_claim_store: DeliveryClaimStore | None = None,
+    email_sender: EmailSender | None = None,
+    clock: Callable[[], datetime.datetime] | None = None,
 ) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
     origins = frozenset(origin for origin in allowed_origins if origin)
+    claims = delivery_claim_store or store
 
     def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         correlation_id = _correlation_id(event, context)
+        scheduled_invocation = event.get("scheduled_task") is not None
         try:
+            scheduled_task = event.get("scheduled_task")
+            if scheduled_task is not None:
+                if scheduled_task != "reminders_run":
+                    raise LocalApiError(400, "scheduled_task_invalid", "scheduled task is invalid")
+                snapshot = store.load_snapshot(workspace_id)
+                if snapshot is None:
+                    raise LocalApiError(
+                        503, "workspace_not_seeded", "demo workspace is not seeded"
+                    )
+                api = restore_api(
+                    snapshot,
+                    store.load_catalog(workspace_id),
+                    workspace_id=workspace_id,
+                    delivery_claim_store=claims,
+                    email_sender=email_sender,
+                    clock=clock,
+                )
+                result = api.run_reminder_sweep()
+                if result["count"] > 0:
+                    store.save_snapshot(
+                        workspace_id, snapshot_api(api, workspace_id=workspace_id)
+                    )
+                _log(correlation_id, "schedule.completed", 200)
+                return {"scheduled_task": "reminders_run", **result}
+
             method, path = _method_path(event)
             origin = _header(event, "origin")
             if method == "OPTIONS":
@@ -728,7 +1019,14 @@ def create_handler(
             snapshot = store.load_snapshot(workspace_id)
             if snapshot is None:
                 raise LocalApiError(503, "workspace_not_seeded", "demo workspace is not seeded")
-            api = restore_api(snapshot, store.load_catalog(workspace_id), workspace_id=workspace_id)
+            api = restore_api(
+                snapshot,
+                store.load_catalog(workspace_id),
+                workspace_id=workspace_id,
+                delivery_claim_store=claims,
+                email_sender=email_sender,
+                clock=clock,
+            )
             result, status, mutated = _dispatch(
                 api,
                 method,
@@ -749,6 +1047,8 @@ def create_handler(
                 allowed_origins=origins,
             )
         except LocalApiError as error:
+            if scheduled_invocation:
+                raise
             _log(correlation_id, "request.rejected", error.status)
             return _response(
                 error.status,
@@ -758,6 +1058,8 @@ def create_handler(
                 allowed_origins=origins,
             )
         except Exception:
+            if scheduled_invocation:
+                raise
             _log(correlation_id, "request.failed", 500)
             return _response(
                 500,
@@ -787,8 +1089,8 @@ def _dispatch(
     if method == "GET" and path == "/integration-events":
         return api.integration_events(), 200, False
     if method == "POST" and path == "/reminders/run":
-        # Reviewer/scheduler-triggered sweep; requires reviewer auth (not public).
-        return api.run_reminder_sweep(), 200, True
+        result = api.run_reminder_sweep()
+        return result, 200, result["count"] > 0
     if method == "GET" and path == "/catalog":
         query = _query(event)
         return (
@@ -1327,7 +1629,7 @@ def _audit_event(value: object) -> AuditEvent:
         event_id=_required_string(value, "event_id"),
         event_type=_required_string(value, "event_type"),
         case_id=_required_string(value, "case_id"),
-        occurred_at=_required_string(value, "occurred_at"),
+        occurred_at=normalize_utc_timestamp(_required_string(value, "occurred_at")),
         actor_type=ActorType(_required_string(value, "actor_type")),
         actor_id=_optional_string(value.get("actor_id")),
         correlation_id=_optional_string(value.get("correlation_id")),
@@ -1555,7 +1857,16 @@ def _physical(workspace_id: str, value: str) -> str:
 
 
 def _epoch_micros(value: str) -> int:
-    return int(datetime.datetime.fromisoformat(value).timestamp() * 1_000_000)
+    return int(parse_utc_timestamp(value).timestamp() * 1_000_000)
+
+
+def _is_conditional_check_failed(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    details = response.get("Error") if isinstance(response, dict) else None
+    return (
+        isinstance(details, dict)
+        and details.get("Code") == "ConditionalCheckFailedException"
+    )
 
 
 def _utc_now() -> str:

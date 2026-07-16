@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import unittest
+from dataclasses import replace
 
 import _bootstrap  # noqa: F401
 
@@ -36,6 +39,17 @@ class FlakyEmailSender:
             self._failures -= 1
             raise ConnectionError("smtp unavailable")
         return self._delegate.send(to=to, subject=subject, body=body)
+
+
+class MalformedEmailSender:
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.calls = 0
+
+    def send(self, *, to: str, subject: str, body: str) -> object:
+        del to, subject, body
+        self.calls += 1
+        return self.result
 
 
 CRITERIA = [
@@ -111,6 +125,33 @@ class ReminderCandidateTests(unittest.TestCase):
             )
             sent.append(candidate)
         return sent
+
+    def test_naive_invite_timestamps_are_interpreted_as_utc(self) -> None:
+        invite = self.backend.list_invites("CASE-1")[0]
+        issued = datetime.datetime.fromisoformat(invite.issued_at).replace(tzinfo=None)
+        expires = datetime.datetime.fromisoformat(invite.expires_at).replace(tzinfo=None)
+        self.repository.put(
+            "invite",
+            invite.invite_id,
+            replace(
+                invite,
+                issued_at=issued.isoformat(),
+                expires_at=expires.isoformat(),
+            ),
+            workspace_id=invite.workspace_id,
+        )
+        self.clock.value += WEEK + datetime.timedelta(seconds=1)
+        [candidate] = self.backend.reminder_candidates()
+        self.assertEqual(candidate["dedupe_key"], "reminder:CASE-1:1")
+
+    def test_skipped_and_unknown_modes_do_not_satisfy_cadence(self) -> None:
+        self.clock.value += WEEK + datetime.timedelta(seconds=1)
+        self.assertEqual(len(self.send_due_reminders(delivery="skipped")), 1)
+        self.assertEqual(len(self.backend.reminder_candidates()), 1)
+        self.assertEqual(len(self.send_due_reminders(delivery="mystery")), 1)
+        self.assertEqual(len(self.backend.reminder_candidates()), 1)
+        self.assertEqual(len(self.send_due_reminders()), 1)
+        self.assertEqual(self.backend.reminder_candidates(), [])
 
     def test_new_invitation_is_due_only_after_the_configured_interval(self) -> None:
         # Finding 3: never immediately eligible.
@@ -349,6 +390,30 @@ class ReminderSweepApiTests(unittest.TestCase):
         self.assertEqual(api.run_reminder_sweep()["count"], 0)
         history = api.reminder_history("TR-260714-018")
         self.assertEqual([item["delivery"] for item in history["items"]], ["failed", "simulated"])
+
+    def test_malformed_sender_results_fail_safely_and_are_bounded(self) -> None:
+        for raw_result in (None, "unexpected"):
+            with self.subTest(raw_result=raw_result):
+                self.clock = MutableClock()
+                sender = MalformedEmailSender(raw_result)
+                api = self._build_api(sender)
+                self.clock.value += datetime.timedelta(days=7, seconds=1)
+                for _ in range(VendorBackend.MAX_REMINDER_ATTEMPTS):
+                    attempt = api.run_reminder_sweep()
+                    self.assertEqual(attempt["count"], 1)
+                    self.assertEqual(attempt["sent"][0]["delivery"], "failed")
+                self.assertEqual(api.run_reminder_sweep()["count"], 0)
+                self.assertEqual(sender.calls, VendorBackend.MAX_REMINDER_ATTEMPTS)
+                reminder_events = [
+                    item
+                    for item in api.integration_events()["items"]
+                    if item["event_type"] == "email.reminder"
+                ]
+                expected = hashlib.sha256(b"remind@vendor.example").hexdigest()
+                self.assertTrue(
+                    all(item["detail"]["recipient_sha256"] == expected for item in reminder_events)
+                )
+                self.assertNotIn("remind@vendor.example", json.dumps(reminder_events))
 
     def test_reviewer_can_pause_resume_and_inspect_history(self) -> None:
         self.clock.value += datetime.timedelta(days=7, seconds=1)

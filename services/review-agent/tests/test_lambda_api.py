@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import hashlib
 import io
 import json
+import tempfile
+import threading
 import unittest
 
 import _bootstrap  # noqa: F401
 
+from review_agent.adapters.email import SimulatedEmailSender
 from review_agent.api import LocalReviewApi
 from review_agent.config import AppConfig
 from review_agent.lambda_api import (
     DynamoWorkspaceStore,
+    FileWorkspaceStore,
     InMemoryWorkspaceStore,
     create_handler,
     restore_api,
@@ -21,10 +26,17 @@ from review_agent.lambda_api import (
 from review_agent.research import build_research_provider
 
 
+class ConditionalCheckFailed(Exception):
+    def __init__(self) -> None:
+        super().__init__("conditional check failed")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
 class FakeTable:
     def __init__(self, *key_fields: str) -> None:
         self.key_fields = key_fields
         self.items: dict[tuple[object, ...], dict] = {}
+        self.update_calls: list[dict] = []
 
     def _key(self, value: dict) -> tuple[object, ...]:
         return tuple(value[field] for field in self.key_fields)
@@ -32,6 +44,46 @@ class FakeTable:
     def get_item(self, *, Key: dict, **_kwargs) -> dict:
         item = self.items.get(self._key(Key))
         return {"Item": json.loads(json.dumps(item))} if item is not None else {}
+
+    def update_item(self, **kwargs) -> dict:
+        self.update_calls.append(json.loads(json.dumps(kwargs)))
+        key = kwargs["Key"]
+        item_key = self._key(key)
+        current = self.items.get(item_key)
+        values = kwargs["ExpressionAttributeValues"]
+        if ":max_attempts" in values:
+            if current is not None and not (
+                current.get("status") == values[":failed"]
+                and int(current.get("attempts", 0)) < values[":max_attempts"]
+            ):
+                raise ConditionalCheckFailed()
+            updated = dict(current or key)
+            updated.update(
+                {
+                    "workspace_id": values[":workspace"],
+                    "record_type": values[":record_type"],
+                    "dedupe_key": values[":dedupe_key"],
+                    "case_id": values[":case_id"],
+                    "invite_id": values[":invite_id"],
+                    "status": values[":pending"],
+                    "attempts": int((current or {}).get("attempts", values[":zero"]))
+                    + values[":one"],
+                    "claimed_at": values[":claimed_at"],
+                    "ttl": values[":ttl"],
+                }
+            )
+        else:
+            if not (
+                current is not None
+                and current.get("workspace_id") == values[":workspace"]
+                and current.get("record_type") == values[":record_type"]
+                and current.get("status") == values[":pending"]
+                and int(current.get("attempts", 0)) == values[":attempts"]
+            ):
+                raise ConditionalCheckFailed()
+            updated = {**current, "status": values[":status"]}
+        self.items[item_key] = json.loads(json.dumps(updated))
+        return {"Attributes": json.loads(json.dumps(updated))}
 
     def put_item(self, *, Item: dict) -> None:
         self.items[self._key(Item)] = json.loads(json.dumps(Item))
@@ -50,6 +102,26 @@ class FakeTable:
 
     def __exit__(self, *_args) -> None:
         return None
+
+
+class BlockingEmailSender:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.sent: list[str] = []
+
+    def send(self, *, to: str, subject: str, body: str) -> dict:
+        del subject, body
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test did not release sender")
+        self.sent.append(to)
+        return {
+            "delivery": "simulated",
+            "simulated": True,
+            "channel": "email",
+            "to": to,
+        }
 
 
 def fake_dynamo_tables() -> dict[str, FakeTable]:
@@ -146,6 +218,12 @@ class LambdaApiTests(unittest.TestCase):
     def test_reviewer_routes_require_cognito_claims_and_isolate_workspace(self) -> None:
         unauthenticated, payload = self.call(
             "GET", "/review-queue", authenticated=False
+        )
+        self.assertEqual(unauthenticated["statusCode"], 401)
+        self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
+
+        unauthenticated, payload = self.call(
+            "POST", "/reminders/run", authenticated=False, body={}
         )
         self.assertEqual(unauthenticated["statusCode"], 401)
         self.assertEqual(payload["error"]["code"], "reviewer_auth_required")
@@ -268,6 +346,17 @@ class LambdaApiTests(unittest.TestCase):
         )
         self.assertEqual(response["statusCode"], 201)
         return issued
+
+    def _make_invite_due(
+        self, invite_id: str, now: datetime.datetime
+    ) -> None:
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        invites = snapshot["repository"]["records"]["invite"]
+        invite = next(item for item in invites if item["invite_id"] == invite_id)
+        invite["issued_at"] = (now - datetime.timedelta(days=8)).isoformat()
+        invite["expires_at"] = (now + datetime.timedelta(days=30)).isoformat()
+        self.store.save_snapshot("csub-demo", snapshot)
 
     def test_bearer_invite_is_hashed_at_rest_token_free_and_lifecycle_persists(self) -> None:
         issued = self._issue_invite()
@@ -600,6 +689,216 @@ class LambdaApiTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(json.loads(response["body"])["case_id"], "TR-260714-018")
 
+
+    def test_scheduled_reminder_runs_without_jwt_and_persists(self) -> None:
+        issued = self._issue_invite()
+        now = datetime.datetime(2026, 7, 23, 12, tzinfo=datetime.timezone.utc)
+        self._make_invite_due(issued["invite"]["invite_id"], now)
+        sender = SimulatedEmailSender()
+        scheduled = create_handler(self.store, email_sender=sender, clock=lambda: now)
+
+        result = scheduled({"scheduled_task": "reminders_run"}, None)
+
+        self.assertEqual(result["scheduled_task"], "reminders_run")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(sender.sent), 1)
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        reminders = [
+            event
+            for event in snapshot["repository"]["records"]["event"]
+            if event["event_type"] == "email.reminder"
+        ]
+        self.assertEqual(len(reminders), 1)
+        self.assertIn("recipient_sha256", reminders[0]["detail"])
+        self.assertNotIn(sender.sent[0]["to"], json.dumps(reminders))
+
+    def test_two_independent_restores_send_once_and_loser_does_not_save(self) -> None:
+        issued = self._issue_invite()
+        now = datetime.datetime(2026, 7, 23, 12, tzinfo=datetime.timezone.utc)
+        self._make_invite_due(issued["invite"]["invite_id"], now)
+        sender = BlockingEmailSender()
+        first = create_handler(self.store, email_sender=sender, clock=lambda: now)
+        second = create_handler(self.store, email_sender=sender, clock=lambda: now)
+        save_calls: list[dict] = []
+        original_save = self.store.save_snapshot
+
+        def tracked_save(workspace_id: str, snapshot: dict) -> None:
+            save_calls.append(json.loads(json.dumps(snapshot)))
+            original_save(workspace_id, snapshot)
+
+        self.store.save_snapshot = tracked_save  # type: ignore[method-assign]
+        winner_responses: list[dict] = []
+        thread = threading.Thread(
+            target=lambda: winner_responses.append(
+                first(self.event("POST", "/reminders/run", body={}), None)
+            )
+        )
+        thread.start()
+        self.assertTrue(sender.entered.wait(timeout=5))
+        try:
+            losing = second(self.event("POST", "/reminders/run", body={}), None)
+            losing_payload = json.loads(losing["body"])
+            self.assertEqual(losing_payload["count"], 0)
+            self.assertEqual(save_calls, [])
+        finally:
+            sender.release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(winner_responses), 1)
+        self.assertEqual(json.loads(winner_responses[0]["body"])["count"], 1)
+        self.assertEqual(sender.sent, ["contact@example.edu"])
+        self.assertEqual(len(save_calls), 1)
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        reminders = [
+            event
+            for event in snapshot["repository"]["records"]["event"]
+            if event["event_type"] == "email.reminder"
+        ]
+        self.assertEqual(len(reminders), 1)
+
+    def test_file_delivery_claims_persist_across_store_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/workspace.json"
+            first = FileWorkspaceStore(path)
+            claim = first.claim(
+                workspace_id="csub-demo",
+                dedupe_key="reminder:CASE-1:1",
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-21T12:00:00+00:00",
+                max_attempts=3,
+            )
+            assert claim is not None
+            second = FileWorkspaceStore(path)
+            self.assertIsNone(
+                second.claim(
+                    workspace_id="csub-demo",
+                    dedupe_key="reminder:CASE-1:1",
+                    case_id="CASE-1",
+                    invite_id="invite-1",
+                    claimed_at="2026-07-21T12:01:00+00:00",
+                    max_attempts=3,
+                )
+            )
+            self.assertTrue(
+                second.settle(
+                    workspace_id="csub-demo",
+                    dedupe_key="reminder:CASE-1:1",
+                    attempts=1,
+                    status="failed",
+                )
+            )
+            retry = first.claim(
+                workspace_id="csub-demo",
+                dedupe_key="reminder:CASE-1:1",
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-21T12:02:00+00:00",
+                max_attempts=3,
+            )
+            assert retry is not None
+            self.assertEqual(retry.attempts, 2)
+
+    def test_dynamo_delivery_claims_use_conditional_atomic_updates(self) -> None:
+        tables = fake_dynamo_tables()
+        store = DynamoWorkspaceStore(tables)
+        dedupe_key = "reminder:CASE-1:1"
+        for attempt in range(1, 4):
+            claim = store.claim(
+                workspace_id="csub-demo",
+                dedupe_key=dedupe_key,
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at=f"2026-07-2{attempt}T12:00:00",
+                max_attempts=3,
+            )
+            assert claim is not None
+            self.assertEqual(claim.attempts, attempt)
+            self.assertTrue(
+                store.settle(
+                    workspace_id="csub-demo",
+                    dedupe_key=dedupe_key,
+                    attempts=attempt,
+                    status="failed",
+                )
+            )
+        self.assertIsNone(
+            store.claim(
+                workspace_id="csub-demo",
+                dedupe_key=dedupe_key,
+                case_id="CASE-1",
+                invite_id="invite-1",
+                claimed_at="2026-07-24T12:00:00+00:00",
+                max_attempts=3,
+            )
+        )
+        calls = tables["idempotency"].update_calls
+        claim_calls = [call for call in calls if ":max_attempts" in call["ExpressionAttributeValues"]]
+        settle_calls = [call for call in calls if ":status" in call["ExpressionAttributeValues"]]
+        self.assertEqual(
+            claim_calls[0]["Key"]["idempotency_key"],
+            "csub-demo#delivery#reminder:CASE-1:1",
+        )
+        self.assertIn("attribute_not_exists(idempotency_key)", claim_calls[0]["ConditionExpression"])
+        self.assertIn("attempts < :max_attempts", claim_calls[0]["ConditionExpression"])
+        self.assertEqual(claim_calls[0]["ReturnValues"], "ALL_NEW")
+        self.assertIn("#status = :pending", settle_calls[0]["ConditionExpression"])
+        self.assertIn("attempts = :attempts", settle_calls[0]["ConditionExpression"])
+        self.assertEqual(settle_calls[0]["ReturnValues"], "ALL_NEW")
+
+    def test_naive_invite_and_event_timestamps_restore_and_project_as_utc(self) -> None:
+        issued = self._issue_invite()
+        snapshot = self.store.load_snapshot("csub-demo")
+        assert snapshot is not None
+        invite = next(
+            item
+            for item in snapshot["repository"]["records"]["invite"]
+            if item["invite_id"] == issued["invite"]["invite_id"]
+        )
+        invite["issued_at"] = "2026-07-01T12:00:00"
+        invite["expires_at"] = "2026-07-31T12:00:00"
+        event = snapshot["repository"]["records"]["event"][0]
+        event["occurred_at"] = "2026-07-02T12:00:00"
+        restored = restore_api(
+            snapshot,
+            self.store.load_catalog("csub-demo"),
+            workspace_id="csub-demo",
+        )
+        restored_invite = next(
+            item
+            for item in restored._vendor.list_invites()
+            if item.invite_id == invite["invite_id"]
+        )
+        restored_event = restored._vendor_repository.get(
+            "event", event["event_id"], workspace_id="csub-demo"
+        )
+        self.assertEqual(restored_invite.issued_at, "2026-07-01T12:00:00+00:00")
+        self.assertEqual(restored_invite.expires_at, "2026-07-31T12:00:00+00:00")
+        self.assertEqual(restored_event.occurred_at, "2026-07-02T12:00:00+00:00")
+
+        tables = fake_dynamo_tables()
+        DynamoWorkspaceStore(tables).save_snapshot("csub-demo", snapshot)
+        projected_invite = next(iter(tables["invite"].items.values()))
+        self.assertEqual(
+            projected_invite["expires_at"],
+            int(
+                datetime.datetime(
+                    2026, 7, 31, 12, tzinfo=datetime.timezone.utc
+                ).timestamp()
+            ),
+        )
+        projected_event = next(iter(tables["integration"].items.values()))
+        self.assertEqual(
+            projected_event["occurred_at"],
+            int(
+                datetime.datetime(
+                    2026, 7, 2, 12, tzinfo=datetime.timezone.utc
+                ).timestamp()
+                * 1_000_000
+            ),
+        )
 
     def test_invalid_json_and_oversized_metadata_are_rejected(self) -> None:
         invalid, payload = self.call("POST", "/cases", body="{not-json")

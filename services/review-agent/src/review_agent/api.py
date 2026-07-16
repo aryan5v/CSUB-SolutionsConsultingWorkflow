@@ -45,7 +45,9 @@ from .policy.conflicts import default_conflict_registry
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
 from .research import VendorResearchProvider, build_research_provider
+from .timestamps import parse_utc_timestamp
 from .samples import escalation_case, low_risk_case, sample_records
+from .vendor.delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
 from .vendor.repository import InMemoryVendorRepository
 from .vendor.service import VendorBackend, VendorBackendError
 
@@ -149,6 +151,7 @@ class LocalReviewApi:
         packet_storage: StorageClient | None = None,
         notifier: Notifier | None = None,
         email_sender: EmailSender | None = None,
+        delivery_claim_store: DeliveryClaimStore | None = None,
         config: AppConfig | None = None,
         clock: Callable[[], datetime.datetime] | None = None,
         research_provider: VendorResearchProvider | None | _UnsetResearchProvider = (
@@ -191,6 +194,8 @@ class LocalReviewApi:
         self._connector = MockServiceNowConnector()
         self._vendor_repository = InMemoryVendorRepository()
         local_clock = clock or (lambda: datetime.datetime.now(datetime.timezone.utc))
+        self._clock = local_clock
+        self._delivery_claim_store = delivery_claim_store or InMemoryDeliveryClaimStore()
         self._profiles = ReviewProfileService(self._vendor_repository, clock=local_clock)
         self._seed_review_profiles()
         self._vendor = VendorBackend(
@@ -199,6 +204,7 @@ class LocalReviewApi:
             clock=local_clock,
             **vendor_link_settings(),
             research_provider=self._research_provider,
+            delivery_claim_store=self._delivery_claim_store,
         )
         catalog_entries = []
         for record in records:
@@ -799,25 +805,24 @@ class LocalReviewApi:
         """
         sent: list[dict[str, Any]] = []
         for candidate in self._vendor_call(self._vendor.reminder_candidates):
-            if not self._vendor.claim_reminder(
+            claim = self._vendor.claim_reminder(
                 dedupe_key=candidate["dedupe_key"],
                 case_id=candidate["case_id"],
                 invite_id=candidate["invite_id"],
-            ):
+            )
+            if claim is None:
                 continue  # another sweep already claimed this period
             subject, body = self._reminder_email(candidate)
-            try:
-                delivery = self._email_sender.send(
-                    to=candidate["contact_email"], subject=subject, body=body
-                )
-            except Exception:  # noqa: BLE001 - a failed send must not stop the sweep
-                delivery = {"delivery": "failed", "simulated": False, "channel": "email"}
+            delivery = self._send_email(
+                to=candidate["contact_email"], subject=subject, body=body
+            )
             self._vendor.record_reminder(
                 invite_id=candidate["invite_id"],
                 case_id=candidate["case_id"],
                 dedupe_key=candidate["dedupe_key"],
                 summary=subject,
                 delivery=delivery,
+                claim=claim,
             )
             sent.append(
                 {
@@ -1371,9 +1376,12 @@ class LocalReviewApi:
             invite for invite in invites if invite.status is InviteStatus.SUBMITTED
         ]
         if submitted:
-            invite = max(submitted, key=lambda item: item.submitted_at or item.issued_at)
+            invite = max(
+                submitted,
+                key=lambda item: parse_utc_timestamp(item.submitted_at or item.issued_at),
+            )
         else:
-            invite = max(invites, key=lambda item: item.issued_at)
+            invite = max(invites, key=lambda item: parse_utc_timestamp(item.issued_at))
         try:
             contact = self._vendor.get_contact(invite.contact_id)
         except VendorBackendError:
@@ -1381,15 +1389,7 @@ class LocalReviewApi:
         headline, body_template = outcome
         subject = f"VETTED review outcome for {product_name}: {headline}"
         body = body_template.format(product=product_name)
-        try:
-            delivery = self._email_sender.send(to=contact.email, subject=subject, body=body)
-        except Exception:  # noqa: BLE001 - never let notification block the decision
-            delivery = {
-                "delivery": "failed",
-                "simulated": False,
-                "channel": "email",
-                "to": contact.email,
-            }
+        delivery = self._send_email(to=contact.email, subject=subject, body=body)
         self._vendor.record_notification(
             case_id=case_id,
             summary=subject,
@@ -1397,6 +1397,26 @@ class LocalReviewApi:
             event_type="email.notification",
             dedupe_key=dedupe_key,
         )
+
+    def _send_email(self, *, to: str, subject: str, body: str) -> dict[str, Any]:
+        """Call the sender without trusting its result shape or success label.
+
+        The raw ``to`` value is intentionally ephemeral: downstream audit
+        projection hashes it and persists only ``recipient_sha256``.
+        """
+        try:
+            raw_delivery = self._email_sender.send(to=to, subject=subject, body=body)
+        except Exception:  # noqa: BLE001 - delivery failures are recorded data
+            raw_delivery = None
+        mode = raw_delivery.get("delivery") if isinstance(raw_delivery, dict) else None
+        if mode not in {"live", "simulated"}:
+            mode = "failed"
+        return {
+            "delivery": mode,
+            "simulated": mode == "simulated",
+            "channel": "email",
+            "to": to,
+        }
 
     def _notify(self, case_id: str | None, event_type: str, summary: str) -> None:
         """Send/record a truthful notification (live Slack only when configured)."""
