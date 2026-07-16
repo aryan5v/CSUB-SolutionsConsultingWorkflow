@@ -60,6 +60,7 @@ import {
   queueItemToSummary,
   requiresReviewerConfirmation,
   reviewApi,
+  vendorInviteUrl,
   type AuditEvent,
   type CaseActionResponse,
   type CaseIntakeInput,
@@ -69,6 +70,7 @@ import {
   type ReviewerRecordContext,
   type ReviewState,
   type ReviewSummary,
+  type VendorRecord,
   type WritePreview,
 } from "./api";
 import {
@@ -896,13 +898,45 @@ function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents, revie
 }
 
 function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: CaseIntakeInput) => void }) {
+  const [vendors, setVendors] = useState<VendorRecord[]>([]);
+  const [selectedVendorId, setSelectedVendorId] = useState("");
+  const [vendorName, setVendorName] = useState("");
+  const [officialDomain, setOfficialDomain] = useState("");
+  const selectedVendor = vendors.find((vendor) => vendor.vendor_id === selectedVendorId);
+
+  useEffect(() => {
+    let active = true;
+    reviewApi.listVendors().then((items) => {
+      if (active) setVendors(items);
+    }).catch(() => {
+      if (active) setVendors([]);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const chooseVendor = (vendorId: string) => {
+    setSelectedVendorId(vendorId);
+    if (!vendorId) {
+      setVendorName("");
+      setOfficialDomain("");
+      return;
+    }
+    const vendor = vendors.find((item) => item.vendor_id === vendorId);
+    if (!vendor) return;
+    setVendorName(vendor.name);
+    setOfficialDomain(vendor.official_domain ?? "");
+  };
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const optional = (name: string) => String(data.get(name) || "").trim() || undefined;
     onSubmit({
       product_name: String(data.get("product_name") || "").trim(),
-      vendor_name: String(data.get("vendor_name") || "").trim(),
+      vendor_name: vendorName.trim() || String(data.get("vendor_name") || "").trim(),
+      vendor_id: selectedVendorId || undefined,
+      vendor_contact_name: String(data.get("vendor_contact_name") || "").trim() || undefined,
+      vendor_contact_email: String(data.get("vendor_contact_email") || "").trim() || undefined,
       requester: {
         name: String(data.get("requester_name") || "").trim(),
         email: String(data.get("requester_email") || "").trim(),
@@ -917,17 +951,30 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
       uses_sso: data.get("uses_sso") === "true",
       uses_ai: data.get("uses_ai") === "true",
       accessibility_context: optional("accessibility_context"),
-      official_domain: optional("official_domain"),
+      official_domain: officialDomain.trim() || optional("official_domain"),
       classroom_or_public_use: data.get("classroom_or_public_use") === "true",
     });
   };
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-request-title">
-      <div className="dialog-heading"><div><p className="eyebrow">Guided intake</p><h2 id="new-request-title">Start a technology review</h2><p>Use sanitized information only.</p></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
+      <div className="dialog-heading"><div><p className="eyebrow">Guided intake</p><h2 id="new-request-title">Start a technology review</h2><p>Use sanitized information only. Vendor contact fields issue a tracked intake invitation.</p></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
       <form onSubmit={submit}>
         <div className="form-grid">
           <label><span>Product name</span><input name="product_name" required placeholder="e.g. LabArchives" autoFocus /></label>
-          <label><span>Vendor</span><input name="vendor_name" required placeholder="Legal vendor name" /></label>
+          <label><span>Existing vendor</span>
+            <select value={selectedVendorId} onChange={(event) => chooseVendor(event.target.value)} aria-label="Select existing vendor">
+              <option value="">Create a new vendor</option>
+              {vendors.map((vendor) => (
+                <option key={vendor.vendor_id} value={vendor.vendor_id}>
+                  {vendor.name}{vendor.review_status && vendor.review_status !== "no_cases" ? ` · ${vendor.review_status.replace("_", " ")}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label><span>Vendor</span><input name="vendor_name" required placeholder="Legal vendor name" value={vendorName} onChange={(event) => setVendorName(event.target.value)} disabled={Boolean(selectedVendor)} /></label>
+          <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" value={officialDomain} onChange={(event) => setOfficialDomain(event.target.value)} /></label>
+          <label><span>Vendor contact name</span><input name="vendor_contact_name" required placeholder="Security contact" /></label>
+          <label><span>Vendor contact email</span><input name="vendor_contact_email" required type="email" placeholder="security@vendor.example" /></label>
           <label><span>Requester name</span><input name="requester_name" required placeholder="Sample Requester" /></label>
           <label><span>Requester email</span><input name="requester_email" required type="email" placeholder="requester@example.edu" /></label>
           <label><span>Department</span><input name="requester_department" placeholder="Department" /></label>
@@ -936,7 +983,6 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
           <label><span>Expected users</span><input name="expected_users" required type="number" min="0" defaultValue="1" /></label>
           <label><span>Estimated cost (USD)</span><input name="estimated_cost_usd" required type="number" min="0" step="0.01" defaultValue="0" /></label>
           <label><span>Data classification</span><select name="data_classification" required defaultValue=""><option value="" disabled>Select classification</option><option value="public">Public</option><option value="internal">Internal</option><option value="confidential">Confidential</option><option value="level1">Level 1</option><option value="level2">Level 2</option><option value="unknown">Unknown, escalate</option></select></label>
-          <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" /></label>
           <label className="full-field"><span>Integrations (comma separated)</span><input name="integrations" placeholder="Canvas, Microsoft 365" /></label>
           <label className="full-field"><span>Accessibility context</span><textarea name="accessibility_context" placeholder="Classroom, public, assistive technology, or VPAT context" /></label>
           <label><span>Uses SSO?</span><select name="uses_sso" defaultValue="false"><option value="false">No</option><option value="true">Yes</option></select></label>
@@ -1263,7 +1309,22 @@ export default function App() {
       syncActionResponse(analyzed, true);
       setBackendConnected(true);
       setNewRequestOpen(false);
-      setToast(`Created ${created.case_id}; analysis stopped at the correct human checkpoint.`);
+      const inviteLink = created.token
+        ? vendorInviteUrl(window.location.origin, created.token)
+        : created.intake_url;
+      if (inviteLink) {
+        const delivery = created.invite_email_delivery === "live"
+          ? "Invitation emailed to the vendor contact."
+          : "Invitation recorded as simulated — copy the link to share.";
+        setToast(`Created ${created.case_id}. ${delivery} ${inviteLink}`);
+        try {
+          await navigator.clipboard.writeText(inviteLink);
+        } catch {
+          // Clipboard may be unavailable; toast still shows the URL.
+        }
+      } else {
+        setToast(`Created ${created.case_id}; analysis stopped at the correct human checkpoint.`);
+      }
       navigate("queue");
     } catch (error) {
       setToast(apiErrorMessage(error));

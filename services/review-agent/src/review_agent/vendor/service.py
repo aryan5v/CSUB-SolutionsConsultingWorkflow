@@ -167,6 +167,96 @@ class VendorBackend:
     def get_vendor(self, vendor_id: str) -> Vendor:
         return self._require("vendor", vendor_id, Vendor)
 
+    def vendor_review_status(self, vendor_id: str) -> dict[str, Any]:
+        """Derive operational review status from linked VendorCase lifecycles.
+
+        Status is computed at read time so existing Vendor rows need no stored
+        status key and cannot drift from the case outcomes that actually matter.
+        Acceptance is always product- and case-scoped — never blanket vendor
+        approval and never a mutation of the approved-software catalog.
+        """
+        self._require("vendor", vendor_id, Vendor)
+        products = self.list_products(vendor_id)
+        product_ids = {product.product_id for product in products}
+        cases = [
+            case
+            for case in self._list("case", VendorCase)
+            if case.product_id in product_ids
+        ]
+        if not cases:
+            return {
+                "vendor_id": vendor_id,
+                "review_status": "no_cases",
+                "products": [],
+            }
+        accepted_lifecycles = {
+            CaseLifecycle.APPROVED,
+            CaseLifecycle.WRITEBACK_COMPLETE,
+        }
+        active_lifecycles = {
+            CaseLifecycle.DRAFT,
+            CaseLifecycle.INVITED,
+            CaseLifecycle.OPENED,
+            CaseLifecycle.IN_PROGRESS,
+            CaseLifecycle.SUBMITTED,
+            CaseLifecycle.ANALYZING,
+            CaseLifecycle.NEEDS_REVIEW,
+            CaseLifecycle.CHANGES_REQUESTED,
+        }
+        product_rows: list[dict[str, Any]] = []
+        has_accepted = False
+        has_active = False
+        has_declined = False
+        for product in products:
+            product_cases = [case for case in cases if case.product_id == product.product_id]
+            if not product_cases:
+                continue
+            accepted = [
+                case for case in product_cases if case.lifecycle in accepted_lifecycles
+            ]
+            active = [case for case in product_cases if case.lifecycle in active_lifecycles]
+            declined = [
+                case for case in product_cases if case.lifecycle is CaseLifecycle.DECLINED
+            ]
+            if accepted:
+                status = "accepted"
+                has_accepted = True
+                representative = accepted[-1]
+            elif active:
+                status = "pending_review"
+                has_active = True
+                representative = active[-1]
+            elif declined:
+                status = "declined"
+                has_declined = True
+                representative = declined[-1]
+            else:
+                status = "pending_review"
+                has_active = True
+                representative = product_cases[-1]
+            product_rows.append(
+                {
+                    "product_id": product.product_id,
+                    "product_name": product.name,
+                    "review_status": status,
+                    "case_id": representative.case_id,
+                    "lifecycle": representative.lifecycle.value,
+                }
+            )
+        if has_accepted:
+            overall = "accepted"
+        elif has_active:
+            overall = "pending_review"
+        elif has_declined:
+            overall = "declined"
+        else:
+            overall = "no_cases"
+        return {
+            "vendor_id": vendor_id,
+            "review_status": overall,
+            "products": product_rows,
+        }
+
     def create_product(self, vendor_id: str, name: str) -> VendorProduct:
         self._require("vendor", vendor_id, Vendor)
         product = VendorProduct(

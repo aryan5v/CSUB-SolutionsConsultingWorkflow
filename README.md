@@ -49,6 +49,14 @@ owned Dither Kit charts, gradients, buttons, and generative record avatars. See
 [`docs/twenty-vendor-frontend-plan.md`](docs/twenty-vendor-frontend-plan.md) for
 the phased Twenty-to-vendor adaptation plan.
 
+**New request → vendor invite:** creating a case with vendor contact fields
+find-or-creates the operational vendor/product/contact, issues a tracked intake
+invitation, and records an invitation email attempt. Delivery is usually
+`simulated` until live SES is wired (issue #85); the reviewer UI still shows a
+copyable intake link. Vendor `review_status` (`pending_review` / `accepted` /
+`declined`) is derived from linked case lifecycles — it is not a stored Vendor
+table key and does not mutate the institutional approved-software catalog.
+
 ## Start here
 
 - [`docs/PRD.md`](docs/PRD.md): product requirements, scope, interfaces, security constraints, and acceptance criteria.

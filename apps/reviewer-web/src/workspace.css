@@ -185,6 +185,10 @@
 .record-step:last-child { border-bottom:0; }.record-step > span { display:grid; width:32px; height:32px; place-items:center; border:1px solid var(--border-strong); border-radius:50%; color:var(--accent); font:800 12px/1 var(--mono); }
 .record-step > div { min-width:0; }.record-step h2 { margin:0 0 12px; font-size:13px; }.record-step p { color:var(--text-muted); font-size:13px; line-height:1.5; }
 .record-step label, .record-case-form label { display:flex; min-width:0; flex-direction:column; gap:5px; color:var(--text-secondary); font-size:12px; font-weight:650; }
+.record-status-list { margin:10px 0 0; padding:0; list-style:none; display:grid; gap:6px; }
+.record-status-list li { display:flex; flex-direction:column; gap:2px; padding:8px 9px; border:1px solid var(--border); border-radius:5px; background:var(--surface-subtle); }
+.record-status-list strong { font-size:12px; }
+.record-status-list small { color:var(--text-muted); font-size:11px; }
 .record-step input, .record-step select, .record-step textarea { width:100%; min-width:0; padding:8px 9px; border:1px solid var(--border-strong); border-radius:5px; outline:0; background:var(--surface-subtle); color:var(--foreground); font-size:13px; }
 .record-step input:focus, .record-step select:focus, .record-step textarea:focus { border-color:var(--focus); box-shadow:0 0 0 2px color-mix(in srgb,var(--focus),transparent 84%); }
 .record-inline-form { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:7px; margin-top:8px; }.record-inline-form:not(.record-contact-form) button:last-child:nth-child(2) { grid-column:3; }.record-inline-form button { display:inline-flex; align-items:center; gap:5px; padding:0 9px; border:1px solid var(--border-strong); border-radius:5px; background:var(--card); color:var(--foreground); font-size:12px; font-weight:700; }

@@ -423,11 +423,53 @@ class LocalReviewApi:
         return validate(response, "review-queue")
 
     def create_case(self, payload: dict[str, Any]) -> dict[str, Any]:
-        intake = self._parse_intake(payload)
+        vendor_id = payload.get("vendor_id")
+        contact_name = payload.get("vendor_contact_name")
+        contact_email = payload.get("vendor_contact_email")
+        intake_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"vendor_id", "vendor_contact_name", "vendor_contact_email"}
+        }
+        intake = self._parse_intake(intake_payload)
+        if vendor_id is not None and not isinstance(vendor_id, str):
+            raise LocalApiError(400, "invalid_vendor_id", "vendor_id must be a string")
+        if (contact_name is None) ^ (contact_email is None):
+            raise LocalApiError(
+                400,
+                "invalid_vendor_contact",
+                "vendor_contact_name and vendor_contact_email must be provided together",
+            )
+        if contact_name is not None and (
+            not isinstance(contact_name, str)
+            or not contact_name.strip()
+            or not isinstance(contact_email, str)
+            or not contact_email.strip()
+        ):
+            raise LocalApiError(
+                400,
+                "invalid_vendor_contact",
+                "vendor_contact_name and vendor_contact_email must contain visible text",
+            )
         self._case_sequence += 1
         case_id = f"CASE-LOCAL-{self._case_sequence:03d}"
-        record = self._add_case(case_id, intake)
-        return {"case_id": case_id, "state": record.state.to_dict()}
+        record = self._add_case(
+            case_id,
+            intake,
+            vendor_id=vendor_id.strip() if isinstance(vendor_id, str) and vendor_id.strip() else None,
+        )
+        response: dict[str, Any] = {"case_id": case_id, "state": record.state.to_dict()}
+        if contact_name is None:
+            response["invite_pending"] = "vendor_contact_required"
+            return response
+        issued = self._issue_case_contact_invite(
+            case_id,
+            contact_name=contact_name.strip(),
+            contact_email=contact_email.strip(),
+            product_name=intake.product_name,
+        )
+        response.update(issued)
+        return response
 
     def add_document(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self._require_case(case_id)
@@ -793,7 +835,14 @@ class LocalReviewApi:
     # Vendor and administrator API surface -----------------------------------
 
     def list_vendors(self) -> dict[str, Any]:
-        return {"items": [item.to_dict() for item in self._vendor.list_vendors()]}
+        items = []
+        for vendor in self._vendor.list_vendors():
+            row = vendor.to_dict()
+            status = self._vendor.vendor_review_status(vendor.vendor_id)
+            row["review_status"] = status["review_status"]
+            row["reviewed_products"] = status["products"]
+            items.append(row)
+        return {"items": items}
 
     def get_vendor_record(self, vendor_id: str) -> dict[str, Any]:
         return self._vendor_call(lambda: self._vendor.get_vendor(vendor_id).to_dict())
@@ -1413,7 +1462,12 @@ class LocalReviewApi:
             record.workflow.run_until_review(record.state)
 
     def _add_case(
-        self, case_id: str, intake: CaseIntake, *, record_id: str | None = None
+        self,
+        case_id: str,
+        intake: CaseIntake,
+        *,
+        record_id: str | None = None,
+        vendor_id: str | None = None,
     ) -> _CaseRecord:
         if case_id in self._cases:
             raise LocalApiError(409, "duplicate_case", f"case {case_id} already exists")
@@ -1449,18 +1503,27 @@ class LocalReviewApi:
             table=config.table,
             record_id=target_id,
         )
-        self._register_vendor_case(case_id, intake)
+        self._register_vendor_case(case_id, intake, vendor_id=vendor_id)
         return record
 
-    def _register_vendor_case(self, case_id: str, intake: CaseIntake) -> None:
-        vendor = next(
-            (
-                item
-                for item in self._vendor.list_vendors()
-                if item.name.casefold() == intake.vendor_name.casefold()
-            ),
-            None,
-        )
+    def _register_vendor_case(
+        self, case_id: str, intake: CaseIntake, *, vendor_id: str | None = None
+    ) -> None:
+        vendor = None
+        if vendor_id:
+            try:
+                vendor = self._vendor.get_vendor(vendor_id)
+            except VendorBackendError as error:
+                raise LocalApiError(error.status, error.code, str(error)) from error
+        if vendor is None:
+            vendor = next(
+                (
+                    item
+                    for item in self._vendor.list_vendors()
+                    if item.name.casefold() == intake.vendor_name.casefold()
+                ),
+                None,
+            )
         if vendor is None:
             vendor = self._vendor.create_vendor(
                 intake.vendor_name,
@@ -1496,6 +1559,89 @@ class LocalReviewApi:
             required_evidence=policy.required_evidence,
             policy_route=policy.risk_route.value,
         )
+
+    def _issue_case_contact_invite(
+        self,
+        case_id: str,
+        *,
+        contact_name: str,
+        contact_email: str,
+        product_name: str,
+    ) -> dict[str, Any]:
+        """Find-or-create the vendor contact, issue an invite, and attempt email."""
+        case, product, _vendor = self._vendor_call(
+            lambda: self._vendor.case_upload_context(case_id)
+        )
+        del case
+        contact = next(
+            (
+                item
+                for item in self._vendor.list_contacts(product.vendor_id)
+                if item.email.casefold() == contact_email.casefold()
+            ),
+            None,
+        )
+        if contact is None:
+            contact = self._vendor_call(
+                lambda: self._vendor.create_contact(
+                    product.vendor_id, contact_name, contact_email
+                )
+            )
+        elif contact.name != contact_name:
+            contact = self._vendor_call(
+                lambda: self._vendor.update_contact(contact.contact_id, name=contact_name)
+            )
+        issued = self._vendor_call(
+            lambda: self._vendor.issue_invite(case_id, contact.contact_id)
+        )
+        token = issued["token"]
+        intake_url = f"{self._vendor.intake_base_url}#token={token}"
+        delivery = self._email_vendor_invitation(
+            case_id,
+            contact_email=contact.email,
+            product_name=product_name,
+            intake_url=intake_url,
+            invite_id=issued["invite"]["invite_id"],
+        )
+        return {
+            "invite": issued["invite"],
+            "token": token,
+            "intake_url": intake_url,
+            "invite_email_delivery": delivery.get("delivery"),
+            "contact": contact.to_dict(),
+        }
+
+    def _email_vendor_invitation(
+        self,
+        case_id: str,
+        *,
+        contact_email: str,
+        product_name: str,
+        intake_url: str,
+        invite_id: str,
+    ) -> dict[str, Any]:
+        """Best-effort invitation email; simulated until SES is configured (#85)."""
+        dedupe_key = f"invitation:{invite_id}"
+        if self._vendor.notification_recorded(
+            event_type="email.invitation", dedupe_key=dedupe_key
+        ):
+            return {"delivery": "simulated", "simulated": True, "channel": "email"}
+        subject = f"VETTED vendor intake invitation for {product_name}"
+        body = (
+            f"You have been invited to submit evidence for {product_name}.\n\n"
+            f"Open your secure invitation link to upload files and answer remaining "
+            f"questions:\n{intake_url}\n\n"
+            "If you did not expect this request, contact your campus reviewer."
+        )
+        delivery = self._send_email(to=contact_email, subject=subject, body=body)
+        self._vendor.record_notification(
+            case_id=case_id,
+            summary=subject,
+            delivery=delivery,
+            event_type="email.invitation",
+            dedupe_key=dedupe_key,
+        )
+        return delivery
 
     def _case_payload(self, record: _CaseRecord) -> dict[str, Any]:
         response = {

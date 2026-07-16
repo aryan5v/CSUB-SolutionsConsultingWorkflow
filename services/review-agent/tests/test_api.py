@@ -304,6 +304,87 @@ class LocalReviewApiTests(unittest.TestCase):
         analyzed = self.api.analyze_case(case_id)
         self.assertIn(analyzed["state"]["status"], {"awaiting_review", "escalated"})
 
+    def test_create_case_issues_invite_when_vendor_contact_provided(self) -> None:
+        created = self.api.create_case(
+            {
+                "product_name": "Sanitized Calendar",
+                "vendor_name": "Example Vendor",
+                "requester": {
+                    "name": "Sample Requester",
+                    "email": "requester@example.edu",
+                },
+                "use_case": "Public event scheduling.",
+                "expected_users": 12,
+                "platform": ["web"],
+                "data_classification": "public",
+                "estimated_cost_usd": 0,
+                "integrations": [],
+                "uses_sso": False,
+                "uses_ai": False,
+                "classroom_or_public_use": True,
+                "vendor_contact_name": "Vendor Ops",
+                "vendor_contact_email": "ops@vendor.example",
+            }
+        )
+        self.assertEqual(created["invite"]["status"], "issued")
+        self.assertEqual(created["invite_email_delivery"], "simulated")
+        self.assertIn("#token=", created["intake_url"])
+        self.assertEqual(created["contact"]["email"], "ops@vendor.example")
+        vendors = self.api.list_vendors()["items"]
+        vendor = next(item for item in vendors if item["name"] == "Example Vendor")
+        self.assertEqual(vendor["review_status"], "pending_review")
+        self.assertEqual(vendor["reviewed_products"][0]["product_name"], "Sanitized Calendar")
+
+        reused = self.api.create_case(
+            {
+                "product_name": "Sanitized Calendar Plus",
+                "vendor_name": "Example Vendor",
+                "vendor_id": vendor["vendor_id"],
+                "requester": {
+                    "name": "Sample Requester",
+                    "email": "requester@example.edu",
+                },
+                "use_case": "Follow-on scheduling.",
+                "expected_users": 4,
+                "platform": ["web"],
+                "data_classification": "internal",
+                "estimated_cost_usd": 10,
+                "integrations": [],
+                "uses_sso": True,
+                "uses_ai": False,
+                "classroom_or_public_use": False,
+                "vendor_contact_name": "Vendor Ops",
+                "vendor_contact_email": "ops@vendor.example",
+            }
+        )
+        self.assertEqual(reused["contact"]["vendor_id"], vendor["vendor_id"])
+        vendor_ids = [
+            item["vendor_id"]
+            for item in self.api.list_vendors()["items"]
+            if item["name"] == "Example Vendor"
+        ]
+        self.assertEqual(vendor_ids, [vendor["vendor_id"]])
+
+    def test_create_case_without_contact_leaves_invite_pending(self) -> None:
+        created = self.api.create_case(
+            {
+                "product_name": "No Contact Tool",
+                "vendor_name": "Pending Vendor",
+                "requester": {"name": "Sample", "email": "sample@example.edu"},
+                "use_case": "Pilot.",
+                "expected_users": 1,
+                "platform": ["web"],
+                "data_classification": "public",
+                "estimated_cost_usd": 0,
+                "integrations": [],
+                "uses_sso": False,
+                "uses_ai": False,
+                "classroom_or_public_use": False,
+            }
+        )
+        self.assertEqual(created["invite_pending"], "vendor_contact_required")
+        self.assertNotIn("invite", created)
+
 
 class LocalHttpServerTests(unittest.TestCase):
     def setUp(self) -> None:
