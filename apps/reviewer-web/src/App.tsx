@@ -1020,7 +1020,7 @@ function NewRequestDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit
             )}
           </label>
           <label><span>Vendor</span><input name="vendor_name" required placeholder="Legal vendor name" value={vendorName} onChange={(event) => setVendorName(event.target.value)} disabled={Boolean(selectedVendor)} /></label>
-          <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" value={officialDomain} onChange={(event) => setOfficialDomain(event.target.value)} /></label>
+          <label><span>Official vendor domain</span><input name="official_domain" placeholder="vendor.example" value={officialDomain} onChange={(event) => setOfficialDomain(event.target.value)} disabled={Boolean(selectedVendor)} /></label>
           <label><span>Vendor contact name</span><input name="vendor_contact_name" required placeholder="Security contact" /></label>
           <label><span>Vendor contact email</span><input name="vendor_contact_email" required type="email" placeholder="security@vendor.example" /></label>
           <label><span>Requester name</span><input name="requester_name" required placeholder="Sample Requester" /></label>
@@ -1363,7 +1363,9 @@ export default function App() {
       if (inviteLink) {
         const delivery = created.invite_email_delivery === "live"
           ? "Invitation emailed to the vendor contact."
-          : "Invitation recorded as simulated — copy the link to share.";
+          : created.invite_email_delivery === "failed"
+            ? "Invitation email delivery failed — copy the link to share manually."
+            : "Invitation recorded as simulated — copy the link to share.";
         setToast(`Created ${created.case_id}. ${delivery} ${inviteLink}`);
         try {
           await navigator.clipboard.writeText(inviteLink);

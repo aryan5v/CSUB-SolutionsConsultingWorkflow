@@ -870,10 +870,14 @@ class LocalReviewApi:
     # Vendor and administrator API surface -----------------------------------
 
     def list_vendors(self) -> dict[str, Any]:
+        statuses = self._vendor.vendor_review_statuses()
         items = []
         for vendor in self._vendor.list_vendors():
             row = vendor.to_dict()
-            status = self._vendor.vendor_review_status(vendor.vendor_id)
+            status = statuses.get(
+                vendor.vendor_id,
+                {"review_status": "no_cases", "products": []},
+            )
             row["review_status"] = status["review_status"]
             row["reviewed_products"] = status["products"]
             items.append(row)

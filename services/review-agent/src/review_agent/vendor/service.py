@@ -176,13 +176,36 @@ class VendorBackend:
         approval and never a mutation of the approved-software catalog.
         """
         self._require("vendor", vendor_id, Vendor)
-        products = self.list_products(vendor_id)
+        return self._derive_review_status(
+            vendor_id, self.list_products(vendor_id), self._list("case", VendorCase)
+        )
+
+    def vendor_review_statuses(self) -> dict[str, dict[str, Any]]:
+        """Derived review status for every vendor from one products/cases fetch.
+
+        Listing endpoints use this instead of per-vendor ``vendor_review_status``
+        calls so the cost stays one scan of products and cases rather than one
+        case scan per vendor.
+        """
+        products = self.list_products()
+        cases = self._list("case", VendorCase)
+        return {
+            vendor.vendor_id: self._derive_review_status(
+                vendor.vendor_id,
+                [item for item in products if item.vendor_id == vendor.vendor_id],
+                cases,
+            )
+            for vendor in self.list_vendors()
+        }
+
+    def _derive_review_status(
+        self,
+        vendor_id: str,
+        products: list[VendorProduct],
+        all_cases: list[VendorCase],
+    ) -> dict[str, Any]:
         product_ids = {product.product_id for product in products}
-        cases = [
-            case
-            for case in self._list("case", VendorCase)
-            if case.product_id in product_ids
-        ]
+        cases = [case for case in all_cases if case.product_id in product_ids]
         if not cases:
             return {
                 "vendor_id": vendor_id,
