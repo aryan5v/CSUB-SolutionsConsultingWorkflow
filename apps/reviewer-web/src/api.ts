@@ -274,6 +274,51 @@ export type VendorReviewStatus = {
   checklist: VendorChecklistItem[];
   required_evidence?: string[];
   adapted_to_intake?: boolean;
+  thread?: VendorThreadSummary;
+};
+// Case-scoped clarification thread (issue #41).
+export type VendorMessageCategory = "question" | "cannot_obtain" | "eta" | "concern";
+export type ThreadAuthorRole = "vendor" | "reviewer";
+export type VendorThreadSummary = {
+  message_count: number;
+  has_reviewer_reply: boolean;
+  open_question_count: number;
+};
+export type VendorThreadMessage = {
+  message_id: string;
+  case_id: string;
+  author_role: ThreadAuthorRole;
+  category: string;
+  body: string;
+  created_at: string;
+  requirement_id: string | null;
+  submission_version: number | null;
+  resolved: boolean;
+  in_reply_to: string | null;
+};
+export type ReviewerThreadMessage = VendorThreadMessage & {
+  submission_id: string | null;
+  author_id: string | null;
+  visibility: "public" | "internal";
+  read_by_reviewer: boolean;
+};
+export type CaseThread = {
+  case_id: string;
+  product: Pick<VendorProduct, "product_id" | "name">;
+  vendor: Pick<VendorRecord, "vendor_id" | "name">;
+  outstanding_requirements: string[];
+  unread_count: number;
+  messages: ReviewerThreadMessage[];
+};
+export type ThreadInboxItem = {
+  case_id: string;
+  product: Pick<VendorProduct, "product_id" | "name">;
+  vendor: Pick<VendorRecord, "vendor_id" | "name">;
+  contact: { contact_id: string; name: string; email: string } | null;
+  outstanding_requirements: string[];
+  open_question_count: number;
+  unread_count: number;
+  latest_message: ReviewerThreadMessage;
 };
 export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
 // Reviewer-editable evidence-validation thresholds (issue #52). A null threshold
@@ -530,7 +575,8 @@ function createFixtureAdapter() {
   ];
   const artifacts: EvidenceArtifact[] = [];
   const covered = new Set<string>();
-  return { workspace_id, vendors, products, contacts, invites, profiles, runs, submission, questions, artifacts, covered };
+  const thread: ReviewerThreadMessage[] = [];
+  return { workspace_id, vendors, products, contacts, invites, profiles, runs, submission, questions, artifacts, covered, thread };
 }
 
 export function createReviewApiClient(options: ClientOptions = {}) {
@@ -904,6 +950,88 @@ export function createReviewApiClient(options: ClientOptions = {}) {
       }
       return request("/vendor/invites/current/finalize", { method: "POST", headers: authorization(token) }, "vendor");
     },
+    // Case-scoped clarification thread (issue #41) --------------------------
+    async vendorThread(token: string): Promise<VendorThreadMessage[]> {
+      if (mode === "fixture") {
+        return fixtureOnly(
+          fixture.thread
+            .filter((message) => message.visibility === "public")
+            .map(toVendorThreadMessage),
+        );
+      }
+      return (await request<{ items: VendorThreadMessage[] }>("/vendor/invites/current/thread", { headers: authorization(token) }, "vendor")).items;
+    },
+    postVendorMessage(token: string, input: { category: VendorMessageCategory; body: string; requirement_id?: string | null }): Promise<VendorThreadMessage> {
+      if (mode === "fixture") {
+        const message: ReviewerThreadMessage = {
+          message_id: fixtureId("msg"), case_id: fixture.submission.case_id, author_role: "vendor", category: input.category,
+          body: input.body, created_at: new Date().toISOString(), requirement_id: input.requirement_id ?? null,
+          submission_id: fixture.submission.submission_id, submission_version: fixture.submission.version, author_id: null,
+          visibility: "public", resolved: false, read_by_reviewer: false, in_reply_to: null,
+        };
+        fixture.thread.push(message);
+        return fixtureOnly(toVendorThreadMessage(message));
+      }
+      return request("/vendor/invites/current/thread", { method: "POST", headers: authorization(token), body: JSON.stringify(input) }, "vendor");
+    },
+    async threadInbox(): Promise<ThreadInboxItem[]> {
+      if (mode === "fixture") return fixtureOnly([]);
+      return (await request<{ items: ThreadInboxItem[] }>("/thread-inbox")).items;
+    },
+    caseThread(caseId: string): Promise<CaseThread> {
+      if (mode === "fixture") {
+        return fixtureOnly({
+          case_id: caseId, product: { product_id: fixture.products[0].product_id, name: fixture.products[0].name },
+          vendor: { vendor_id: fixture.vendors[0].vendor_id, name: fixture.vendors[0].name }, outstanding_requirements: [],
+          unread_count: fixture.thread.filter((m) => m.author_role === "vendor" && !m.read_by_reviewer).length,
+          messages: fixture.thread.map((m) => ({ ...m })),
+        });
+      }
+      return request(`/cases/${encodeURIComponent(caseId)}/thread`);
+    },
+    postCaseReply(caseId: string, input: { body: string; reviewerId?: string; visibility?: "public" | "internal"; in_reply_to?: string | null; resolve?: boolean }): Promise<ReviewerThreadMessage> {
+      if (mode === "fixture") {
+        const message: ReviewerThreadMessage = {
+          message_id: fixtureId("msg"), case_id: caseId, author_role: "reviewer", category: "reply", body: input.body,
+          created_at: new Date().toISOString(), requirement_id: null, submission_id: null, submission_version: null,
+          author_id: input.reviewerId ?? "fixture-reviewer", visibility: input.visibility ?? "public", resolved: false, read_by_reviewer: true,
+          in_reply_to: input.in_reply_to ?? null,
+        };
+        if (input.resolve && input.in_reply_to) {
+          const parent = fixture.thread.find((m) => m.message_id === input.in_reply_to);
+          if (parent) parent.resolved = true;
+        }
+        fixture.thread.push(message);
+        return fixtureOnly({ ...message });
+      }
+      // The deployed API derives reviewer identity from the authenticated
+      // session and overrides this value; it is sent for the local server path
+      // where the body carries the reviewer id.
+      const { reviewerId, ...rest } = input;
+      const body = { ...rest, reviewer_id: reviewerId ?? "reviewer" };
+      return request(`/cases/${encodeURIComponent(caseId)}/thread`, { method: "POST", body: JSON.stringify(body) });
+    },
+    resolveCaseMessage(caseId: string, messageId: string, resolved = true): Promise<ReviewerThreadMessage> {
+      if (mode === "fixture") {
+        const message = fixture.thread.find((m) => m.message_id === messageId);
+        if (message) message.resolved = resolved;
+        return fixtureOnly(message ? { ...message } : ({} as ReviewerThreadMessage));
+      }
+      return request(`/cases/${encodeURIComponent(caseId)}/thread/${encodeURIComponent(messageId)}/resolve`, { method: "POST", body: JSON.stringify({ resolved }) });
+    },
+    markCaseThreadRead(caseId: string, messageId?: string): Promise<{ case_id: string; marked_read: number }> {
+      if (mode === "fixture") {
+        let marked = 0;
+        for (const message of fixture.thread) {
+          if (message.author_role === "vendor" && !message.read_by_reviewer && (!messageId || message.message_id === messageId)) {
+            message.read_by_reviewer = true;
+            marked += 1;
+          }
+        }
+        return fixtureOnly({ case_id: caseId, marked_read: marked });
+      }
+      return request(`/cases/${encodeURIComponent(caseId)}/thread/read`, { method: "POST", body: JSON.stringify(messageId ? { message_id: messageId } : {}) });
+    },
     async loadReviewerRecord(caseId: string, productName: string, vendorName: string): Promise<ReviewerRecordContext> {
       const [vendors, invites, profiles, runs, catalog] = await Promise.all([
         this.listVendors(),
@@ -923,6 +1051,34 @@ export const reviewApi = createReviewApiClient();
 
 export function requiresReviewerConfirmation(candidate: Pick<SoftwareCandidate, "match_method" | "requires_confirmation"> | Pick<CatalogCandidate, "match_method" | "requires_human_confirmation">): boolean {
   return candidate.match_method === "fuzzy" || candidate.match_method === "semantic" || ("requires_confirmation" in candidate ? candidate.requires_confirmation : candidate.requires_human_confirmation);
+}
+
+// Project a reviewer thread message down to the vendor-safe fields (issue #41):
+// reviewer identity, internal visibility, and read state never reach the vendor.
+function toVendorThreadMessage(message: ReviewerThreadMessage): VendorThreadMessage {
+  return {
+    message_id: message.message_id,
+    case_id: message.case_id,
+    author_role: message.author_role,
+    category: message.category,
+    body: message.body,
+    created_at: message.created_at,
+    requirement_id: message.requirement_id,
+    submission_version: message.submission_version,
+    resolved: message.resolved,
+    in_reply_to: message.in_reply_to,
+  };
+}
+
+const VENDOR_MESSAGE_CATEGORY_LABELS: Record<VendorMessageCategory, string> = {
+  question: "Question about a document",
+  cannot_obtain: "Cannot obtain a document",
+  eta: "Status / estimated date",
+  concern: "Concern",
+};
+
+export function vendorMessageCategoryLabel(category: string): string {
+  return VENDOR_MESSAGE_CATEGORY_LABELS[category as VendorMessageCategory] ?? "Message";
 }
 
 export function suppressResolvedQuestions(questions: VendorQuestion[], answers: Record<string, string>, coveredRequirementIds: ReadonlySet<string>): VendorQuestion[] {

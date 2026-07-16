@@ -585,6 +585,7 @@
 .vp-file-list small { color:var(--muted); font-size:13px; }
 .vp-file-list b { flex:0 0 auto; color:var(--muted); font-size:12px; text-transform:capitalize; }
 .vp-file-list .vp-file-saved { color:#287044; }.vp-file-list .vp-file-error { color:#a22931; }
+.vp-thread-body { margin-top:.35rem; overflow-wrap:anywhere; white-space:pre-wrap; font-size:13px; color:var(--ink); }
 .vp-upload-fallback, .vp-form-alert, .vp-form-notice { margin:0; padding:.75rem; border-radius:8px; font-size:12px; line-height:1.5; }
 .vp-upload-fallback { border:1px solid #e1c978; background:#fff9df; color:#6a5518; }
 .vp-form-alert { border:1px solid #e2a7aa; background:#fff5f5; color:#8f2931; }

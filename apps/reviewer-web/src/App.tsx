@@ -60,10 +60,12 @@ import {
   queueItemToSummary,
   requiresReviewerConfirmation,
   reviewApi,
+  vendorMessageCategoryLabel,
   type AuditEvent,
   type CaseActionResponse,
   type CaseIntakeInput,
   type CaseResearchResponse,
+  type CaseThread,
   type EvidenceArtifact,
   type QueueStatus,
   type ReviewerRecordContext,
@@ -742,7 +744,7 @@ function DecisionPanel({ decision, approvalAllowed, approvalBlockReason, onDecis
   </aside>;
 }
 
-function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenPacket, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean }) {
+function ReviewPage({ review, state, recordContext, recordContextError, decision, matchConfirmed, onConfirmMatch, packetDraft, onPacketDraftChange, onSavePacket, onDecision, written, onWrite, onOpenPacket, comment, onCommentChange, vendorVisibleComment, onVendorVisibleCommentChange, vendorNextActions, onVendorNextActionsChange, rerunInstruction, onRerunInstructionChange, onRerun, rerunUsed, reviewerEmail }: { review: ReviewCase; state: ReviewState | null; recordContext: ReviewerRecordContext | null; recordContextError: string; decision: Decision; matchConfirmed: boolean; onConfirmMatch: () => void; packetDraft: string; onPacketDraftChange: (value: string) => void; onSavePacket: () => void; onDecision: (decision: Decision) => void; written: boolean; onWrite: () => void; onOpenPacket: () => void; comment: string; onCommentChange: (value: string) => void; vendorVisibleComment: string; onVendorVisibleCommentChange: (value: string) => void; vendorNextActions: string; onVendorNextActionsChange: (value: string) => void; rerunInstruction: string; onRerunInstructionChange: (value: string) => void; onRerun: () => void; rerunUsed: boolean; reviewerEmail: string }) {
   const [tab, setTab] = useState<"overview" | "evidence" | "packet" | "writeback">("overview");
   const approvalAllowed = matchConfirmed && Boolean(state?.draft_packet) && state?.status !== "escalated";
   const approvalBlockReason = !matchConfirmed
@@ -787,7 +789,7 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
 
     <div className="review-workspace">
       <div className="review-main" role="tabpanel" id={`review-panel-${tab}`} aria-labelledby={`review-tab-${tab}`}>
-        {tab === "overview" && <ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={() => setTab("evidence")} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} />}
+        {tab === "overview" && <><ReviewOverview state={state} review={review} recordContext={recordContext} recordContextError={recordContextError} onOpenEvidence={() => setTab("evidence")} onOpenPacket={onOpenPacket} matchConfirmed={matchConfirmed} onConfirmMatch={onConfirmMatch} /><ReviewerThreadPanel caseId={review.id} reviewerEmail={reviewerEmail} /></>}
         {tab === "evidence" && <ReviewEvidence caseId={review.id} />}
         {tab === "packet" && (state && !state.draft_packet ? <section className="content-card"><p className="eyebrow">Human checkpoint</p><h2>Packet generation is paused</h2><p>Confirm the software candidate to continue.</p></section> : <PacketEditor draft={packetDraft} onDraftChange={onPacketDraftChange} onSave={onSavePacket} />)}
         {tab === "writeback" && <WritebackPreview decision={decision} written={written} preview={state?.write_preview ?? null} onWrite={onWrite} />}
@@ -868,6 +870,106 @@ function ReviewEvidence({ caseId }: { caseId: string }) {
       </section>
     </div>
   </>;
+}
+
+function ReviewerThreadPanel({ caseId, reviewerEmail }: { caseId: string; reviewerEmail: string }) {
+  const [thread, setThread] = useState<CaseThread | null>(null);
+  const [error, setError] = useState("");
+  const [reply, setReply] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const next = await reviewApi.caseThread(caseId);
+      setThread(next);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof ReviewApiError ? reason.message : "The clarification thread is unavailable.");
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    reviewApi
+      .caseThread(caseId)
+      .then((next) => { if (active) setThread(next); })
+      .catch((reason) => {
+        if (active) setError(reason instanceof ReviewApiError ? reason.message : "The clarification thread is unavailable.");
+      });
+    return () => { active = false; };
+  }, [caseId]);
+
+  const sendReply = async (messageId: string, resolve: boolean) => {
+    const body = (reply[messageId] ?? "").trim();
+    if (!body) return;
+    setBusy(true);
+    try {
+      await reviewApi.postCaseReply(caseId, { body, reviewerId: reviewerEmail, in_reply_to: messageId, resolve });
+      setReply((current) => ({ ...current, [messageId]: "" }));
+      await load();
+    } catch (reason) {
+      setError(reason instanceof ReviewApiError ? reason.message : "The reply could not be sent.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleResolved = async (messageId: string, resolved: boolean) => {
+    setBusy(true);
+    try {
+      await reviewApi.resolveCaseMessage(caseId, messageId, resolved);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof ReviewApiError ? reason.message : "The message could not be updated.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const vendorQuestions = (thread?.messages ?? []).filter((message) => message.author_role === "vendor");
+
+  return (
+    <section className="content-card" aria-labelledby="thread-panel-heading">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Vendor questions</p>
+          <h2 id="thread-panel-heading">Clarification thread</h2>
+          <p>Vendor messages are untrusted text. Public replies reach the vendor; internal edits do not apply here.</p>
+        </div>
+        {thread && thread.unread_count > 0 && <StatusBadge>{`${thread.unread_count} unread`}</StatusBadge>}
+      </div>
+      {error && <p className="record-context-error" role="alert">{error}</p>}
+      {thread && vendorQuestions.length === 0 && <div className="empty-state"><MessageSquare size={18} /><strong>No vendor questions yet.</strong><span>Questions the vendor sends from their secure link appear here.</span></div>}
+      {vendorQuestions.map((message) => {
+        const replies = (thread?.messages ?? []).filter((item) => item.in_reply_to === message.message_id && item.visibility === "public");
+        return (
+          <article className="research-finding" key={message.message_id}>
+            <div>
+              <strong>{vendorMessageCategoryLabel(message.category)}{message.requirement_id ? ` · ${message.requirement_id}` : ""}</strong>
+              <StatusBadge>{message.resolved ? "Resolved" : "Open"}</StatusBadge>
+            </div>
+            <p style={{ whiteSpace: "pre-wrap" }}>{message.body}</p>
+            <small>{new Date(message.created_at).toLocaleString()}</small>
+            {replies.length > 0 && (
+              <div className="untrusted-findings">
+                <span>Public replies</span>
+                {replies.map((item) => <p key={item.message_id}>{item.body}</p>)}
+              </div>
+            )}
+            <label className="decision-comment">
+              <span><MessageSquare size={13} aria-hidden="true" />Public reply to the vendor</span>
+              <textarea value={reply[message.message_id] ?? ""} onChange={(event) => setReply((current) => ({ ...current, [message.message_id]: event.target.value }))} placeholder="This reply is visible to the vendor on their secure link." />
+            </label>
+            <div className="review-tabs" role="group" aria-label="Thread actions">
+              <Button variant="secondary" disabled={busy || !(reply[message.message_id] ?? "").trim()} onClick={() => void sendReply(message.message_id, false)}>Send reply</Button>
+              <Button variant="primary" disabled={busy || !(reply[message.message_id] ?? "").trim()} onClick={() => void sendReply(message.message_id, true)}>Reply &amp; resolve</Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void toggleResolved(message.message_id, !message.resolved)}>{message.resolved ? "Reopen" : "Mark resolved"}</Button>
+            </div>
+          </article>
+        );
+      })}
+    </section>
+  );
 }
 
 function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents, reviewerName }: { caseId: string; decision: Decision; written: boolean; matchConfirmed: boolean; apiEvents: AuditEvent[]; reviewerName: string }) {
@@ -1313,7 +1415,7 @@ export default function App() {
         {apiFailure && <div className="live-api-failure" role="alert"><strong>Live API unavailable.</strong><span>{apiFailure}</span></div>}
         {page === "dashboard" && <DashboardPage cases={cases} invites={dashboardInvites} reviewerName={reviewerSession.name} onNavigate={navigate} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} />}
         {page === "queue" && <QueuePage cases={cases} onOpenCase={openCase} onNewRequest={() => setNewRequestOpen(true)} query={globalQuery} onQueryChange={setGlobalQuery} />}
-        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={setVendorVisibleComment} vendorNextActions={vendorNextActions} onVendorNextActionsChange={setVendorNextActions} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} />}
+        {page === "review" && <ReviewPage review={selectedReview} state={activeState} recordContext={recordContext} recordContextError={recordContextError} decision={decision} matchConfirmed={matchConfirmed} onConfirmMatch={confirmMatch} packetDraft={packetDraft} onPacketDraftChange={updatePacketDraft} onSavePacket={savePacket} onDecision={recordDecision} written={written} onWrite={simulateWrite} onOpenPacket={openPacket} comment={reviewComment} onCommentChange={setReviewComment} vendorVisibleComment={vendorVisibleComment} onVendorVisibleCommentChange={setVendorVisibleComment} vendorNextActions={vendorNextActions} onVendorNextActionsChange={setVendorNextActions} rerunInstruction={rerunInstruction} onRerunInstructionChange={setRerunInstruction} onRerun={runCustomRerun} rerunUsed={rerunUsed} reviewerEmail={reviewerSession.email} />}
         {page === "vendors" && <CatalogPage />}
         {page === "contacts" && <ContactsPage notify={setToast} />}
         {page === "requests" && <VendorRecordsPage notify={setToast} />}

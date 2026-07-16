@@ -341,6 +341,61 @@ paths:
       summary: Content-validation findings for this submission's evidence (issue 36).
       parameters: [{name: token, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: Failed or manual-review deterministic checks (expired COI, stale pen test, PCI currency TBD) with cited evidence coordinates.}}
+  /vendor/invites/{token}/thread:
+    get:
+      tags: [vendor-intake]
+      summary: Vendor-visible clarification thread (issue 41) — the vendor's messages and public reviewer replies only.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Public thread messages; reviewer identity and internal notes are never included.}}
+    post:
+      tags: [vendor-intake]
+      summary: Append an untrusted vendor question, cannot-obtain report, ETA, or concern to the case thread (issue 41).
+      description: Message text is sanitized, length-bounded, and rate-limited per case. It is stored as data and never alters policy criteria, requirements, or agent instructions. Allowed while the link is live or submitted; revoked and expired links are rejected.
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: Vendor-safe stored message.}, "410": {description: Revoked or expired invitation.}, "413": {description: Message body too long.}, "429": {description: Per-case vendor message limit reached.}}
+  /vendor/invites/current/thread:
+    get:
+      tags: [vendor-intake]
+      summary: Bearer-scoped vendor-visible clarification thread (issue 41).
+      security: [{VendorInviteBearer: []}]
+      responses: {"200": {description: Public thread messages only.}}
+    post:
+      tags: [vendor-intake]
+      summary: Append a bearer-scoped vendor message to the case thread (issue 41).
+      security: [{VendorInviteBearer: []}]
+      responses: {"200": {description: Vendor-safe stored message.}}
+  /thread-inbox:
+    get:
+      tags: [vendor-intake]
+      summary: Reviewer inbox of unresolved vendor questions across cases (issue 41).
+      description: One row per case with the newest unresolved vendor message and the contact, product, and outstanding-requirement context needed to triage it. No reviewer-only findings, policy, or risk.
+      responses: {"200": {description: Unresolved vendor questions with safe triage context.}}
+  /cases/{id}/thread:
+    get:
+      tags: [cases]
+      summary: Reviewer view of one case's full clarification thread (issue 41).
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: All thread messages with outstanding-requirement context.}}
+    post:
+      tags: [cases]
+      summary: Record a reviewer public reply or internal note on the case thread (issue 41).
+      description: Public replies reach the vendor through the scoped portal; internal notes never do. Reviewer identity is derived from the authenticated session.
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"201": {description: Stored reviewer message.}}
+  /cases/{id}/thread/read:
+    post:
+      tags: [cases]
+      summary: Mark one or all vendor messages on a case read for the reviewer inbox (issue 41).
+      parameters: [{$ref: "#/components/parameters/CaseId"}]
+      responses: {"200": {description: Count of messages marked read.}}
+  /cases/{id}/thread/{message_id}/resolve:
+    post:
+      tags: [cases]
+      summary: Mark a vendor thread message resolved or reopen it without editing history (issue 41).
+      parameters:
+        - {$ref: "#/components/parameters/CaseId"}
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: Updated message projection.}, "404": {description: Message not found in this case.}}
   /cases/{id}/evidence-findings:
     get:
       tags: [cases]

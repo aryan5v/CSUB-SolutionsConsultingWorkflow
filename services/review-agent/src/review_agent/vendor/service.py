@@ -32,11 +32,18 @@ from ..contracts.vendor import (
     InviteStatus,
     PolicyCriteria,
     ReminderClaim,
+    MAX_THREAD_BODY_CHARS,
+    MAX_VENDOR_THREAD_MESSAGES,
+    REVIEWER_REPLY_CATEGORY,
+    VENDOR_MESSAGE_CATEGORIES,
     ReviewProfileVersion,
     ReviewRun,
     SoftwareCatalogEntry,
     Submission,
     SubmissionStatus,
+    ThreadAuthorRole,
+    ThreadMessage,
+    ThreadVisibility,
     Vendor,
     VendorCase,
     VendorContact,
@@ -748,6 +755,9 @@ class VendorBackend:
             # the checklist was actually narrowed, never on a fail-open case.
             "required_evidence": list(case.required_evidence),
             "adapted_to_intake": self._case_profile_selection(case) is not None,
+            # Clarification-thread pointer (issue #41): a vendor-safe count so the
+            # status view can surface "you have a reply" and a link to the thread.
+            "thread": self.vendor_thread_summary(case.case_id),
         }
 
     def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
@@ -809,6 +819,372 @@ class VendorBackend:
                 self._put("invite", invite.invite_id, replace(invite, status=InviteStatus.EXPIRED))
             raise VendorBackendError("invite_expired", "invitation expired", status=410)
         return invite
+
+    # Case-scoped clarification thread (issue #41) ---------------------------
+
+    def post_vendor_message(
+        self,
+        token: str,
+        *,
+        category: str,
+        body: str,
+        requirement_id: str | None = None,
+    ) -> ThreadMessage:
+        """Append an untrusted vendor message to the case's clarification thread.
+
+        Permitted while the invitation is live or submitted (a vendor may still
+        ask questions during review); revoked and expired links are rejected by
+        :meth:`_status_invite`. The body is sanitized and length-bounded, the
+        per-case message count is capped, and an optional ``requirement_id`` must
+        name a real active requirement for the case. The message text is stored
+        as data only: it can never change policy criteria, requirements, or agent
+        instructions. New vendor messages are unread for the reviewer inbox.
+        """
+        invite = self._status_invite(token)
+        if category not in VENDOR_MESSAGE_CATEGORIES:
+            raise VendorBackendError(
+                "invalid_category", "message category is not supported"
+            )
+        clean_body = self._message_body(body)
+        submission = self._submission_for_invite(invite.invite_id)
+        clean_requirement = self._thread_requirement(invite.case_id, requirement_id)
+        existing = [
+            message
+            for message in self._list("thread_message", ThreadMessage)
+            if message.case_id == invite.case_id
+            and message.author_role is ThreadAuthorRole.VENDOR
+        ]
+        if len(existing) >= MAX_VENDOR_THREAD_MESSAGES:
+            raise VendorBackendError(
+                "thread_limit_reached",
+                "this case has reached the maximum number of vendor messages",
+                status=429,
+            )
+        message = ThreadMessage(
+            message_id=self._id("thread_message", "msg"),
+            case_id=invite.case_id,
+            author_role=ThreadAuthorRole.VENDOR,
+            category=category,
+            body=clean_body,
+            created_at=self._now(),
+            requirement_id=clean_requirement,
+            submission_id=submission.submission_id,
+            submission_version=submission.version,
+            visibility=ThreadVisibility.PUBLIC,
+            read_by_reviewer=False,
+            workspace_id=self.workspace_id,
+        )
+        self._put("thread_message", message.message_id, message)
+        self._event(
+            "thread.vendor_message",
+            "thread_message",
+            message.message_id,
+            case_id=invite.case_id,
+            detail={"category": category, "requirement_id": clean_requirement},
+        )
+        return message
+
+    def vendor_thread(self, token: str) -> list[dict[str, Any]]:
+        """Vendor-visible thread: the vendor's messages and public replies only.
+
+        Readable after finalize (via :meth:`_status_invite`) so a vendor can see
+        reviewer responses without contacting the campus team. Internal reviewer
+        notes and reviewer identity never appear in this projection.
+        """
+        invite = self._status_invite(token)
+        return self._vendor_thread_messages(invite.case_id)
+
+    def _vendor_thread_messages(self, case_id: str) -> list[dict[str, Any]]:
+        messages = [
+            message
+            for message in self._thread_for_case(case_id)
+            if message.visibility is ThreadVisibility.PUBLIC
+        ]
+        return [message.to_vendor_dict() for message in messages]
+
+    def vendor_thread_summary(self, case_id: str) -> dict[str, Any]:
+        """Compact, vendor-safe thread counts for the status view (issue #38)."""
+        public = [
+            message
+            for message in self._thread_for_case(case_id)
+            if message.visibility is ThreadVisibility.PUBLIC
+        ]
+        return {
+            "message_count": len(public),
+            "has_reviewer_reply": any(
+                message.author_role is ThreadAuthorRole.REVIEWER for message in public
+            ),
+            "open_question_count": sum(
+                1
+                for message in public
+                if message.author_role is ThreadAuthorRole.VENDOR and not message.resolved
+            ),
+        }
+
+    def post_reviewer_reply(
+        self,
+        case_id: str,
+        *,
+        author_id: str,
+        body: str,
+        visibility: str = "public",
+        in_reply_to: str | None = None,
+        resolve: bool = False,
+    ) -> ThreadMessage:
+        """Record a reviewer reply (public) or internal note on the thread.
+
+        A public reply is visible to the vendor through the scoped portal; an
+        internal note never is. When ``resolve`` is set and the reply answers a
+        specific vendor message (``in_reply_to``), that vendor message is marked
+        resolved in the same action.
+        """
+        self._require("case", case_id, VendorCase)
+        author = self._text(author_id, "author_id")
+        clean_body = self._message_body(body)
+        try:
+            visibility_enum = ThreadVisibility(visibility)
+        except ValueError as error:
+            raise VendorBackendError(
+                "invalid_visibility", "visibility must be public or internal"
+            ) from error
+        parent = self._thread_parent(case_id, in_reply_to)
+        message = ThreadMessage(
+            message_id=self._id("thread_message", "msg"),
+            case_id=case_id,
+            author_role=ThreadAuthorRole.REVIEWER,
+            category=REVIEWER_REPLY_CATEGORY,
+            body=clean_body,
+            created_at=self._now(),
+            author_id=author,
+            visibility=visibility_enum,
+            in_reply_to=parent.message_id if parent is not None else None,
+            read_by_reviewer=True,
+            workspace_id=self.workspace_id,
+        )
+        self._put("thread_message", message.message_id, message)
+        resolved_parent = (
+            resolve
+            and parent is not None
+            and parent.author_role is ThreadAuthorRole.VENDOR
+        )
+        if resolved_parent:
+            self._set_message_resolution(parent, resolved=True)
+        self._event(
+            "thread.reviewer_reply",
+            "thread_message",
+            message.message_id,
+            case_id=case_id,
+            detail={
+                "visibility": visibility_enum.value,
+                "in_reply_to": message.in_reply_to,
+                "resolved_parent": resolved_parent,
+            },
+        )
+        return message
+
+    def resolve_thread_message(
+        self, case_id: str, message_id: str, *, resolved: bool = True
+    ) -> dict[str, Any]:
+        """Mark a vendor question resolved (or reopen it) without editing history."""
+        message = self._require_thread_message(case_id, message_id)
+        if message.author_role is not ThreadAuthorRole.VENDOR:
+            raise VendorBackendError(
+                "invalid_thread_target", "only vendor messages can be resolved"
+            )
+        updated = self._set_message_resolution(message, resolved=resolved)
+        return updated.to_reviewer_dict()
+
+    def mark_thread_read(self, case_id: str, message_id: str | None = None) -> dict[str, Any]:
+        """Mark one or all vendor messages on a case read for the reviewer inbox."""
+        self._require("case", case_id, VendorCase)
+        targets = [
+            message
+            for message in self._thread_for_case(case_id)
+            if message.author_role is ThreadAuthorRole.VENDOR
+            and not message.read_by_reviewer
+            and (message_id is None or message.message_id == message_id)
+        ]
+        if message_id is not None and not targets:
+            # A specific unread vendor message was requested but none matched.
+            self._require_thread_message(case_id, message_id)
+        for message in targets:
+            self._put(
+                "thread_message",
+                message.message_id,
+                replace(message, read_by_reviewer=True),
+            )
+        return {"case_id": case_id, "marked_read": len(targets)}
+
+    def case_thread(self, case_id: str) -> dict[str, Any]:
+        """Reviewer view of one case's full thread with outstanding-requirement context."""
+        case = self._require("case", case_id, VendorCase)
+        product = self._require("product", case.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        messages = self._thread_for_case(case_id)
+        return {
+            "case_id": case_id,
+            "product": {"product_id": product.product_id, "name": product.name},
+            "vendor": {"vendor_id": vendor.vendor_id, "name": vendor.name},
+            "outstanding_requirements": self._outstanding_requirement_ids(case_id),
+            "unread_count": sum(
+                1
+                for message in messages
+                if message.author_role is ThreadAuthorRole.VENDOR
+                and not message.read_by_reviewer
+            ),
+            "messages": [message.to_reviewer_dict() for message in messages],
+        }
+
+    def reviewer_thread_inbox(self) -> list[dict[str, Any]]:
+        """Unresolved vendor questions across cases, newest first, with context.
+
+        Each case appears once with its newest unresolved vendor message and the
+        contact, product, and outstanding-requirement context a reviewer needs to
+        triage it. Reviewer-only findings, policy, and risk never appear here.
+        """
+        by_case: dict[str, list[ThreadMessage]] = {}
+        for message in self._list("thread_message", ThreadMessage):
+            if message.author_role is ThreadAuthorRole.VENDOR and not message.resolved:
+                by_case.setdefault(message.case_id, []).append(message)
+        inbox: list[dict[str, Any]] = []
+        for case_id, messages in by_case.items():
+            case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+            if not isinstance(case, VendorCase):
+                continue
+            product = self._require("product", case.product_id, VendorProduct)
+            vendor = self._require("vendor", product.vendor_id, Vendor)
+            latest = max(messages, key=lambda item: (item.created_at, item.message_id))
+            contact = self._thread_contact(case_id)
+            inbox.append(
+                {
+                    "case_id": case_id,
+                    "product": {"product_id": product.product_id, "name": product.name},
+                    "vendor": {"vendor_id": vendor.vendor_id, "name": vendor.name},
+                    "contact": contact,
+                    "outstanding_requirements": self._outstanding_requirement_ids(case_id),
+                    "open_question_count": len(messages),
+                    "unread_count": sum(1 for item in messages if not item.read_by_reviewer),
+                    "latest_message": latest.to_reviewer_dict(),
+                }
+            )
+        inbox.sort(
+            key=lambda item: item["latest_message"]["created_at"], reverse=True
+        )
+        return inbox
+
+    def _thread_for_case(self, case_id: str) -> list[ThreadMessage]:
+        messages = [
+            message
+            for message in self._list("thread_message", ThreadMessage)
+            if message.case_id == case_id
+        ]
+        return sorted(messages, key=lambda item: (item.created_at, item.message_id))
+
+    def _set_message_resolution(
+        self, message: ThreadMessage, *, resolved: bool
+    ) -> ThreadMessage:
+        if message.resolved == resolved:
+            return message
+        updated = replace(message, resolved=resolved)
+        self._put("thread_message", message.message_id, updated)
+        self._event(
+            "thread.resolved" if resolved else "thread.reopened",
+            "thread_message",
+            message.message_id,
+            case_id=message.case_id,
+        )
+        return updated
+
+    def _require_thread_message(self, case_id: str, message_id: str) -> ThreadMessage:
+        if not isinstance(message_id, str) or not message_id:
+            raise VendorBackendError("not_found", "message not found", status=404)
+        message = self._require("thread_message", message_id, ThreadMessage)
+        # Cross-case isolation: a message id from another case is not reachable
+        # through this case's reviewer routes.
+        if message.case_id != case_id:
+            raise VendorBackendError("not_found", "message not found", status=404)
+        return message
+
+    def _thread_parent(
+        self, case_id: str, in_reply_to: str | None
+    ) -> ThreadMessage | None:
+        if in_reply_to is None:
+            return None
+        return self._require_thread_message(case_id, in_reply_to)
+
+    def _thread_requirement(
+        self, case_id: str, requirement_id: str | None
+    ) -> str | None:
+        if requirement_id is None:
+            return None
+        clean = self._text(requirement_id, "requirement_id")
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        known: set[str] = set()
+        profiles = (
+            self._case_profiles(case_id)
+            if isinstance(case, VendorCase)
+            else self.profiles.active_profiles()
+        )
+        for profile in profiles:
+            for criterion in profile.criteria:
+                known.add(criterion.requirement_id)
+        if clean not in known:
+            raise VendorBackendError(
+                "invalid_requirement",
+                "requirement_id must name an active requirement for this case",
+            )
+        return clean
+
+    def _outstanding_requirement_ids(self, case_id: str) -> list[str]:
+        submissions = [
+            item
+            for item in self._list("submission", Submission)
+            if item.case_id == case_id and item.intake_analysis_complete
+        ]
+        if not submissions:
+            return []
+        submission = max(
+            submissions, key=lambda item: item.finalized_at or item.updated_at or ""
+        )
+        return [
+            item["requirement_id"]
+            for item in self._checklist(submission)
+            if item["status"] == "outstanding"
+        ]
+
+    def _thread_contact(self, case_id: str) -> dict[str, Any] | None:
+        invites = [
+            item for item in self._list("invite", VendorInvite) if item.case_id == case_id
+        ]
+        if not invites:
+            return None
+        invite = max(invites, key=lambda item: (item.issued_at, item.invite_id))
+        contact = self.repository.get(
+            "contact", invite.contact_id, workspace_id=self.workspace_id
+        )
+        if not isinstance(contact, VendorContact):
+            return None
+        return {"contact_id": contact.contact_id, "name": contact.name, "email": contact.email}
+
+    @staticmethod
+    def _message_body(value: object) -> str:
+        """Sanitize untrusted thread text: keep newlines, drop control chars, bound length."""
+        if not isinstance(value, str) or not value.strip():
+            raise VendorBackendError("validation_error", "message body is required")
+        if any(
+            ord(char) < 32 and char not in "\t\n\r" or ord(char) == 127 for char in value
+        ):
+            raise VendorBackendError(
+                "validation_error", "message body contains control characters"
+            )
+        cleaned = value.strip()
+        if len(cleaned) > MAX_THREAD_BODY_CHARS:
+            raise VendorBackendError(
+                "message_too_long",
+                f"message body exceeds {MAX_THREAD_BODY_CHARS} characters",
+                status=413,
+            )
+        return cleaned
 
     def intake_stage(self, token: str) -> dict[str, Any]:
         """Return the current staged-intake position for the vendor UI."""

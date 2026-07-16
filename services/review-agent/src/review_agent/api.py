@@ -1015,6 +1015,95 @@ class LocalReviewApi:
         validate_definition(status, "vendor-intake", "ReviewStatus")
         return status
 
+    # Case-scoped clarification thread (issue #41) ---------------------------
+
+    def vendor_thread(self, token: str) -> dict[str, Any]:
+        """Vendor-visible thread messages for the invite's case (scoped link)."""
+        return self._vendor_call(lambda: {"items": self._vendor.vendor_thread(token)})
+
+    def vendor_post_message(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append a vendor question/concern to the case thread (untrusted text)."""
+        if not isinstance(payload, dict):
+            raise LocalApiError(400, "validation_error", "message payload must be an object")
+        allowed = {"category", "body", "requirement_id"}
+        if set(payload) - allowed or "category" not in payload or "body" not in payload:
+            raise LocalApiError(400, "validation_error", "message payload fields are invalid")
+        requirement_id = payload.get("requirement_id")
+        if requirement_id is not None and not isinstance(requirement_id, str):
+            raise LocalApiError(400, "validation_error", "requirement_id must be a string")
+        return self._vendor_call(
+            lambda: self._vendor.post_vendor_message(
+                token,
+                category=payload["category"],
+                body=payload["body"],
+                requirement_id=requirement_id,
+            ).to_vendor_dict()
+        )
+
+    def thread_inbox(self) -> dict[str, Any]:
+        """Reviewer inbox: unresolved vendor questions across cases (issue #41)."""
+        return self._vendor_call(lambda: {"items": self._vendor.reviewer_thread_inbox()})
+
+    def case_thread(self, case_id: str) -> dict[str, Any]:
+        """Reviewer view of one case's full clarification thread."""
+        self._require_case(case_id)
+        return self._vendor_call(lambda: self._vendor.case_thread(case_id))
+
+    def post_case_reply(self, case_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record a reviewer reply/note on the case thread. Reviewer identity required."""
+        self._require_case(case_id)
+        if not isinstance(payload, dict):
+            raise LocalApiError(400, "validation_error", "reply payload must be an object")
+        reviewer_id = self._required_text(payload, "reviewer_id")
+        body = self._required_text(payload, "body")
+        visibility = payload.get("visibility", "public")
+        if not isinstance(visibility, str):
+            raise LocalApiError(400, "validation_error", "visibility must be a string")
+        in_reply_to = payload.get("in_reply_to")
+        if in_reply_to is not None and not isinstance(in_reply_to, str):
+            raise LocalApiError(400, "validation_error", "in_reply_to must be a string")
+        resolve = payload.get("resolve", False)
+        if not isinstance(resolve, bool):
+            raise LocalApiError(400, "validation_error", "resolve must be a boolean")
+        return self._vendor_call(
+            lambda: self._vendor.post_reviewer_reply(
+                case_id,
+                author_id=reviewer_id,
+                body=body,
+                visibility=visibility,
+                in_reply_to=in_reply_to,
+                resolve=resolve,
+            ).to_reviewer_dict()
+        )
+
+    def resolve_case_message(
+        self, case_id: str, message_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Mark a vendor thread message resolved or reopen it."""
+        self._require_case(case_id)
+        resolved = payload.get("resolved", True) if isinstance(payload, dict) else True
+        if not isinstance(resolved, bool):
+            raise LocalApiError(400, "validation_error", "resolved must be a boolean")
+        return self._vendor_call(
+            lambda: self._vendor.resolve_thread_message(
+                case_id, message_id, resolved=resolved
+            )
+        )
+
+    def mark_case_thread_read(
+        self, case_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Mark one or all vendor messages on a case read for the reviewer inbox."""
+        self._require_case(case_id)
+        message_id = None
+        if isinstance(payload, dict):
+            message_id = payload.get("message_id")
+            if message_id is not None and not isinstance(message_id, str):
+                raise LocalApiError(400, "validation_error", "message_id must be a string")
+        return self._vendor_call(
+            lambda: self._vendor.mark_thread_read(case_id, message_id)
+        )
+
     def run_reminder_sweep(self) -> dict[str, Any]:
         """Email weekly reminders for missing or incomplete evidence (issue #37).
 
@@ -1075,6 +1164,11 @@ class LocalReviewApi:
                 [
                     "Continue your submission with your secure invitation link:",
                     candidate["intake_url"],
+                    "",
+                    "You can also use that link to ask the campus team a question, "
+                    "report that a document cannot be obtained, or share an "
+                    "estimated date — your questions and any replies appear on the "
+                    "same secure page.",
                     "",
                 ]
             )

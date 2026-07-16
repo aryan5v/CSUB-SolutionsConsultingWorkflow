@@ -151,7 +151,7 @@
     "ReviewStatus": {
       "type": "object", "additionalProperties": false,
       "description": "Vendor-safe status projection; internal lifecycle states collapse to a small stage vocabulary and no reviewer-only data is included.",
-      "required": ["invite", "vendor", "product", "submission_status", "intake_analysis_complete", "review_stage", "outcome", "vendor_visible_comment", "next_actions", "checklist", "required_evidence", "adapted_to_intake"],
+      "required": ["invite", "vendor", "product", "submission_status", "intake_analysis_complete", "review_stage", "outcome", "vendor_visible_comment", "next_actions", "checklist", "required_evidence", "adapted_to_intake", "thread"],
       "properties": {
         "invite": {
           "type": "object", "additionalProperties": false,
@@ -188,6 +188,16 @@
         "adapted_to_intake": {
           "type": "boolean",
           "description": "True when the requirement checklist was narrowed to the campus intake's policy result."
+        },
+        "thread": {
+          "type": "object", "additionalProperties": false,
+          "description": "Vendor-safe clarification-thread counts (issue #41); no reviewer identity or internal notes.",
+          "required": ["message_count", "has_reviewer_reply", "open_question_count"],
+          "properties": {
+            "message_count": {"type": "integer", "minimum": 0},
+            "has_reviewer_reply": {"type": "boolean"},
+            "open_question_count": {"type": "integer", "minimum": 0}
+          }
         }
       }
     },
