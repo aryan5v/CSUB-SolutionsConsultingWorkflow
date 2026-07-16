@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csub.example/contracts/evidence-processing.schema.json",
+  "title": "Evidence processing state and extraction provenance",
+  "$defs": {
+    "ProcessingState": {
+      "type": "string",
+      "enum": ["queued", "processing", "ready", "failed", "manual_review"]
+    },
+    "Coordinates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "page": {"type": "integer", "minimum": 1},
+        "sheet": {"type": "string"},
+        "cell": {"type": "string"},
+        "row": {"type": "integer", "minimum": 1},
+        "column": {"type": "string"},
+        "line": {"type": "integer", "minimum": 1},
+        "paragraph": {"type": "integer", "minimum": 1},
+        "region": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "left": {"type": "number"},
+            "top": {"type": "number"},
+            "width": {"type": "number"},
+            "height": {"type": "number"}
+          }
+        }
+      }
+    },
+    "ExtractedChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chunk_id", "text", "raw_value", "formula", "coordinates", "source_sha256", "source_object_key", "source_version_id", "untrusted", "model_use_allowed"],
+      "properties": {
+        "chunk_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "text": {"type": "string"},
+        "raw_value": {"type": "string"},
+        "formula": {"type": ["string", "null"]},
+        "coordinates": {"$ref": "#/$defs/Coordinates"},
+        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_object_key": {"type": "string"},
+        "source_version_id": {"type": ["string", "null"]},
+        "untrusted": {"const": true},
+        "model_use_allowed": {"const": false}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workspace_id", "case_id", "product_id", "vendor_id", "artifact_id", "source_sha256", "source_object_key", "source_version_id", "declared_content_type", "detected_content_type", "untrusted", "model_use_allowed", "warnings", "chunks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "workspace_id": {"type": "string"},
+    "case_id": {"type": "string"},
+    "product_id": {"type": "string"},
+    "vendor_id": {"type": "string"},
+    "artifact_id": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_object_key": {"type": "string"},
+    "source_version_id": {"type": ["string", "null"]},
+    "declared_content_type": {"type": "string"},
+    "detected_content_type": {"type": "string"},
+    "untrusted": {"const": true},
+    "model_use_allowed": {"const": false},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "chunks": {"type": "array", "items": {"$ref": "#/$defs/ExtractedChunk"}}
+  }
+}

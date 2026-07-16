@@ -38,8 +38,23 @@
       "required": ["filename", "content_type", "size_bytes", "sha256"],
       "properties": {
         "filename": {"type": "string", "minLength": 1, "maxLength": 255},
-        "content_type": {"type": "string", "minLength": 1},
-        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 50000000},
+        "content_type": {
+          "type": "string",
+          "enum": [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/csv",
+            "text/plain",
+            "image/png",
+            "image/jpeg",
+            "application/rtf",
+            "application/octet-stream",
+            "application/vnd.ms-outlook",
+            "application/x-msg"
+          ]
+        },
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 5000000},
         "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
       }
     },
@@ -48,8 +63,26 @@
       "required": ["workspace_id", "artifact_id", "submission_id", "filename", "content_type", "size_bytes", "sha256", "untrusted"],
       "properties": {
         "workspace_id": {"type": "string"}, "artifact_id": {"type": "string"}, "submission_id": {"type": "string"},
-        "filename": {"type": "string"}, "content_type": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 0},
-        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}, "untrusted": {"const": true}
+        "filename": {"type": "string"}, "content_type": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}, "untrusted": {"const": true},
+        "case_id": {"type": "string"}, "product_id": {"type": "string"},
+        "processing_state": {"enum": ["queued", "processing", "ready", "failed", "manual_review"]},
+        "source_version_id": {"type": ["string", "null"]},
+        "detected_content_type": {"type": ["string", "null"]},
+        "source_location": {"type": ["string", "null"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "failure_code": {"type": ["string", "null"]},
+        "model_use_allowed": {"const": false},
+        "upload": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["url", "method", "fields"],
+          "properties": {
+            "url": {"type": "string", "format": "uri"},
+            "method": {"const": "POST"},
+            "fields": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        }
       }
     },
     "TrustCenter": {

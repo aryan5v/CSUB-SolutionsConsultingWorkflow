@@ -6,11 +6,13 @@ import {
   reviewApi,
   reviewStageLabel,
   suppressResolvedQuestions,
+  type EvidenceArtifact,
   type EvidenceUploadResult,
   type VendorInviteView,
   type VendorQuestion,
   type VendorReviewStatus,
 } from "./api";
+import { EvidenceProcessingList, evidenceNeedsPolling } from "./EvidenceProcessing";
 import "./landing.css";
 
 type IntakeFile = {
@@ -34,7 +36,9 @@ function PixelLogo() {
 }
 
 function messageFor(error: unknown): string {
-  if (error instanceof ReviewApiError) return error.message;
+  if (error instanceof ReviewApiError) {
+    return `${error.message}${error.correlationId ? ` Reference: ${error.correlationId}.` : ""}`;
+  }
   if (error instanceof Error) return error.message;
   return "The intake service could not complete this request.";
 }
@@ -95,6 +99,7 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
   const [reviewStatus, setReviewStatus] = useState<VendorReviewStatus | null>(null);
   const [questions, setQuestions] = useState<VendorQuestion[]>([]);
   const [files, setFiles] = useState<IntakeFile[]>([]);
+  const [evidenceStatuses, setEvidenceStatuses] = useState<EvidenceArtifact[]>([]);
   const [trustCenterUrl, setTrustCenterUrl] = useState("");
   const [draftAnswers, setDraftAnswers] = useState<Record<string, string>>({});
   const [savedAnswers, setSavedAnswers] = useState<Record<string, string>>({});
@@ -146,6 +151,27 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
     });
     return () => { active = false; };
   }, [initialToken]);
+
+  useEffect(() => {
+    if (!initialToken || !view) return;
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const items = await reviewApi.listEvidence(initialToken);
+        if (!active) return;
+        setEvidenceStatuses(items);
+        if (evidenceNeedsPolling(items)) timer = window.setTimeout(poll, 1500);
+      } catch (reason) {
+        if (active) setError(messageFor(reason));
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [initialToken, view?.submission.evidence_artifact_ids.join(",")]);
 
   const unresolved = useMemo(
     () => suppressResolvedQuestions(questions, savedAnswers, savedCoverage),
@@ -306,8 +332,8 @@ export default function PublicIntake({ initialToken }: { initialToken: string | 
                   <input id="evidence-files" className="vp-file-input" type="file" multiple onChange={chooseFiles} disabled={busy || finalized} />
                   <p>HECVAT, SOC 2, penetration test, VPAT/ACR, or other product-specific evidence.</p>
                 </div>
-                {(files.length > 0 || view.submission.evidence_artifact_ids.length > 0) && <ul className="vp-file-list">
-                  {view.submission.evidence_artifact_ids.length > 0 && files.length === 0 && <li><span><strong>{view.submission.evidence_artifact_ids.length} previously saved evidence item(s)</strong><small>Names are not returned in the vendor-safe projection.</small></span><b>Saved</b></li>}
+                <EvidenceProcessingList items={evidenceStatuses} emptyMessage="No evidence has been registered for this invitation yet." />
+                {files.length > 0 && <ul className="vp-file-list" aria-label="Browser upload transfers">
                   {files.map((item, index) => <li key={`${item.file.name}-${index}`}><span><strong>{item.file.name}</strong><small>{Math.ceil(item.file.size / 1024)} KB · {item.file.type || "Unknown file type"}</small>{item.error && <small className="vp-file-error-message" role="alert">{item.error}</small>}</span><b className={`vp-file-${item.status}`}>{item.status}{item.result?.transfer === "simulated" ? " · metadata only" : ""}</b></li>)}
                 </ul>}
                 {simulatedFiles.length > 0 && <p className="vp-upload-fallback" role="status">No presigned upload was returned for {simulatedFiles.length} file(s). Metadata was saved, but the bytes did not leave this browser.</p>}

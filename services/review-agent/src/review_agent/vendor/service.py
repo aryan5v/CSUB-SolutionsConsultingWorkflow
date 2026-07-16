@@ -33,6 +33,7 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from ..evidence.ingestion import ACCEPTED_CONTENT_TYPES, MAX_EVIDENCE_BYTES
 from ..profiles.service import ProfileError, ReviewProfileService
 from ..timestamps import parse_utc_timestamp
 from .delivery import DeliveryClaimStore, InMemoryDeliveryClaimStore
@@ -232,6 +233,20 @@ class VendorBackend:
         self._put("case", case.case_id, case)
         return case
 
+    def _expire_invite_if_needed(self, invite: VendorInvite) -> VendorInvite:
+        if invite.status in {
+            InviteStatus.EXPIRED,
+            InviteStatus.REVOKED,
+            InviteStatus.SUBMITTED,
+        }:
+            return invite
+        expires = datetime.datetime.fromisoformat(invite.expires_at)
+        if self._now_datetime() < expires:
+            return invite
+        expired = replace(invite, status=InviteStatus.EXPIRED)
+        self._put("invite", expired.invite_id, expired)
+        return expired
+
     def issue_invite(self, case_id: str, contact_id: str) -> dict[str, Any]:
         case = self._require("case", case_id, VendorCase)
         contact = self._require("contact", contact_id, VendorContact)
@@ -240,6 +255,17 @@ class VendorBackend:
             raise VendorBackendError(
                 "contact_product_mismatch", "contact and product must belong to the same vendor"
             )
+        for existing in self.list_invites(case_id):
+            if existing.contact_id == contact_id and existing.status in {
+                InviteStatus.ISSUED,
+                InviteStatus.OPENED,
+                InviteStatus.IN_PROGRESS,
+            }:
+                raise VendorBackendError(
+                    "active_invite_exists",
+                    "an active invitation already exists; rotate or revoke it before issuing another",
+                    status=409,
+                )
         token = self._token_factory()
         if not isinstance(token, str) or len(token) < 32:
             raise VendorBackendError("weak_token", "token factory must provide at least 32 characters")
@@ -271,15 +297,30 @@ class VendorBackend:
         return {"invite": invite.to_reviewer_dict(), "token": token}
 
     def resend_invite(self, invite_id: str) -> dict[str, Any]:
-        old = self._require("invite", invite_id, VendorInvite)
-        if old.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be resent", status=409)
-        now = self._now()
-        self._put(
-            "invite",
-            old.invite_id,
-            replace(old, status=InviteStatus.REVOKED, revoked_at=now),
+        old = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
         )
+        replacement = next(
+            (
+                invite
+                for invite in self._list("invite", VendorInvite)
+                if invite.replaced_invite_id == old.invite_id
+            ),
+            None,
+        )
+        if replacement is not None:
+            raise VendorBackendError(
+                "invite_already_rotated",
+                "invitation was already rotated; use the latest invitation",
+                status=409,
+            )
+        if old.status in {
+            InviteStatus.ISSUED,
+            InviteStatus.OPENED,
+            InviteStatus.IN_PROGRESS,
+        }:
+            old = replace(old, status=InviteStatus.REVOKED, revoked_at=self._now())
+            self._put("invite", old.invite_id, old)
         issued = self.issue_invite(old.case_id, old.contact_id)
         replacement = self._require(
             "invite", issued["invite"]["invite_id"], VendorInvite
@@ -287,21 +328,38 @@ class VendorBackend:
         replacement = replace(replacement, replaced_invite_id=old.invite_id)
         self._put("invite", replacement.invite_id, replacement)
         issued["invite"] = replacement.to_reviewer_dict()
-        self._event("invite.resent", "invite", replacement.invite_id, case_id=old.case_id)
+        self._event("invite.rotated", "invite", replacement.invite_id, case_id=old.case_id)
         return issued
 
     def revoke_invite(self, invite_id: str) -> dict[str, Any]:
-        invite = self._require("invite", invite_id, VendorInvite)
+        invite = self._expire_invite_if_needed(
+            self._require("invite", invite_id, VendorInvite)
+        )
         if invite.status is InviteStatus.SUBMITTED:
-            raise VendorBackendError("already_submitted", "submitted invitation cannot be revoked", status=409)
+            raise VendorBackendError(
+                "already_submitted", "submitted invitation cannot be revoked", status=409
+            )
+        if invite.status in {InviteStatus.REVOKED, InviteStatus.EXPIRED}:
+            return invite.to_reviewer_dict()
         revoked = replace(invite, status=InviteStatus.REVOKED, revoked_at=self._now())
         self._put("invite", invite_id, revoked)
         self._event("invite.revoked", "invite", invite_id, case_id=invite.case_id)
         return revoked.to_reviewer_dict()
 
     def list_invites(self, case_id: str | None = None) -> list[VendorInvite]:
-        invites = self._list("invite", VendorInvite)
-        return [invite for invite in invites if case_id is None or invite.case_id == case_id]
+        invites = []
+        for invite in self._list("invite", VendorInvite):
+            if case_id is not None and invite.case_id != case_id:
+                continue
+            expires = datetime.datetime.fromisoformat(invite.expires_at)
+            if invite.status not in {
+                InviteStatus.EXPIRED,
+                InviteStatus.REVOKED,
+                InviteStatus.SUBMITTED,
+            } and self._now_datetime() >= expires:
+                invite = replace(invite, status=InviteStatus.EXPIRED)
+            invites.append(invite)
+        return sorted(invites, key=lambda invite: (invite.issued_at, invite.invite_id))
 
     def resolve_invite(self, token: str, *, mark_open: bool = False) -> dict[str, Any]:
         invite = self._valid_invite(token)
@@ -347,12 +405,43 @@ class VendorBackend:
         if len(filename) > 255 or "/" in filename or "\\" in filename:
             raise VendorBackendError("invalid_filename", "filename must be a basename")
         content_type = self._text(payload.get("content_type"), "content_type")
+        if content_type not in ACCEPTED_CONTENT_TYPES:
+            raise VendorBackendError(
+                "unsupported_content_type",
+                "evidence type is unsupported and must be reviewed manually",
+                status=415,
+            )
         size = payload.get("size_bytes")
-        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 50_000_000:
-            raise VendorBackendError("invalid_size", "size_bytes must be between 0 and 50000000")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 1 <= size <= MAX_EVIDENCE_BYTES
+        ):
+            raise VendorBackendError(
+                "invalid_size",
+                f"size_bytes must be between 1 and {MAX_EVIDENCE_BYTES}",
+            )
         digest = self._text(payload.get("sha256"), "sha256").lower()
         if not _SHA256.fullmatch(digest):
             raise VendorBackendError("invalid_hash", "sha256 must be 64 hexadecimal characters")
+        existing = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id == submission.submission_id and item.sha256 == digest
+        ]
+        if existing:
+            artifact = existing[0]
+            if (
+                artifact.filename != filename
+                or artifact.content_type != content_type
+                or artifact.size_bytes != size
+            ):
+                raise VendorBackendError(
+                    "evidence_identity_conflict",
+                    "sha256 is already registered with different immutable metadata",
+                    status=409,
+                )
+            return artifact
         artifact = EvidenceArtifact(
             artifact_id=self._id("evidence", "evidence"),
             submission_id=submission.submission_id,
@@ -370,6 +459,51 @@ class VendorBackend:
         )
         self._save_progress(invite, updated)
         return artifact
+
+    def evidence_upload_context(
+        self, token: str, artifact_id: str
+    ) -> tuple[VendorInvite, Submission, VendorProduct, Vendor, EvidenceArtifact]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        if artifact_id not in submission.evidence_artifact_ids:
+            raise VendorBackendError(
+                "cross_case_evidence", "evidence does not belong to this submission", status=403
+            )
+        artifact = self._require("evidence", artifact_id, EvidenceArtifact)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return invite, submission, product, vendor, artifact
+
+    def submission_evidence(
+        self, token: str
+    ) -> tuple[VendorInvite, Submission, list[EvidenceArtifact]]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        allowed = set(submission.evidence_artifact_ids)
+        artifacts = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.artifact_id in allowed
+        ]
+        return invite, submission, artifacts
+
+    def case_evidence(self, case_id: str) -> list[EvidenceArtifact]:
+        submission_ids = {
+            item.submission_id
+            for item in self._list("submission", Submission)
+            if item.case_id == case_id
+        }
+        return [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id in submission_ids
+        ]
+
+    def case_upload_context(self, case_id: str) -> tuple[VendorCase, VendorProduct, Vendor]:
+        case = self._require("case", case_id, VendorCase)
+        product = self._require("product", case.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return case, product, vendor
 
     def set_trust_center_url(self, token: str, url: str) -> Submission:
         invite = self._valid_invite(token)
@@ -1481,15 +1615,13 @@ class VendorBackend:
         )
         if invite is None:
             raise VendorBackendError("invalid_invite", "invitation is invalid", status=404)
+        invite = self._expire_invite_if_needed(invite)
         if invite.status is InviteStatus.REVOKED:
             raise VendorBackendError("invite_revoked", "invitation was revoked", status=410)
+        if invite.status is InviteStatus.EXPIRED:
+            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         if invite.status is InviteStatus.SUBMITTED:
             raise VendorBackendError("invite_submitted", "invitation was already submitted", status=409)
-        expires = parse_utc_timestamp(invite.expires_at)
-        if self._now_datetime() >= expires:
-            expired = replace(invite, status=InviteStatus.EXPIRED)
-            self._put("invite", invite.invite_id, expired)
-            raise VendorBackendError("invite_expired", "invitation expired", status=410)
         return invite
 
     def _draft_submission(self, invite: VendorInvite) -> Submission:
