@@ -73,6 +73,12 @@ def create_server(
                 if method == "POST" and path == "/reminders/run":
                     self._json(HTTPStatus.OK, application.run_reminder_sweep())
                     return
+                if method == "GET" and path == "/renewals":
+                    self._json(HTTPStatus.OK, application.list_renewals())
+                    return
+                if method == "POST" and path == "/renewals/run":
+                    self._json(HTTPStatus.OK, application.run_expiry_sweep())
+                    return
                 if method == "GET" and path == "/catalog":
                     self._json(
                         HTTPStatus.OK,

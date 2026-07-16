@@ -1352,6 +1352,17 @@ class LambdaApiTests(unittest.TestCase):
         self.assertIn("recipient_sha256", reminders[0]["detail"])
         self.assertNotIn(sender.sent[0]["to"], json.dumps(reminders))
 
+    def test_scheduled_renewals_run_bypasses_jwt_and_runs_the_sweep(self) -> None:
+        # The EventBridge Scheduler invokes the Lambda directly (issue #53):
+        # no API Gateway, no reviewer JWT — its IAM role is the authorization.
+        result = self.handler({"scheduled_task": "renewals_run"}, None)
+        self.assertEqual(result["scheduled_task"], "renewals_run")
+        self.assertIn("count", result)
+        # The reviewer-facing projection route is also reachable via the API.
+        response, payload = self.call("GET", "/renewals")
+        self.assertEqual(response["statusCode"], 200)
+        self.assertIn("items", payload)
+
     def test_two_independent_restores_send_once_and_loser_does_not_save(self) -> None:
         issued = self._issue_invite()
         now = datetime.datetime(2026, 7, 23, 12, tzinfo=datetime.timezone.utc)

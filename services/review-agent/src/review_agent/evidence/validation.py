@@ -42,6 +42,13 @@ RULE_SOURCE = {
 # issue #36: "The transcript confirms a one-year penetration-test freshness check".
 PENTEST_MAX_AGE_DAYS = 365
 
+# Post-approval monitoring (issue #53) derives next-check dates from the same
+# validated fields these rules check — never from unvalidated metadata.
+EXPIRY_RULE_SOURCE = {
+    "source_id": "issue:53",
+    "section": "expiring-evidence-monitoring",
+}
+
 DISPOSITION_FAILED = "failed"
 DISPOSITION_MANUAL_REVIEW = "manual_review"
 
@@ -86,6 +93,27 @@ def _parse_date(value: object) -> datetime.date | None:
         return datetime.date.fromisoformat(value.strip()[:10])
     except ValueError:
         return None
+
+
+def compute_expires_on(evidence_type: str, fields: dict[str, Any]) -> datetime.date | None:
+    """Derive when a validated document stops being current (issue #53).
+
+    Only cited rules produce a date: a COI carries its own policy expiration,
+    and penetration tests use the one-year freshness rule cited verbatim in
+    issue #36. PCI AoCs have NO authoritative currency rule (issue #36 open
+    question; issue #52), so no expiry date is ever computed for them — they
+    already route to explicit manual review (``pci.currency_unverified``) at
+    intake. Returns ``None`` when no cited rule yields a validated date —
+    such documents cannot be scheduled for expiry.
+    """
+    if evidence_type == "coi":
+        return _parse_date(fields.get("expires_date"))
+    if evidence_type == "pentest":
+        base = _parse_date(fields.get("report_date")) or _parse_date(fields.get("issued_date"))
+        return base + datetime.timedelta(days=PENTEST_MAX_AGE_DAYS) if base else None
+    # PCI (and anything else) has no cited expiry rule (issue #52): never
+    # schedule an expiry date; manual review is the explicit state instead.
+    return None
 
 
 def _result(check: str, reason: str, disposition: str) -> dict[str, str]:

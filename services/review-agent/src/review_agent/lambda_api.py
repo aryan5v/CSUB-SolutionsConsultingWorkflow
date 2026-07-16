@@ -67,12 +67,14 @@ from .contracts.vendor import (
     CaseLifecycle,
     CoverageItem,
     EvidenceArtifact,
+    EvidenceExpiryRecord,
     EvidenceValidationFinding,
     IntegrationEvent,
     InviteStatus,
     PolicyCriteria,
     ProfileStatus,
     ReminderClaim,
+    RenewalRecord,
     ReviewCriterion,
     ReviewProfileVersion,
     ReviewRun,
@@ -977,6 +979,18 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
     "finding": lambda value: EvidenceValidationFinding(**value),
     "reminder_claim": lambda value: ReminderClaim(**value),
     "policy_criteria": lambda value: PolicyCriteria.from_dict(value),
+    "expiry": lambda value: EvidenceExpiryRecord(
+        **{
+            **value,
+            "profile_version_ids": tuple(value.get("profile_version_ids", ())),
+        }
+    ),
+    "renewal": lambda value: RenewalRecord(
+        **{
+            **value,
+            "expired_evidence_types": tuple(value.get("expired_evidence_types", ())),
+        }
+    ),
 }
 
 
@@ -1200,7 +1214,7 @@ def create_handler(
         try:
             scheduled_task = event.get("scheduled_task")
             if scheduled_task is not None:
-                if scheduled_task != "reminders_run":
+                if scheduled_task not in {"reminders_run", "renewals_run"}:
                     raise LocalApiError(400, "scheduled_task_invalid", "scheduled task is invalid")
                 snapshot = store.load_snapshot(workspace_id)
                 if snapshot is None:
@@ -1217,11 +1231,18 @@ def create_handler(
                     clock=clock,
                     evidence_uploads=evidence_uploads,
                 )
-                result = api.run_reminder_sweep()
+                # Post-approval expiry monitoring (issue #53) reuses the same
+                # scheduled-invocation and optimistic-lock persistence path as
+                # the weekly reminder sweep (issue #37).
+                result = (
+                    api.run_reminder_sweep()
+                    if scheduled_task == "reminders_run"
+                    else api.run_expiry_sweep()
+                )
                 if result["count"] > 0:
-                    # The reminder sweep persists under the same optimistic lock
-                    # as every mutating request, so a concurrent request or sweep
-                    # cannot silently overwrite it.
+                    # The sweep persists under the same optimistic lock as every
+                    # mutating request, so a concurrent request or sweep cannot
+                    # silently overwrite it.
                     next_snapshot = snapshot_api(api, workspace_id=workspace_id)
                     next_snapshot["persistence_revision"] = revision + 1
                     store.save_snapshot(
@@ -1230,7 +1251,7 @@ def create_handler(
                         expected_revision=revision,
                     )
                 _log(correlation_id, "schedule.completed", 200)
-                return {"scheduled_task": "reminders_run", **result}
+                return {"scheduled_task": scheduled_task, **result}
 
             method, path = _method_path(event)
             origin = _header(event, "origin")
@@ -1346,6 +1367,11 @@ def _dispatch(
         return api.integration_events(), 200, False
     if method == "POST" and path == "/reminders/run":
         result = api.run_reminder_sweep()
+        return result, 200, result["count"] > 0
+    if method == "GET" and path == "/renewals":
+        return api.list_renewals(), 200, False
+    if method == "POST" and path == "/renewals/run":
+        result = api.run_expiry_sweep()
         return result, 200, result["count"] > 0
     if method == "GET" and path == "/catalog":
         query = _query(event)
@@ -2038,6 +2064,8 @@ def _record_id(kind: str, value: dict[str, Any]) -> str:
         "finding": "finding_id",
         "reminder_claim": "dedupe_key",
         "policy_criteria": "criteria_version_id",
+        "expiry": "expiry_id",
+        "renewal": "renewal_id",
     }
     key = keys.get(kind)
     if key is None:
