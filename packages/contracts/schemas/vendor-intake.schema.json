@@ -125,7 +125,7 @@
     "ReviewStatus": {
       "type": "object", "additionalProperties": false,
       "description": "Vendor-safe status projection; internal lifecycle states collapse to a small stage vocabulary and no reviewer-only data is included.",
-      "required": ["invite", "vendor", "product", "submission_status", "intake_analysis_complete", "review_stage", "outcome", "vendor_visible_comment", "next_actions", "checklist"],
+      "required": ["invite", "vendor", "product", "submission_status", "intake_analysis_complete", "review_stage", "outcome", "vendor_visible_comment", "next_actions", "checklist", "required_evidence", "adapted_to_intake"],
       "properties": {
         "invite": {
           "type": "object", "additionalProperties": false,
@@ -153,7 +153,16 @@
           "type": "array", "maxItems": 10,
           "items": {"type": "string", "minLength": 1, "maxLength": 500}
         },
-        "checklist": {"type": "array", "items": {"$ref": "#/$defs/ReviewStatusChecklistItem"}}
+        "checklist": {"type": "array", "items": {"$ref": "#/$defs/ReviewStatusChecklistItem"}},
+        "required_evidence": {
+          "type": "array", "maxItems": 20,
+          "description": "Deterministic policy evidence keys captured at case registration; empty when the case predates per-case adaptation.",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "adapted_to_intake": {
+          "type": "boolean",
+          "description": "True when the requirement checklist was narrowed to the campus intake's policy result."
+        }
       }
     },
     "Submission": {

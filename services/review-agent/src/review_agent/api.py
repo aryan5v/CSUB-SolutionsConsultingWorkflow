@@ -43,6 +43,8 @@ from .orchestration.graph import ReviewWorkflow
 from .orchestration.state import InMemoryCheckpointer
 from .packet import render_packet_pdf
 from .policy.conflicts import default_conflict_registry
+from .policy.engine import build_inputs as build_policy_inputs
+from .policy.engine import evaluate as evaluate_policy
 from .policy.rules import default_ruleset
 from .profiles.service import ProfileError, ReviewProfileService
 from .research import VendorResearchProvider, build_research_provider
@@ -1314,7 +1316,22 @@ class LocalReviewApi:
             f"data_classification={intake.data_classification.value};"
             f"platform={','.join(sorted(intake.platform))}"
         )
-        self._vendor.register_case(case_id, product.product_id, intake.use_case, scope)
+        # Deterministic policy evaluation over the intake so the vendor-facing
+        # checklist can adapt to this case (issue #63). Approved-software status
+        # is unknown at registration; the workflow re-evaluates with it later.
+        policy = evaluate_policy(
+            build_policy_inputs(intake),
+            default_ruleset(),
+            default_conflict_registry(),
+        )
+        self._vendor.register_case(
+            case_id,
+            product.product_id,
+            intake.use_case,
+            scope,
+            required_evidence=policy.required_evidence,
+            policy_route=policy.risk_route.value,
+        )
 
     def _case_payload(self, record: _CaseRecord) -> dict[str, Any]:
         response = {

@@ -921,6 +921,7 @@ _VENDOR_DECODERS: dict[str, Callable[[dict[str, Any]], object]] = {
             **value,
             "lifecycle": CaseLifecycle(value["lifecycle"]),
             "vendor_next_actions": tuple(value.get("vendor_next_actions", [])),
+            "required_evidence": tuple(value.get("required_evidence", [])),
         }
     ),
     "invite": _vendor_invite,

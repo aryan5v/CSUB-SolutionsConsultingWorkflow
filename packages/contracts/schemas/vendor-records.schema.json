@@ -48,7 +48,13 @@
         "vendor_next_actions": {
           "type": "array", "maxItems": 10,
           "items": {"type": "string", "minLength": 1, "maxLength": 500}
-        }
+        },
+        "required_evidence": {
+          "type": "array", "maxItems": 20,
+          "description": "Deterministic policy evidence keys captured at registration (issue #63).",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "policy_route": {"type": ["string", "null"]}
       }
     },
     "CreateVendor": {

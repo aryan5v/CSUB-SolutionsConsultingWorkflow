@@ -10,7 +10,7 @@ import re
 import secrets
 from dataclasses import replace
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 from urllib.parse import quote, urlsplit
 
 from ..contracts.vendor import (
@@ -221,7 +221,16 @@ class VendorBackend:
 
     # Case and invitation lifecycle ------------------------------------------
 
-    def register_case(self, case_id: str, product_id: str, use_case: str, scope: str) -> VendorCase:
+    def register_case(
+        self,
+        case_id: str,
+        product_id: str,
+        use_case: str,
+        scope: str,
+        *,
+        required_evidence: Sequence[str] = (),
+        policy_route: str | None = None,
+    ) -> VendorCase:
         product = self._require("product", product_id, VendorProduct)
         del product
         case = VendorCase(
@@ -229,6 +238,8 @@ class VendorBackend:
             product_id=product_id,
             use_case=self._text(use_case, "use_case"),
             scope=self._text(scope, "scope"),
+            required_evidence=tuple(required_evidence),
+            policy_route=policy_route,
             workspace_id=self.workspace_id,
         )
         self._put("case", case.case_id, case)
@@ -574,6 +585,37 @@ class VendorBackend:
         self._save_progress(invite, updated)
         return updated
 
+    # Deterministic policy evidence keys mapped to the review-profile domain
+    # they belong to (issue #63). The vendor checklist selects only the active
+    # profiles a case's stored ``required_evidence`` maps to; cases without a
+    # stored policy result keep the full active-profile behavior.
+    _EVIDENCE_PROFILE_KEYS: dict[str, str] = {
+        "hecvat": "security",
+        "soc2": "security",
+        "pci": "security",
+        "pentest": "security",
+        "vpat_acr": "accessibility",
+    }
+
+    def _case_profiles(self, case_id: str | None) -> list[Any]:
+        active = self.profiles.active_profiles()
+        if case_id is None:
+            return active
+        case = self.repository.get("case", case_id, workspace_id=self.workspace_id)
+        if not isinstance(case, VendorCase) or not case.required_evidence:
+            return active
+        wanted = {
+            self._EVIDENCE_PROFILE_KEYS[key]
+            for key in case.required_evidence
+            if key in self._EVIDENCE_PROFILE_KEYS
+        }
+        if not wanted:
+            return active
+        selected = [profile for profile in active if profile.profile_key in wanted]
+        # A workspace whose active profiles use other keys keeps the full set:
+        # narrowing may hide requirements, so an empty selection fails open.
+        return selected or active
+
     def unresolved_questions(self, token: str) -> list[dict[str, Any]]:
         invite = self._valid_invite(token)
         submission = self._submission_for_invite(invite.invite_id)
@@ -589,7 +631,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         questions: list[dict[str, Any]] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(invite.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered or criterion.requirement_id in answered:
                     continue
@@ -658,6 +700,10 @@ class VendorBackend:
                 else []
             ),
             "checklist": self._checklist(submission),
+            # Vendor-visible honesty (issue #63): say when the requirement set
+            # was derived from the campus intake rather than the full profile.
+            "required_evidence": list(case.required_evidence),
+            "adapted_to_intake": bool(case.required_evidence),
         }
 
     def _checklist(self, submission: Submission) -> list[dict[str, Any]]:
@@ -681,7 +727,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         items: list[dict[str, Any]] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered:
                     status = "received"
@@ -776,7 +822,7 @@ class VendorBackend:
             if item.submission_id == submission.submission_id
         }
         auto_covered: list[str] = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(invite.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in already_covered:
                     continue
@@ -1408,7 +1454,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         items = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id in covered or criterion.requirement_id in answered:
                     continue
@@ -1733,7 +1779,7 @@ class VendorBackend:
         }
         answered = {key for key, value in submission.answers.items() if value.strip()}
         questions = []
-        for profile in self.profiles.active_profiles():
+        for profile in self._case_profiles(submission.case_id):
             for criterion in profile.criteria:
                 if criterion.requirement_id not in covered | answered:
                     questions.append({"requirement_id": criterion.requirement_id})
