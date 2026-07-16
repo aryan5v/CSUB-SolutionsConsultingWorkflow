@@ -137,8 +137,11 @@ export function VendorThreadPanel({
           setReady(true);
         }
       })
-      .catch(() => {
-        if (active) setReady(true);
+      .catch((reason) => {
+        if (active) {
+          setError(messageFor(reason));
+          setReady(true);
+        }
       });
     return () => {
       active = false;
