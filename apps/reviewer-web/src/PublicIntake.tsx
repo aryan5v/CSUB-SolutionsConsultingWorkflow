@@ -71,9 +71,10 @@ export function ReviewStatusCard({ status }: { status: VendorReviewStatus }) {
           </ul>
         </div>
       )}
-      {status.intake_analysis_complete && (
+      {status.adapted_to_intake && (
         <div className="vp-intake-adaptive-note" role="note">
-          <strong>Checklist updated for this intake</strong>
+          <strong>Tailored to this request</strong>
+          <p>Your campus contact's intake answers determine which documents apply here, so this list may be shorter than a full review.</p>
         </div>
       )}
       {status.checklist.length > 0 ? (

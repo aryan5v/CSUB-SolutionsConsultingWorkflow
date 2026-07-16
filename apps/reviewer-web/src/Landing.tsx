@@ -208,11 +208,8 @@ export default function Landing() {
             Vetted
           </a>
           <nav className="vp-nav-actions" aria-label="Account">
-            <a className="vp-nav-login" href="/login">
-              Sign in
-            </a>
-            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/signup">
-              Create account
+            <a className="vp-btn vp-btn-ink vp-btn-sm" href="/login">
+              Reviewer sign in
             </a>
           </nav>
         </header>
@@ -246,12 +243,12 @@ export default function Landing() {
               and drafts a cited packet for a reviewer.
             </p>
             <div className="vp-cta-row land-fade-up-delay">
-              <a className="vp-btn vp-btn-ink" href="/signup">
-                Create account
+              <a className="vp-btn vp-btn-ink" href="/login">
+                Reviewer sign in
                 <ArrowIcon />
               </a>
-              <a className="vp-btn vp-btn-primary" href="/login">
-                Sign in
+              <a className="vp-btn vp-btn-primary" href="/intake">
+                Submit vendor evidence
               </a>
             </div>
             <ul className="vp-checks land-fade-up-delay-2">
@@ -429,7 +426,6 @@ export default function Landing() {
           </div>
           <nav className="vp-footer-links" aria-label="Footer">
             <a href="/login">Sign in</a>
-            <a href="/signup">Create account</a>
             <a href="/intake">Submit a vendor</a>
             <span className="vp-footer-copy">CSU AI Summer Camp 2026</span>
           </nav>

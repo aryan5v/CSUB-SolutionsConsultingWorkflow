@@ -204,7 +204,7 @@ describe("review API client", () => {
     await client.analyzeCase("TR-260714-014", "approved-row-172");
     await client.recordDecision("TR-260714-014", {
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "approve",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal reviewer note",
@@ -216,7 +216,7 @@ describe("review API client", () => {
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       confirmed_match_id: "approved-row-172",
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
     });
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
       case_id: "TR-260714-014",
@@ -242,7 +242,7 @@ describe("review API client", () => {
 
     await client.recordDecision("TR-260714-014", {
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "request_info",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal note",
@@ -253,7 +253,7 @@ describe("review API client", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       case_id: "TR-260714-014",
       decision_version: 1,
-      reviewer_id: "alex.reviewer@example.edu",
+      reviewer_id: "reviewer@vetted.local",
       action: "request_info",
       decided_at: "2026-07-14T20:30:00.000Z",
       comments: "Internal note",
@@ -283,7 +283,7 @@ describe("review API client", () => {
           human_decision: {
             case_id: "TR-260714-014",
             decision_version: 2,
-            reviewer_id: "alex.reviewer@example.edu",
+            reviewer_id: "reviewer@vetted.local",
             action: "approve",
           },
         }),

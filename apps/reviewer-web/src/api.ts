@@ -271,6 +271,8 @@ export type VendorReviewStatus = {
   vendor_visible_comment: string | null;
   next_actions: string[];
   checklist: VendorChecklistItem[];
+  required_evidence?: string[];
+  adapted_to_intake?: boolean;
 };
 export type EvidenceProcessingState = "queued" | "processing" | "ready" | "failed" | "manual_review";
 // Reviewer-editable evidence-validation thresholds (issue #52). A null threshold
@@ -616,15 +618,15 @@ export function createReviewApiClient(options: ClientOptions = {}) {
     createFromServiceNowImport(externalId: string): Promise<ServiceNowImportCreateResponse> {
       return request(`/servicenow/imports/${encodeURIComponent(externalId)}/create`, { method: "POST" });
     },
-    analyzeCase(caseId: string, confirmedMatchId?: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: "alex.reviewer@example.edu" } : {}) });
+    analyzeCase(caseId: string, confirmedMatchId?: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify(confirmedMatchId ? { confirmed_match_id: confirmedMatchId, reviewer_id: reviewerId } : {}) });
     },
     getCaseResearch(caseId: string): Promise<CaseResearchResponse> {
       if (mode === "fixture") return fixtureOnly({ case_id: caseId, research_performed: false, research: null });
       return request(`/cases/${encodeURIComponent(caseId)}/research`);
     },
-    rerunAnalysis(caseId: string, customInstruction: string): Promise<CaseActionResponse> {
-      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: "alex.reviewer@example.edu", rerun: true, custom_instruction: customInstruction }) });
+    rerunAnalysis(caseId: string, customInstruction: string, reviewerId = "reviewer@vetted.local"): Promise<CaseActionResponse> {
+      return request(`/cases/${encodeURIComponent(caseId)}/analyze`, { method: "POST", body: JSON.stringify({ reviewer_id: reviewerId, rerun: true, custom_instruction: customInstruction }) });
     },
     recordDecision(caseId: string, decision: ReviewDecisionInput): Promise<CaseActionResponse> {
       return request(`/cases/${encodeURIComponent(caseId)}/review`, { method: "POST", body: JSON.stringify({ case_id: caseId, ...decision }) });

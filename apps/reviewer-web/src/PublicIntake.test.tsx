@@ -20,6 +20,8 @@ const status: VendorReviewStatus = {
   vendor_visible_comment: "Please update the accessibility evidence.",
   next_actions: ["Upload the current product-specific ACR."],
   checklist: [],
+  required_evidence: ["vpat_acr"],
+  adapted_to_intake: true,
 };
 
 describe("PublicIntake review status", () => {
@@ -36,7 +38,15 @@ describe("PublicIntake review status", () => {
     expect(html).toContain("Please update the accessibility evidence.");
     expect(html).toContain("What to do next");
     expect(html).toContain("Upload the current product-specific ACR.");
-    expect(html).toContain("Checklist updated for this intake");
+    expect(html).toContain("Tailored to this request");
     expect(html).not.toContain("Internal reviewer finding");
+  });
+
+  it("omits the tailored note when the case has no stored policy result", () => {
+    const legacy = { ...status, adapted_to_intake: false, required_evidence: [] };
+
+    const html = renderToStaticMarkup(<ReviewStatusCard status={legacy} />);
+
+    expect(html).not.toContain("Tailored to this request");
   });
 });

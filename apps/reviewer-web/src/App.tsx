@@ -85,7 +85,6 @@ import { useReviewerSession } from "./AuthGate";
 import "./app.css";
 
 type Page = "dashboard" | "queue" | "review" | "audit" | RestoredPage;
-type QueueMode = "all" | "inbox" | "my-work";
 type Theme = "light" | "dark";
 type Decision = "Pending" | "Changes requested" | "Rejected" | "Approved";
 type ReviewCase = ReviewSummary;
@@ -125,7 +124,7 @@ const reviewCases: ReviewCase[] = [
     matchDetail: "Candidate requires reviewer confirmation",
     stage: "Packet ready",
     updated: "8 min ago",
-    owner: "Alex Reviewer",
+    owner: "Information Security",
   },
   {
     id: "TR-260714-011",
@@ -307,6 +306,12 @@ const initialAuditEvents = [
 
 
 const defaultPacketDraft = "LabArchives may proceed to committee review with the mitigations and owners recorded in this packet. Versioned rules calculated a medium-risk route under rule set v2026.07.14, supported by the attached case evidence. Confirm that the VPAT applies to the requested product version and deployment before making an institutional decision or simulated write-back.";
+function greetingForHour(hour: number) {
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 function statusTone(label: string) {
   if (["Completed", "Verified", "Approved", "Low risk"].includes(label)) return "positive";
   if (["Ready for review", "Medium risk", "Review needed", "Changes requested"].includes(label)) return "warning";
@@ -431,7 +436,7 @@ function DashboardPage({ cases, invites, reviewerName, onNavigate, onOpenCase, o
     <div className="dashboard-content-layer">
     <PageIntro
       eyebrow="Reviewer workspace / Current queue"
-      title={`Good afternoon, ${reviewerName.split(" ")[0]}.`}
+      title={`${greetingForHour(new Date().getHours())}, ${reviewerName.split(" ")[0]}.`}
       actions={<><Button variant="secondary" icon={<Upload size={15} />} onClick={onNewRequest}>New request</Button>{primaryCase && <DitherButton color="orange" variant="solid" bloom="low" className="dashboard-dither-button" onClick={() => onOpenCase(primaryCase)}><ClipboardCheck size={15} /> Review {primaryCase.product}</DitherButton>}</>}
     />
 
@@ -571,24 +576,17 @@ function DashboardPage({ cases, invites, reviewerName, onNavigate, onOpenCase, o
 
 function QueuePage({ cases, onOpenCase, onNewRequest, query, onQueryChange }: { cases: ReviewCase[]; onOpenCase: (review: ReviewCase) => void; onNewRequest: () => void; query: string; onQueryChange: (value: string) => void }) {
   const [filter, setFilter] = useState<"Open" | "All" | QueueStatus>("Open");
-  const [mode, setMode] = useState<QueueMode>("inbox");
-  const modeCases = mode === "inbox" ? cases.filter((review) => review.status !== "Completed") : mode === "my-work" ? cases.filter((review) => review.owner === "Alex Reviewer") : cases;
-  const filteredCases = modeCases.filter((review) => {
+  const filteredCases = cases.filter((review) => {
     const matchesFilter = filter === "All" || (filter === "Open" ? review.status !== "Completed" : review.status === filter);
     const haystack = `${review.product} ${review.vendor} ${review.requester} ${review.id}`.toLowerCase();
     return matchesFilter && haystack.includes(query.toLowerCase());
   });
-  const title = mode === "inbox" ? "Review inbox" : mode === "my-work" ? "My work" : "Review queue";
-  const description = mode === "my-work" ? "Reviews assigned to Alex Reviewer." : "Open reviews and their next action.";
   return <>
-    <PageIntro eyebrow="Review operations" title={title} description={description} actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onNewRequest}>New request</Button>} />
+    <PageIntro eyebrow="Review operations" title="Review queue" description="Open reviews and their next action." actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onNewRequest}>New request</Button>} />
     <section className="panel queue-panel">
       <div className="queue-toolbar">
-        <div className="filter-tabs" aria-label="Review ownership">
-          {(["inbox", "my-work", "all"] as const).map((item) => <button key={item} type="button" className={mode === item ? "active" : ""} onClick={() => setMode(item)} aria-pressed={mode === item}>{item === "my-work" ? "My work" : item === "inbox" ? "Inbox" : "All reviews"}</button>)}
-        </div>
         <div className="filter-tabs" aria-label="Filter reviews">
-          {(["Open", "Ready for review", "Needs evidence", "All"] as const).map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)} aria-pressed={filter === item}>{item}<span>{item === "All" ? modeCases.length : item === "Open" ? modeCases.filter((review) => review.status !== "Completed").length : modeCases.filter((review) => review.status === item).length}</span></button>)}
+          {(["Open", "Ready for review", "Needs evidence", "All"] as const).map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)} aria-pressed={filter === item}>{item}<span>{item === "All" ? cases.length : item === "Open" ? cases.filter((review) => review.status !== "Completed").length : cases.filter((review) => review.status === item).length}</span></button>)}
         </div>
         <label className="search-control"><Search size={15} /><span className="sr-only">Search reviews</span><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="Search requests" /></label>
       </div>
@@ -872,7 +870,7 @@ function ReviewEvidence({ caseId }: { caseId: string }) {
   </>;
 }
 
-function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents }: { caseId: string; decision: Decision; written: boolean; matchConfirmed: boolean; apiEvents: AuditEvent[] }) {
+function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents, reviewerName }: { caseId: string; decision: Decision; written: boolean; matchConfirmed: boolean; apiEvents: AuditEvent[]; reviewerName: string }) {
   const events = useMemo(() => {
     const connected = apiEvents.map((event) => ({
       time: new Date(event.occurred_at).toLocaleString(),
@@ -883,11 +881,11 @@ function AuditPage({ caseId, decision, written, matchConfirmed, apiEvents }: { c
     if (connected.length) return connected;
     const dynamic = [];
     if (written) dynamic.push({ time: "Now", actor: "Mock connector", action: "Completed simulated ServiceNow write-back", detail: "Decision v1 · Packet attached once" });
-    if (decision !== "Pending") dynamic.push({ time: written ? "1 min ago" : "Now", actor: "Alex Reviewer", action: `Recorded decision: ${decision}`, detail: "Packet v3 · Human checkpoint" });
-    if (matchConfirmed) dynamic.push({ time: decision !== "Pending" ? "2 min ago" : "Now", actor: "Alex Reviewer", action: "Confirmed vendor + product candidate", detail: `${caseId} · reviewer-attributed confirmation` });
+    if (decision !== "Pending") dynamic.push({ time: written ? "1 min ago" : "Now", actor: reviewerName, action: `Recorded decision: ${decision}`, detail: "Packet v3 · Human checkpoint" });
+    if (matchConfirmed) dynamic.push({ time: decision !== "Pending" ? "2 min ago" : "Now", actor: reviewerName, action: "Confirmed vendor + product candidate", detail: `${caseId} · reviewer-attributed confirmation` });
     const demoEvents = reviewApi.mode === "fixture" && caseId === "TR-260714-014" ? initialAuditEvents : [];
     return [...dynamic, ...demoEvents];
-  }, [apiEvents, caseId, decision, written, matchConfirmed]);
+  }, [apiEvents, caseId, decision, written, matchConfirmed, reviewerName]);
   return <>
     <PageIntro eyebrow={reviewApi.mode === "fixture" ? "Fixture timeline" : "Connected timeline"} title="Audit" />
     <section className="panel audit-panel">
@@ -1142,11 +1140,11 @@ export default function App() {
     }
     try {
       if (requiresReviewerConfirmation(candidate)) {
-        await reviewApi.confirmCatalogMatch(candidate.record_id, candidate.match_method, "alex.reviewer@example.edu");
+        await reviewApi.confirmCatalogMatch(candidate.record_id, candidate.match_method, reviewerSession.email);
       }
-      const response = await reviewApi.analyzeCase(activeState.case_id, candidate.record_id);
+      const response = await reviewApi.analyzeCase(activeState.case_id, candidate.record_id, reviewerSession.email);
       syncActionResponse(response, true);
-      setToast(`${candidate.canonical_name ?? "Software"} confirmed by Alex Reviewer; deterministic analysis completed.`);
+      setToast(`${candidate.canonical_name ?? "Software"} confirmed by ${reviewerSession.name}; deterministic analysis completed.`);
     } catch (error) {
       setToast(apiErrorMessage(error));
     }
@@ -1186,7 +1184,7 @@ export default function App() {
     try {
       const reviewed = await reviewApi.recordDecision(activeState.case_id, {
         decision_version: decisionVersion(activeState, hasPacketEdits),
-        reviewer_id: "alex.reviewer@example.edu",
+        reviewer_id: reviewerSession.email,
         action,
         decided_at: new Date().toISOString(),
         comments: reviewComment.trim() || undefined,
@@ -1246,7 +1244,7 @@ export default function App() {
     if (!rerunInstruction.trim()) { setToast("Add a short instruction before rerunning."); return; }
     if (!backendConnected || !activeState) { setToast("Connect the local backend to rerun analysis."); return; }
     try {
-      const response = await reviewApi.rerunAnalysis(activeState.case_id, rerunInstruction.trim());
+      const response = await reviewApi.rerunAnalysis(activeState.case_id, rerunInstruction.trim(), reviewerSession.email);
       syncActionResponse(response, true);
       setRerunUsed(true);
       setToast("Rerun complete. A new immutable review version was created and the prior preview is invalidated.");
@@ -1322,7 +1320,7 @@ export default function App() {
         {page === "chat" && <ChatPage notify={setToast} />}
         {page === "settings" && <SettingsPage notify={setToast} />}
         {page === "documentation" && <DocumentationPage notify={setToast} />}
-        {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} apiEvents={auditEvents[selectedReview.id] ?? []} />}
+        {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} apiEvents={auditEvents[selectedReview.id] ?? []} reviewerName={reviewerSession.name} />}
       </main>
     </div>
 
