@@ -250,6 +250,8 @@ def create_server(
                 result = application.resolve_vendor_invite(token, mark_open=True)
             elif method == "POST" and action == "evidence":
                 result = application.vendor_add_evidence(token, self._body())
+            elif method == "GET" and action == "evidence":
+                result = application.vendor_evidence_status(token)
             elif method == "POST" and action == "trust-center":
                 result = application.vendor_set_trust_center(token, self._body())
             elif method == "POST" and action == "answers":
@@ -274,6 +276,8 @@ def create_server(
                 self._json(HTTPStatus.OK, application.get_case_research(case_id))
             elif method == "POST" and suffix == "documents":
                 self._json(HTTPStatus.CREATED, application.add_document(case_id, self._body()))
+            elif method == "GET" and suffix == "documents":
+                self._json(HTTPStatus.OK, application.case_evidence_status(case_id))
             elif method == "POST" and suffix == "analyze":
                 body = self._body()
                 confirmed = body.get("confirmed_match_id")

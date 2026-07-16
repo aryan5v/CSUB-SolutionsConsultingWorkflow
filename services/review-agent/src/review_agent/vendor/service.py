@@ -31,6 +31,7 @@ from ..contracts.vendor import (
     VendorInvite,
     VendorProduct,
 )
+from ..evidence.ingestion import ACCEPTED_CONTENT_TYPES, MAX_EVIDENCE_BYTES
 from ..profiles.service import ProfileError, ReviewProfileService
 from .repository import VendorRepository
 
@@ -392,12 +393,43 @@ class VendorBackend:
         if len(filename) > 255 or "/" in filename or "\\" in filename:
             raise VendorBackendError("invalid_filename", "filename must be a basename")
         content_type = self._text(payload.get("content_type"), "content_type")
+        if content_type not in ACCEPTED_CONTENT_TYPES:
+            raise VendorBackendError(
+                "unsupported_content_type",
+                "evidence type is unsupported and must be reviewed manually",
+                status=415,
+            )
         size = payload.get("size_bytes")
-        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= 50_000_000:
-            raise VendorBackendError("invalid_size", "size_bytes must be between 0 and 50000000")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 1 <= size <= MAX_EVIDENCE_BYTES
+        ):
+            raise VendorBackendError(
+                "invalid_size",
+                f"size_bytes must be between 1 and {MAX_EVIDENCE_BYTES}",
+            )
         digest = self._text(payload.get("sha256"), "sha256").lower()
         if not _SHA256.fullmatch(digest):
             raise VendorBackendError("invalid_hash", "sha256 must be 64 hexadecimal characters")
+        existing = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id == submission.submission_id and item.sha256 == digest
+        ]
+        if existing:
+            artifact = existing[0]
+            if (
+                artifact.filename != filename
+                or artifact.content_type != content_type
+                or artifact.size_bytes != size
+            ):
+                raise VendorBackendError(
+                    "evidence_identity_conflict",
+                    "sha256 is already registered with different immutable metadata",
+                    status=409,
+                )
+            return artifact
         artifact = EvidenceArtifact(
             artifact_id=self._id("evidence", "evidence"),
             submission_id=submission.submission_id,
@@ -415,6 +447,51 @@ class VendorBackend:
         )
         self._save_progress(invite, updated)
         return artifact
+
+    def evidence_upload_context(
+        self, token: str, artifact_id: str
+    ) -> tuple[VendorInvite, Submission, VendorProduct, Vendor, EvidenceArtifact]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        if artifact_id not in submission.evidence_artifact_ids:
+            raise VendorBackendError(
+                "cross_case_evidence", "evidence does not belong to this submission", status=403
+            )
+        artifact = self._require("evidence", artifact_id, EvidenceArtifact)
+        product = self._require("product", invite.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return invite, submission, product, vendor, artifact
+
+    def submission_evidence(
+        self, token: str
+    ) -> tuple[VendorInvite, Submission, list[EvidenceArtifact]]:
+        invite = self._valid_invite(token)
+        submission = self._submission_for_invite(invite.invite_id)
+        allowed = set(submission.evidence_artifact_ids)
+        artifacts = [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.artifact_id in allowed
+        ]
+        return invite, submission, artifacts
+
+    def case_evidence(self, case_id: str) -> list[EvidenceArtifact]:
+        submission_ids = {
+            item.submission_id
+            for item in self._list("submission", Submission)
+            if item.case_id == case_id
+        }
+        return [
+            item
+            for item in self._list("evidence", EvidenceArtifact)
+            if item.submission_id in submission_ids
+        ]
+
+    def case_upload_context(self, case_id: str) -> tuple[VendorCase, VendorProduct, Vendor]:
+        case = self._require("case", case_id, VendorCase)
+        product = self._require("product", case.product_id, VendorProduct)
+        vendor = self._require("vendor", product.vendor_id, Vendor)
+        return case, product, vendor
 
     def set_trust_center_url(self, token: str, url: str) -> Submission:
         invite = self._valid_invite(token)

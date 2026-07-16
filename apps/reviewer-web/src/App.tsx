@@ -67,6 +67,7 @@ import {
   type AuditEvent,
   type CaseActionResponse,
   type CaseIntakeInput,
+  type EvidenceArtifact,
   type QueueStatus,
   type ReviewerRecordContext,
   type ReviewState,
@@ -85,6 +86,7 @@ import {
 } from "./WorkspacePages";
 import { VendorRecordsPage } from "./VendorRecordsPage";
 import { CatalogPage } from "./CatalogPage";
+import { EvidenceProcessingList, evidenceNeedsPolling } from "./EvidenceProcessing";
 import "./app.css";
 
 type Page = "dashboard" | "queue" | "review" | "evidence" | "audit" | RestoredPage;
@@ -793,14 +795,41 @@ function ReviewPage({ review, state, recordContext, recordContextError, decision
   </>;
 }
 
-function EvidencePage() {
+function EvidencePage({ caseId }: { caseId: string }) {
   const [scope, setScope] = useState<"All sources" | EvidenceItem["scope"]>("All sources");
   const [selectedId, setSelectedId] = useState(evidenceItems[1].id);
+  const [processingItems, setProcessingItems] = useState<EvidenceArtifact[]>([]);
+  const [processingError, setProcessingError] = useState("");
+  useEffect(() => {
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const items = await reviewApi.listCaseEvidence(caseId);
+        if (!active) return;
+        setProcessingItems(items);
+        setProcessingError("");
+        if (evidenceNeedsPolling(items)) timer = window.setTimeout(poll, 1500);
+      } catch (error) {
+        if (active) setProcessingError(error instanceof ReviewApiError ? error.message : "Evidence processing states are unavailable.");
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [caseId]);
   const selected = evidenceItems.find((item) => item.id === selectedId) ?? evidenceItems[0];
   const filtered = evidenceItems.filter((item) => scope === "All sources" || item.scope === scope);
   return <>
     <PageIntro eyebrow="Grounded review material" title="Evidence" description="Inspect citations without mixing campus policy, case uploads, or official vendor material." />
     <section className="scope-strip" aria-label="Evidence retrieval boundaries"><FolderLock size={17} aria-hidden="true" /><div><strong>Three retrieval scopes, always separate.</strong><span>Sources can support a finding; they cannot override deterministic policy or a reviewer.</span></div></section>
+    <section className="panel evidence-list-panel" aria-labelledby="processing-state-heading">
+      <div className="preview-toolbar"><span><CircleDotDashed size={17} aria-hidden="true" /><span><strong id="processing-state-heading">Current case processing</strong><small>Case {caseId} · refreshed while work is active</small></span></span></div>
+      {processingError && <p className="record-context-error" role="alert">{processingError}</p>}
+      <EvidenceProcessingList items={processingItems} emptyMessage="No uploaded evidence is registered for this case." />
+    </section>
     <div className="evidence-layout">
       <section className="panel evidence-list-panel">
         <div className="scope-tabs" aria-label="Filter evidence by scope">{(["All sources", "Campus policy", "Case evidence", "Vendor evidence"] as const).map((item) => <button key={item} type="button" className={scope === item ? "active" : ""} onClick={() => setScope(item)} aria-pressed={scope === item}>{item}</button>)}</div>
@@ -1226,7 +1255,7 @@ export default function App() {
         {page === "chat" && <ChatPage notify={setToast} />}
         {page === "settings" && <SettingsPage notify={setToast} />}
         {page === "documentation" && <DocumentationPage notify={setToast} />}
-        {page === "evidence" && <EvidencePage />}
+        {page === "evidence" && <EvidencePage caseId={selectedReview.id} />}
         {page === "audit" && <AuditPage caseId={selectedReview.id} decision={decision} written={written} matchConfirmed={matchConfirmed} apiEvents={auditEvents[selectedReview.id] ?? []} />}
       </main>
     </div>
